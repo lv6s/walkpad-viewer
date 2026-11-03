@@ -1,7 +1,12 @@
 /* 一次性回归：IMU-R 帧解码 + 70→56 压力映射（依据 APK d56-measurement-v3 / d56_pressure_mapping.g.dart） */
 const fs = require('fs');
 
-const src = fs.readFileSync(__dirname + '/wt901ble_live.html', 'utf8').match(/<script>([\s\S]*)<\/script>/)[1];
+/* 代码已拆成多个 js，按 HTML 里的 <script src> 顺序拼接，顺序调整不用改这里 */
+const ROOT = __dirname + '/..';
+const html = fs.readFileSync(ROOT + '/wt901ble_live.html', 'utf8');
+const jsFiles = [...html.matchAll(/<script src="(js\/[^"]+)"><\/script>/g)].map((m) => m[1]);
+if (!jsFiles.length) throw new Error('HTML 里没找到 js 引入');
+const src = jsFiles.map((f) => fs.readFileSync(ROOT + '/' + f, 'utf8')).join('\n;\n');
 
 const any = new Proxy(function () {}, {
   get(t, k) {
@@ -220,7 +225,7 @@ sels.prTopo.value = 'v2';
 W.irBuildLut();
 
 /* ---------- 真机 4266 帧回放（只按 1 号位置） ---------- */
-const lines = fs.readFileSync(__dirname + '/tmp_w02_press1.txt', 'utf8').trim().split('\n');
+const lines = fs.readFileSync(ROOT + '/tmp_w02_press1.txt', 'utf8').trim().split('\n');
 const real = lines.map((l) => l.split('\t')).filter((a) => a.length === 4);
 const frames = real.map((a) => Uint8Array.from(Buffer.from(a[3].trim(), 'hex')));
 chk('抓包 4267 行', real.length === 4267, real.length);
