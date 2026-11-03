@@ -85,6 +85,25 @@ const W = global.window.__wtDebug;
 const ok = [];
 const chk = (n, c, extra) => ok.push((c ? 'PASS ' : 'FAIL ') + n + (extra === undefined ? '' : '  [' + extra + ']'));
 
+/* app 导出的 standard_measurement_frames 全部列名（顺序照真文件抄，
+   取自 Downloads/0001-standard_measurement_frames-*.parquet）。
+   网页导出必须与它逐列同名同序，只在末尾多 4 个自定义列。 */
+const APP_COLS = `schema_id schema_version dataset_id frame_identity product_code session_id
+processing_input_snapshot_id processing_attempt_id alignment_revision_id capture_stream_id
+assigned_side capture_period_id stream_segment_id connection_epoch source_frame_ordinal
+source_frame_number_raw source_frame_number_unwrapped measurement_contract_id
+raw_envelope_contract_version sensor_topology_id pressure_conversion_id
+alignment_timestamp_definition_id source_time_domain source_time_value source_time_unit_code
+device_time_raw device_time_unit_code observed_session_elapsed_us aligned_session_elapsed_us
+effective_time_status effective_elapsed_us pressure_raw_bits pressure_raw_values pressure_values
+pressure_raw_unit_code pressure_value_unit_code sensor_layout_version conversion_version
+imu_raw_bits imu_raw_values imu_physical_values axis_order_code accel_unit_code gyro_unit_code
+imu_unit_status source_asset_ids source_chunk_indices source_record_indices
+source_native_sequences source_native_monotonic_ns source_session_elapsed_us raw_packet_sha256
+capture_disposition parse_status frame_status pressure_status imu_status
+previous_source_frame_ordinal source_frame_ordinal_delta effective_elapsed_delta_us
+continuity_status quality_flag_codes`.split(/\s+/);
+
 /* ---------- 帧构造：CRC 必须是 CCITT-FALSE，且前 138 字节不足补零 ---------- */
 function crc16(bytes) {
   let crc = 0xffff;
@@ -867,6 +886,110 @@ chk('旧 ACK 尾巴不影响后续测量帧', W.ir.bad === 0, W.ir.bad);
     resetClk(L); resetClk(R);
     L.rec.length = 0; R.rec.length = 0;
     L.dev = null; R.dev = null;
+    W2.irHead();
+  }
+
+  /* 17) 导出与 app 的 standard_measurement_frames 逐列对齐 */
+  {
+    chk('sha256 与标准向量一致', W2.sha256Hex('abc')
+      === 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad', W2.sha256Hex('abc'));
+    const u = W2.ulid(1469918176385);
+    chk('ULID 是 26 位 Crockford base32', /^[0-9A-HJKMNP-TV-Z]{26}$/.test(u), u);
+    chk('ULID 前 10 位是可排序的毫秒时间', u.slice(0, 10) === '01ARYZ6S41', u.slice(0, 10));
+
+    const L = W2.irStates.l;
+    W2.setCur('l');
+    L.dev = { name: 'W02-L', gatt: { connected: true } };
+    L.chr = {};
+    L.rec.length = 0;
+    W2.state.rec = [];
+    L.clk = W2.irClkNew(); L.effMs = 0; L.buf = new Uint8Array(0);
+    const D = 20261102, T0 = 141503570;
+    await W2.toggleRec();
+    const f1 = mkFrame([[0, 3, 500]], { seq: 100, date: D, ts: T0 });
+    feed([f1, mkFrame([[0, 3, 600]], { seq: 101, date: D, ts: T0 + 20 }),
+      mkFrame([[0, 3, 700]], { seq: 105, date: D, ts: T0 + 60 })]);
+    W2.stopRec();
+
+    const col = W2.irParquetColumns();
+    const names = col.cols.map((c) => c.name);
+    const at = (k) => col.cols[names.indexOf(k)].data;
+    const leaf = (nm) => col.schema.find((s) => s.name === nm) || {};
+
+    chk('列数 = app 62 + 自定义 4', names.length === 66 && APP_COLS.length === 62, names.length);
+    chk('前 62 列与 app 同名同序', JSON.stringify(names.slice(0, 62)) === JSON.stringify(APP_COLS),
+      names.slice(0, 62).filter((v, i) => v !== APP_COLS[i]).join(',') || 'ok');
+    chk('自定义列排在末尾', JSON.stringify(names.slice(62)) === JSON.stringify(
+      ['temperature_c', 'device_date', 'device_time', 'dropped_frames_before']), names.slice(62).join(','));
+    chk('schema 项数 = 1 + 53 标量 + 13 列表 × 3', col.schema.length === 93, col.schema.length);
+    chk('connection_epoch 是 UINT_64', leaf('connection_epoch').type === 'INT64'
+      && leaf('connection_epoch').converted_type === 'UINT_64', JSON.stringify(leaf('connection_epoch')));
+    chk('source_frame_ordinal 是无符号转换的 INT64', leaf('source_frame_ordinal').type === 'INT64'
+      && !leaf('source_frame_ordinal').converted_type);
+    chk('pressure_raw_bits 是可选 LIST', leaf('pressure_raw_bits').converted_type === 'LIST'
+      && leaf('pressure_raw_bits').repetition_type === 'OPTIONAL');
+    chk('列表元素类型逐列区分', col.schema.filter((s) => s.name === 'element')
+      .map((s) => s.type).join(',') ===
+      'INT32,DOUBLE,DOUBLE,INT32,DOUBLE,DOUBLE,BYTE_ARRAY,INT32,INT64,INT64,INT64,INT64,BYTE_ARRAY',
+      col.schema.filter((s) => s.name === 'element').map((s) => s.type).join(','));
+
+    chk('source_frame_ordinal 在丢帧处跳号', JSON.stringify(at('source_frame_ordinal').map(Number))
+      === '[1,2,6]', at('source_frame_ordinal').map(Number).join(','));
+    chk('source_frame_ordinal_delta = 1/1/4', JSON.stringify(at('source_frame_ordinal_delta')
+      .map((v) => (v === null ? null : Number(v)))) === '[null,1,4]');
+    chk('continuity_status 三态齐全', JSON.stringify(at('continuity_status'))
+      === '["boundary_start","continuous","source_gap"]', at('continuity_status').join(','));
+    chk('丢帧行带 quality flag', JSON.stringify(at('quality_flag_codes'))
+      === '[[],[],["measurement_sequence_gap"]]', JSON.stringify(at('quality_flag_codes')[2]));
+    /* 帧时间映射的精度在 16) 用可控时钟逐毫秒验过，这里只验结构：首行无前值、之后不倒退 */
+    chk('effective 首行无 delta、其余非负', at('effective_elapsed_delta_us')[0] === null
+      && at('effective_elapsed_delta_us').slice(1).every((v) => Number(v) >= 0),
+      at('effective_elapsed_delta_us').join(','));
+    chk('设备日历可用时状态为 mapped', at('effective_time_status').every((v) => v === 'mapped'));
+    chk('device_time_raw 是打包的 HHMMSSmmm', at('device_time_raw')[2] === T0 + 60, at('device_time_raw')[2]);
+    chk('source_time_value 是设备日历的 epoch ms',
+      Number(at('source_time_value')[0]) === new Date(2026, 10, 2, 14, 15, 3, 570).getTime(),
+      String(at('source_time_value')[0]));
+
+    const ids = ['dataset_id', 'session_id', 'processing_input_snapshot_id',
+      'processing_attempt_id', 'alignment_revision_id', 'capture_stream_id', 'stream_segment_id',
+      'capture_period_id'];
+    chk('8 个标识都是 26 位 ULID', ids.every((k) => /^[0-9A-HJKMNP-TV-Z]{26}$/.test(at(k)[0])),
+      ids.map((k) => at(k)[0].length).join(','));
+    chk('frame_identity 是 sha256 且逐行不同',
+      /^[0-9a-f]{64}$/.test(at('frame_identity')[0])
+      && new Set(at('frame_identity')).size === 3, at('frame_identity')[0]);
+    chk('raw_packet_sha256 = 原始帧的 sha256', at('raw_packet_sha256')[0] === W2.sha256Hex(f1),
+      at('raw_packet_sha256')[0]);
+    chk('pressure_raw_bits / imu_raw_bits 是空 list',
+      at('pressure_raw_bits').every((a) => a.length === 0) && at('imu_raw_bits').every((a) => a.length === 0));
+    chk('压力数组宽度 70 / 56', at('pressure_raw_values')[0].length === 70
+      && at('pressure_values')[0].length === 56);
+    chk('source_native_sequences 带 seq', JSON.stringify(at('source_native_sequences')
+      .map((a) => a.map(Number))) === '[[100],[101],[105]]', JSON.stringify(at('source_native_sequences')[2].map(Number)));
+    chk('observed_session_elapsed_us 单调不减',
+      at('observed_session_elapsed_us').every((v, i, a) => i === 0 || Number(v) >= Number(a[i - 1])));
+
+    /* 设备日历解不出来时不冒充设备时间：状态 unavailable、effective 留空 */
+    L.rec.length = 0; L.clk = W2.irClkNew(); L.effMs = 0;
+    await W2.toggleRec();
+    feed([mkFrame([[0, 3, 500]], { seq: 10, date: 0, ts: 0 }),
+      mkFrame([[0, 3, 600]], { seq: 11, date: 0, ts: 0 })]);
+    W2.stopRec();
+    const c2 = W2.irParquetColumns();
+    const n2 = c2.cols.map((c) => c.name);
+    const b2 = (k) => c2.cols[n2.indexOf(k)].data;
+    chk('设备日历不可用时状态 unavailable', b2('effective_time_status').every((v) => v === 'unavailable'),
+      b2('effective_time_status')[0]);
+    chk('unavailable 时 effective / aligned 为空',
+      b2('effective_elapsed_us').every((v) => v === null) && b2('aligned_session_elapsed_us').every((v) => v === null));
+    chk('时间域标 unknown 而不是 device_local_calendar',
+      b2('source_time_domain').every((v) => v === 'unknown'), b2('source_time_domain')[0]);
+    chk('source_time_value 退回本机收到时刻', Number(b2('source_time_value')[0]) > 1e12,
+      String(b2('source_time_value')[0]));
+    chk('时基汇总成 host-fallback', c2.clk === 'host-fallback', c2.clk);
+
+    L.rec.length = 0; L.dev = null;
     W2.irHead();
   }
 

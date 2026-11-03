@@ -107,6 +107,7 @@ function irNewState(foot) {
        coarse = 设备时钟变化太粗（整秒级），这种只能退回用帧的到达时刻 */
     clk: irClkNew(),
     effMs: 0,                                     /* 上一帧的有效帧时间，单调兜底用 */
+    capI: -1,                                     /* 本帧属于第几次连接（导出流/段 id 用） */
     sel: -1, hover: -1, hit: [],
     hist: Array.from({ length: PR_N }, () => []),
     pHit: 0, pFrames: 0, pSkip: 0, pIds: '—', tempRaw: null,
@@ -120,6 +121,18 @@ function irNewState(foot) {
 const IR_SIDES = ['l', 'r'];
 
 const irStates = { l: irNewState('l'), r: irNewState('r') };
+
+/* 每次 BLE 连接一条：导出要给每帧标出它来自哪条采集流/段/连接纪元，
+   断开重连后旧帧仍要指回旧连接，所以按连接建表、帧上只存下标。 */
+const IR_CONNS = [];
+
+function irConnNew() {
+  IR_CONNS.push({
+    stream: ulid(), seg: ulid(),
+    epoch: BigInt(Math.round(performance.now() * 1000)),
+  });
+  return IR_CONNS.length - 1;
+}
 
 let irActive = 'l';
 
@@ -245,6 +258,7 @@ async function irConnect(picked, foot) {
     return;
   }
   await irReadInfo(st);
+  st.capI = irConnNew();
   st.buf = new Uint8Array(0);
   st.samples.length = 0; st.frames = 0; st.bad = 0; st.last = null; st.t0 = 0;
   st.ymax = { a: 1, g: 60 };
@@ -284,7 +298,7 @@ async function irReadInfo(st) {
 function irGone(foot) {
   const st = irStates[foot || irActive];
   clearInterval(st.timer); st.timer = 0;
-  st.chr = null; st.write = null; st.recording = false;
+  st.chr = null; st.write = null; st.recording = false; st.capI = -1;
   log('鞋垫断开（' + st.dev.name + ' · ' + (st.foot === 'r' ? '右脚' : '左脚') + '）', 'w');
   irHead();
   withFoot(st.foot, () => { irPressDraw(); pwDraw(); prNums(); });
@@ -296,7 +310,7 @@ function irClose(foot) {
   clearInterval(st.timer); st.timer = 0;
   const d = st.dev;
   if (st.wait) { clearTimeout(st.wait.timer); st.wait = null; }
-  st.dev = null; st.chr = null; st.write = null; st.recording = false;
+  st.dev = null; st.chr = null; st.write = null; st.recording = false; st.capI = -1;
   st.clk = irClkNew();                 /* 换了设备或重连后重新锚定时钟 */
   st.effMs = 0;
   if (d) {
@@ -838,6 +852,13 @@ function irFrame(f, foot) {
   /* 录制必须在压力解析之后再存快照，否则存到的是上一帧的槽位 */
   if (st.recording) {
     s.slots = Array.from(st.slots);
+    /* 原始通知包留摘要不留字节：导出的 raw_packet_sha256 要它，但整包留着
+       一次长录制就是几十 MB，摘要 64 字符还够用 */
+    s.pkt = sha256Hex(f);
+    /* 没走过连接流程就来的帧（重连前残留、自动化灌帧）也要有连接标识，
+       否则导出这些行的流/段 id 是空的 */
+    if (st.capI < 0) st.capI = irConnNew();
+    s.cap = st.capI;
     /* 有效帧时间 = 帧时刻 − 录制起点。设备的 1 ms 分辨率、校时重锚、退回到达时刻
        都可能让这个差原地不动或倒退，兜个单调，免得行序和 effective_elapsed_us 打架。 */
     s.effMs = Math.max(st.effMs, s.perf - REC_T0);

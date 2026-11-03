@@ -504,8 +504,9 @@ async function toggleRec() {
   if (state.recording) return stopRec();
   state.recording = true;
   REC_T0 = performance.now();
-  FR_DATASET_ID = frUid();
-  FR_SESSION_ID = frUid();
+  FR_DATASET_ID = ulid();
+  FR_SESSION_ID = ulid();
+  FR_PERIOD_ID = ulid();
   for (const f of IR_SIDES) irStates[f].slots.fill(0);
   state.rec = [];
   /* 两脚各自录一份：只录当前活动脚会漏掉另一只，合并导出就缺一半 */
