@@ -136,7 +136,7 @@ window.__wtDebug = { state, header: OFFICIAL_HEADER, build: buildTxt, names: exp
   ir, irOn, irOnOf, irFeed, irFrame, irDraw, irNums, irParquet, irHead, irGone, irClose, isImurDev, setMode,
   irStates, irActive, setCur, withFoot, irRenderPanels, irBindPanel, irNewState, IR_SIDES, footFromName,
   irFramesRows, irParquetBuffer, irParquetColumns,
-  irTick, irRedraw, irBiasTrack, irBiasReset, irBiasText,
+  irTick, irRedraw, irBiasTrack, irBiasReset, irBiasText, irDevClock, irDevSync, irClkNew,
   IR_POS, prColor, prCur, prLabel, irPressDraw, prNums, prReset, irLut, irBuildLut, IR_RAW_V1, IR_RAW_V2, irCrcOk,
   pwDraw, pwPush, pwPick, prFmt, prBase, prSpan, prU, pwName, PR_IDLE,
   irCmd, irCrcAck, irCrcIbm, irAck, irState, irStateText, irQueryState, irSetFmt, irSend, irWrite, irFmtText,

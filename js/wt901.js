@@ -512,6 +512,7 @@ async function toggleRec() {
   let recAny = false;
   for (const f of IR_SIDES) {
     irStates[f].rec = [];
+    irStates[f].effMs = 0;
     irStates[f].recording = irOnOf(f);
     if (irStates[f].recording) recAny = true;
   }

@@ -39,7 +39,8 @@ function irNums(s) {
   $('irN').textContent = ir.frames;
   $('irBad').textContent = ir.bad;
   if (s) {
-    $('irTs').textContent = s.ts + ' ms';
+    /* ts 是打包的 HHMMSSmmm，不是毫秒计数器；跟 date 一起才是设备本地日历 */
+    $('irTs').textContent = s.clk ? s.clk.date + ' ' + s.clk.time : '—';
     $('irAux').textContent = s.tempRaw + ' ≈ ' + (s.tempRaw / 100).toFixed(2) + ' ℃';
     $('irLen').textContent = s.len + ' B / ' + s.pts + ' 点';
     const hex = Array.from(ir.lastRaw || [], (b) => b.toString(16).padStart(2, '0')).join(' ');

@@ -106,6 +106,7 @@ function mkFrame(pts, opt) {
   const dv = new DataView(f.buffer);
   dv.setUint32(3, o.seq || 1, true);
   dv.setUint32(7, o.ts || 0, true);
+  dv.setUint32(11, o.date || 0, true);
   dv.setUint16(15, o.temp === undefined ? 2796 : o.temp, true);
   (o.imu || [0, 0, 2098, 0, 0, 0]).forEach((v, i) => dv.setInt16(17 + 2 * i, v, true));
   for (const [row, col, v] of pts) {
@@ -757,6 +758,116 @@ chk('旧 ACK 尾巴不影响后续测量帧', W.ir.bad === 0, W.ir.bad);
     chk('没有已录数据不弹确认框', asked === false, String(asked));
     delete global.confirm;
     W2.setCur('l');
+  }
+
+  /* 16) 设备日历：帧时间取设备时钟增量（页面时钟只锚定零点），seq 跳号标丢帧 */
+  {
+    /* 帧头 11..14 = 十进制 YYYYMMDD，7..10 = HHMMSSmmm */
+    const c1 = W2.irDevClock(20261102, 141503570);
+    chk('设备日历解码 YYYYMMDD + HHMMSSmmm',
+      !!c1 && c1.date === '2026-11-02' && c1.time === '14:15:03.570', c1 && (c1.date + ' ' + c1.time));
+    const c2 = W2.irDevClock(20000104, 173521843);
+    chk('没对时的设备照样能解（值不可信，只采信增量）', !!c2 && c2.date === '2000-01-04', c2 && c2.date);
+    chk('帧头全 0 不算日历', W2.irDevClock(0, 0) === null, String(W2.irDevClock(0, 0)));
+    chk('非法日/时被拒', W2.irDevClock(20261132, 141503570) === null
+      && W2.irDevClock(20261102, 256000000) === null, '');
+
+    const L = W2.irStates.l, R = W2.irStates.r;
+    W2.setCur('l');
+    L.dev = { name: 'W02-L', gatt: { connected: true } };
+    L.chr = {};
+    R.dev = { name: 'W02-R', gatt: { connected: true } };
+    R.chr = {};
+    const D = 20261102;
+    const resetClk = (st) => { st.clk = W2.irClkNew(); st.effMs = 0; st.buf = new Uint8Array(0); };
+
+    /* 用可控时钟模拟真实到达：设备时间稳定 +20 ms，到达时刻 = 理想时刻 + 抖动（0~9 ms）。
+       抖动不能累积到页面前进里，否则延迟会越滚越大、看起来像设备时钟在漂。 */
+    const realPerf = global.performance;
+    let fnow = 5000, ideal = 5000, tsNow = 141503570;
+    Object.defineProperty(global, 'performance', {
+      value: { now: () => fnow }, configurable: true, writable: true
+    });
+    const put = (foot, seq, dts, jit) => {
+      ideal += 20; tsNow += dts;
+      fnow = ideal + jit;
+      W2.irFeed(mkFrame([[0, 3, 500]], { seq, date: D, ts: tsNow }), foot);
+    };
+    const oneL = (jit, seq, dts) => put('l', seq, dts === undefined ? 20 : dts, jit);
+    /* 同一 tick 两脚各发一帧，按到达先后灌（fnow 只能往前） */
+    const tick = (jitL, jitR, seq) => {
+      ideal += 20; tsNow += 20;
+      for (const [foot, j] of [['l', jitL], ['r', jitR]].sort((a, b) => a[1] - b[1])) {
+        fnow = ideal + j;
+        W2.irFeed(mkFrame([[0, 3, 500]], { seq, date: D, ts: tsNow }), foot);
+      }
+    };
+
+    /* 两脚各自锚定：首帧延迟不同（左 0 / 右 7 ms），但都遇得到 0 延迟那次 */
+    const JL = [0, 6, 3, 9, 1], JR = [7, 0, 5, 9, 1];
+    resetClk(L); resetClk(R);
+    for (let i = 0; i < 45; i++) tick(JL[i % 5], JR[i % 5], 400 + i);
+    tick(4, 9, 900);
+    chk('同一设备时刻的两脚时标对齐（最小延迟锚定）',
+      Math.abs(L.last.perf - R.last.perf) < 2, (L.last.perf - R.last.perf).toFixed(2));
+
+    /* 录制：设备时间每帧 +20，到达抖动 8/1/6 —— 帧时间必须跟设备走 */
+    resetClk(L);
+    for (let i = 0; i < 45; i++) oneL(JL[i % 5], 500 + i);
+    await W2.toggleRec();
+    oneL(8, 100); oneL(1, 101); oneL(6, 105);
+    W2.stopRec();
+    chk('三帧都进了 rec', L.rec.length === 3, L.rec.length);
+    chk('帧上挂了解出来的设备日历', !!L.rec[0].clk && /^\d\d:\d\d:\d\d\.\d{3}$/.test(L.rec[0].clk.time),
+      L.rec[0].clk && L.rec[0].clk.time);
+    const devGap = L.rec[1].effMs - L.rec[0].effMs;
+    chk('帧时间跟设备时钟走（20 ms）', Math.abs(devGap - 20) < 1, devGap.toFixed(2));
+    chk('对照：到达时刻被抖动揉成 13 / 25 ms',
+      Math.abs((L.rec[1].t - L.rec[0].t) * 1000 - 13) < 1
+      && Math.abs((L.rec[2].t - L.rec[1].t) * 1000 - 25) < 1,
+      ((L.rec[1].t - L.rec[0].t) * 1000).toFixed(0) + '/' + ((L.rec[2].t - L.rec[1].t) * 1000).toFixed(0));
+    chk('时间来源标成 device', L.rec[0].tSrc === 'device', L.rec[0].tSrc);
+
+    const col = W2.irParquetColumns();
+    const names = col.cols.map((c) => c.name);
+    const at = (k) => col.cols[names.indexOf(k)].data;
+    chk('导出含 device_date / device_time / dropped_frames_before',
+      ['device_date', 'device_time', 'dropped_frames_before'].every((k) => names.includes(k)), names.length + ' 列');
+    chk('device_date 是设备原文', at('device_date')[0] === '2026-11-02', at('device_date')[0]);
+    chk('device_time 带毫秒', /^\d\d:\d\d:\d\d\.\d{3}$/.test(at('device_time')[2]), at('device_time')[2]);
+    chk('seq 100→101→105 标成缺 0/0/3', JSON.stringify(at('dropped_frames_before')) === '[0,0,3]',
+      JSON.stringify(at('dropped_frames_before')));
+    chk('导出信息里汇总丢帧数', col.drop === 3, col.drop);
+    chk('effective_elapsed_us 由设备时钟推出',
+      Number(at('effective_elapsed_us')[1] - at('effective_elapsed_us')[0]) === 20000
+      && Number(at('effective_elapsed_us')[2] - at('effective_elapsed_us')[0]) === 40000,
+      [0, 1, 2].map((i) => String(at('effective_elapsed_us')[i])).join(','));
+
+    /* 设备被校时（跳 5 s）→ 重锚，不让整段时间轴跟着走 */
+    resetClk(L);
+    for (let i = 0; i < 45; i++) oneL(JL[i % 5], 600 + i);
+    await W2.toggleRec();
+    oneL(2, 200); oneL(2, 201); oneL(2, 202, 5020);
+    W2.stopRec();
+    chk('设备时钟跳 5 s 后重锚', L.clk.reanchor === 1, L.clk.reanchor);
+    chk('重锚不让时间轴跟着跳', Math.abs(L.rec[2].effMs - L.rec[1].effMs) < 100,
+      (L.rec[2].effMs - L.rec[1].effMs).toFixed(1));
+
+    /* 设备时钟只按整秒走 → 不能当时间基准，退回用到达时刻 */
+    resetClk(L);
+    await W2.toggleRec();
+    for (let i = 0; i < 4; i++) oneL(2, 300 + i, 0);
+    W2.stopRec();
+    chk('连续同值判定设备时钟过粗', L.clk.coarse === true, String(L.clk.coarse));
+    chk('过粗之后改用到达时刻', L.rec[3].tSrc === 'host', L.rec[3].tSrc);
+    chk('过粗前几帧仍按设备时钟', L.rec[0].tSrc === 'device', L.rec[0].tSrc);
+    chk('帧时间来源汇总成 mixed', W2.irParquetColumns().clk === 'mixed', W2.irParquetColumns().clk);
+
+    Object.defineProperty(global, 'performance', { value: realPerf, configurable: true, writable: true });
+    resetClk(L); resetClk(R);
+    L.rec.length = 0; R.rec.length = 0;
+    L.dev = null; R.dev = null;
+    W2.irHead();
   }
 
   console.log(ok.join('\n'));

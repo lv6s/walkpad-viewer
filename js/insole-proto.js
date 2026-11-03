@@ -83,6 +83,9 @@ const IR_RAW_V1 = [67, 68, 61, 62, 63, 64, 55, 56, 57, 58, 59, 50, 51, 52, 53, 5
 
 /* 左右脚各一个独立状态对象。每只鞋垫有自己的连接、缓冲区、压力矩阵、
    波形历史与输出格式，互不影响 —— 两只同时连时不能共用一个对象。 */
+/* 设备时钟映射的初始态：ofs=null 表示还没锚定，等第一帧带合法日历时锚定 */
+const irClkNew = () => ({ ofs: null, n: 0, bad: 0, reanchor: 0, same: 0, coarse: false, last: NaN });
+
 function irNewState(foot) {
   return {
     foot,                                        /* 'l' | 'r' */
@@ -100,6 +103,10 @@ function irNewState(foot) {
     /* 零偏由本页估计（设备侧不改）：g 是显示轴上的 °/s，win 存最近几帧的原始值 */
     bias: { g: [0, 0, 0], ready: false, still: 0, win: [] },
     lut: new Int8Array(70).fill(-1),              /* 每只脚各自的槽位映射 */
+    /* 设备日历对页面单调时钟的偏移（ms）：首帧锚定，校时跳变就重锚。
+       coarse = 设备时钟变化太粗（整秒级），这种只能退回用帧的到达时刻 */
+    clk: irClkNew(),
+    effMs: 0,                                     /* 上一帧的有效帧时间，单调兜底用 */
     sel: -1, hover: -1, hit: [],
     hist: Array.from({ length: PR_N }, () => []),
     pHit: 0, pFrames: 0, pSkip: 0, pIds: '—', tempRaw: null,
@@ -290,6 +297,8 @@ function irClose(foot) {
   const d = st.dev;
   if (st.wait) { clearTimeout(st.wait.timer); st.wait = null; }
   st.dev = null; st.chr = null; st.write = null; st.recording = false;
+  st.clk = irClkNew();                 /* 换了设备或重连后重新锚定时钟 */
+  st.effMs = 0;
   if (d) {
     try { if (d.gatt && d.gatt.connected) d.gatt.disconnect(); } catch (e) {}
   }
@@ -698,6 +707,66 @@ function irFeed(chunk, foot) {
   if (st.buf.length > 8192) st.buf = new Uint8Array(0);   // 长期不同步就丢弃，免得越积越大
 }
 
+/* ---------- 设备日历：帧头自带 RTC ---------- */
+
+/* 帧头 11..14 是十进制打包的 YYYYMMDD、7..10 是 HHMMSSmmm（时/分/秒/毫秒各占固定位），
+   与 app 的 d56-yyyyMMdd-HHmmssSSS-calendar-ordinal-us-v2 同口径。
+   格式不成立返回 null。格式成立但值不对（出厂默认没对时，读出来是 2000-01-04）识别
+   不了，所以上层只采信它的增量，从不把它当绝对时间。 */
+function irDevClock(dateRaw, timeRaw) {
+  const y = Math.floor(dateRaw / 1e4), mo = Math.floor(dateRaw / 100) % 100, d = dateRaw % 100;
+  const h = Math.floor(timeRaw / 1e7), mi = Math.floor(timeRaw / 1e5) % 100;
+  const s = Math.floor(timeRaw / 1e3) % 100, ms = timeRaw % 1000;
+  if (y < 2000 || y > 2099 || mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+  if (h > 23 || mi > 59 || s > 59) return null;
+  const p2 = (v) => String(v).padStart(2, '0');
+  return {
+    date: y + '-' + p2(mo) + '-' + p2(d),
+    time: p2(h) + ':' + p2(mi) + ':' + p2(s) + '.' + String(ms).padStart(3, '0'),
+    epoch: new Date(y, mo - 1, d, h, mi, s, ms).getTime(),
+  };
+}
+
+/* 把设备时钟放回页面单调时钟轴上，返回这一帧的时刻。
+   为什么不用到达时刻：BLE 一包两帧、连接间隔、重传都会把帧间隔揉变形，设备时间每帧
+   稳定 +19~20 ms 才是真实采样节奏；页面时钟只负责给出绝对零点。
+   零点不取首帧那一次，而取最初几十帧里延迟最小的那次 —— 传输只会让到达偏晚，取最早
+   的那次才最接近真实偏移。两只脚各自锚定后，跨脚的相对时标才对齐（否则两脚之间会
+   差着各自连接间隔的抖动，做步态相位时就是个固定偏差）。
+   两个兜底：设备中途被校时会跳，偏移差超 2 s 就重锚；设备时钟若只按整秒走（连续几帧
+   一个值都不变），那就没法当时间基准，退回用到达时刻。 */
+const IR_DEV_JUMP_MS = 2000, IR_DEV_COARSE = 3, IR_DEV_ANCHOR = 40;
+
+function irDevSync(st, s, now) {
+  const ck = st.clk;
+  if (!s.clk || ck.coarse) { if (!s.clk) ck.bad++; s.tSrc = 'host'; return now; }
+  const e = s.clk.epoch;
+  if (e === ck.last) {
+    if (++ck.same >= IR_DEV_COARSE) {
+      ck.coarse = true;
+      log('设备时钟变化过粗（连续帧同值），帧时间改用页面时钟', 'w');
+      s.tSrc = 'host';
+      return now;
+    }
+  } else {
+    ck.same = 0;
+  }
+  const lag = now - e;
+  if (ck.ofs === null || Math.abs(e + ck.ofs - now) > IR_DEV_JUMP_MS) {
+    if (ck.ofs !== null) {
+      ck.reanchor++;
+      log('设备时钟跳变 ' + (e + ck.ofs - now).toFixed(0) + ' ms，时间轴已重锚', 'w');
+    }
+    ck.ofs = lag;
+    ck.n = 0;
+  } else if (ck.n < IR_DEV_ANCHOR && lag < ck.ofs) {
+    ck.ofs = lag;
+  }
+  ck.n++; ck.last = e;
+  s.tSrc = 'device';
+  return e + ck.ofs;
+}
+
 function irFrame(f, foot) {
   const st = irStates[foot || irActive];
   const dv = new DataView(f.buffer, f.byteOffset, f.byteLength);
@@ -712,7 +781,7 @@ function irFrame(f, foot) {
     seq: dv.getUint32(3, true), ts: dv.getUint32(7, true), date: dv.getUint32(11, true),
     /* 线序原始 int16，导出 imu_raw_values 用（物理值是它的轴变换结果） */
     raw6: [r1, r2, r3, r4, r5, r6],
-    wallMs: now,
+    clk: irDevClock(dv.getUint32(11, true), dv.getUint32(7, true)),
     ax: r2 * IR_ACC_G, ay: -r1 * IR_ACC_G, az: r3 * IR_ACC_G,
     gx: r5 * IR_GYR_DPS, gy: -r4 * IR_GYR_DPS, gz: r6 * IR_GYR_DPS
   };
@@ -721,6 +790,7 @@ function irFrame(f, foot) {
   s.gx0 = s.gx; s.gy0 = s.gy; s.gz0 = s.gz;
   irBiasTrack(st, s);
   s.gx -= st.bias.g[0]; s.gy -= st.bias.g[1]; s.gz -= st.bias.g[2];
+  s.perf = irDevSync(st, s, now);
   st.frames++; st.fpsN++; st.last = s; st.tempRaw = tempRaw;
   st.lastRaw = f.slice(0, Math.min(f.length, 60));
   st.samples.push(s);
@@ -768,6 +838,10 @@ function irFrame(f, foot) {
   /* 录制必须在压力解析之后再存快照，否则存到的是上一帧的槽位 */
   if (st.recording) {
     s.slots = Array.from(st.slots);
+    /* 有效帧时间 = 帧时刻 − 录制起点。设备的 1 ms 分辨率、校时重锚、退回到达时刻
+       都可能让这个差原地不动或倒退，兜个单调，免得行序和 effective_elapsed_us 打架。 */
+    s.effMs = Math.max(st.effMs, s.perf - REC_T0);
+    st.effMs = s.effMs;
     st.rec.push(s);
   }
 
