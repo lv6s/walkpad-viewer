@@ -1,0 +1,12 @@
+# 解包的 apk：301 MB，只作协议参考，不进版本库
+apk_labpad/
+
+# 临时诊断脚本与产物（tmp_* 前缀是全项目约定的一次性文件）
+tmp_*
+
+# 截图与抓包
+*.png
+*.parquet
+
+# 依赖
+node_modules/
