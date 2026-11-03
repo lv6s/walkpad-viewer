@@ -21,6 +21,14 @@ const SRC = 'C:/Users/35317/Desktop/walkpad/imu_tools/wt901ble_live.html';
 const OUT = 'C:/Users/35317/Desktop/walkpad/imu_tools';
 const html = fs.readFileSync(SRC, 'utf8');
 
+/* 只能对"单文件版"运行：拆分后的 HTML 没有内联 <script>，重跑会读到空代码。
+   需要重做拆分时先取回基线：git checkout 8dfe6f0 -- wt901ble_live.html */
+if (html.lastIndexOf('<script>') < 0) {
+  console.error('当前 wt901ble_live.html 已是拆分结构，没有可切的内联脚本。');
+  console.error('要重做拆分，先取回单文件基线：git checkout 8dfe6f0 -- wt901ble_live.html');
+  process.exit(1);
+}
+
 /* ---------------- 切出三段：head 头、style、body、script ---------------- */
 const styleOpen = html.indexOf('<style>');
 const styleClose = html.indexOf('</style>');
