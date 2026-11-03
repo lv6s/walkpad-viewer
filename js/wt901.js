@@ -206,18 +206,30 @@ function updateBtns() {
   $('btnCsv').disabled = state.rec.length === 0;
   let has = 0;
   for (const d of state.devices.values()) if (d.samples.length || d.frames) has++;
+  for (const f of IR_SIDES) if (irStates[f].samples.length || irStates[f].frames || irStates[f].rec.length) has++;
   $('btnClear').disabled = state.recording || (on === 0 && !has);
 }
 
-/* 清空实时缓冲：接收阶段（未记录）随时可用；记录中直接禁用，避免误删正在采的数据 */
+/* 清空实时缓冲：接收阶段（未记录）随时可用；记录中直接禁用，避免误删正在采的数据。
+   两只脚一起清；零偏是跟着旧数据估出来的，一并重置，免得污染下一轮 */
 function clearData() {
   if (state.recording) return;
   const rows = state.rec.length;
+  const nL = irStates.l.rec.length, nR = irStates.r.rec.length;
+  const irRows = nL + nR;
+  const what = [];
+  if (rows) what.push('WT901 ' + rows + ' 行');
+  if (irRows) what.push('鞋垫 ' + irRows + ' 帧（左 ' + nL + ' / 右 ' + nR + '）');
   let dropRec = true;
-  if (rows) {
-    dropRec = confirm('同时丢弃已录的 ' + rows + ' 行？\n\n确定 = 实时数据和已录数据都清空\n取消 = 只清实时数据和波形，保留已录的 ' + rows + ' 行用于导出');
+  if (what.length) {
+    dropRec = confirm('同时丢弃已录的 ' + what.join('、') + '？\n\n'
+      + '确定 = 实时数据和已录数据都清空\n'
+      + '取消 = 只清实时数据、波形与零偏，已录数据保留用于导出');
   }
-  if (dropRec) state.rec = [];
+  if (dropRec) {
+    state.rec = [];
+    for (const f of IR_SIDES) irStates[f].rec = [];
+  }
   for (const d of state.devices.values()) {
     d.samples.length = 0;
     d.frames = 0; d.rate = 0; d.types = {};
@@ -238,14 +250,21 @@ function clearData() {
   }
   state.T0 = 0;                       // 时间零点重建，清空后曲线从 0 s 开始
   state.tEnd = 0;
-  ir.samples.length = 0; ir.last = null; ir.t0 = 0; ir.frames = 0; ir.bad = 0; ir.rate = 0;
-  ir.buf = new Uint8Array(0); ir.ymax = { a: 1, g: 60 };
-  if (dropRec) ir.rec = [];
-  irNums(null);
-  irDraw();
+  for (const f of IR_SIDES) {
+    const st = irStates[f];
+    st.buf = new Uint8Array(0);
+    st.samples.length = 0; st.last = null; st.t0 = 0; st.frames = 0; st.bad = 0; st.rate = 0;
+    st.ymax = { a: 1, g: 60 };
+    st.slots.fill(0);
+    irBiasReset(st, true);
+    prReset(f);
+    withFoot(f, () => { irNums(null); irDraw(); irPressDraw(); prNums(); pwDraw(); });
+  }
   $('recStat').textContent = state.rec.length ? ('上次记录 ' + state.rec.length + ' 行，可导出') : '未记录';
-  log('已清空实时数据' + (dropRec && rows ? '，并丢弃了 ' + rows + ' 行记录' : (rows ? '，保留 ' + rows + ' 行记录' : '')), 'i');
-  updateBtns();
+  log('已清空实时数据、波形与零偏估计' + (what.length
+    ? '，' + (dropRec ? '丢弃 ' : '保留 ') + what.join('、') + (dropRec ? '' : ' 用于导出')
+    : ''), 'i');
+  irHead();
 }
 
 /* ---------- 解帧（每台独立缓冲） ---------- */

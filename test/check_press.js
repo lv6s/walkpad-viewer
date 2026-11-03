@@ -702,6 +702,63 @@ chk('旧 ACK 尾巴不影响后续测量帧', W.ir.bad === 0, W.ir.bad);
     W2.setCur('l');
   }
 
+  /* 15) 清空数据：两只脚一起清、零偏一并重置；已录数据按确认结果去留 */
+  {
+    const L = W2.irStates.l, R = W2.irStates.r;
+    W2.state.recording = false;
+    L.rec.length = 0; R.rec.length = 0;
+    W2.state.rec = [1, 2];
+    L.recording = true; R.recording = true;
+    L.buf = new Uint8Array(0); R.buf = new Uint8Array(0);
+    W2.irFeed(mkFrame([[0, 3, 700]]), 'l');
+    W2.irFeed(mkFrame([[0, 3, 800]]), 'r');
+    L.recording = false; R.recording = false;
+    L.bias = { g: [1.5, -2, 0.3], ready: true, still: 9, win: [[1, 2, 3, 1]] };
+    R.bias = { g: [0.4, 0.1, -0.2], ready: true, still: 5, win: [[1, 2, 3, 1]] };
+
+    let msg = '';
+    global.confirm = (m) => { msg = m; return true; };
+    W2.clear();
+    chk('确认框报出 WT901 行数', /WT901 2 行/.test(msg), msg.split('\n')[0]);
+    chk('确认框报出鞋垫帧数', /鞋垫 2 帧（左 1 \/ 右 1）/.test(msg), msg.split('\n')[0]);
+    chk('确认后两脚 rec 都清空', L.rec.length === 0 && R.rec.length === 0, L.rec.length + '/' + R.rec.length);
+    chk('确认后 WT901 记录清空', W2.state.rec.length === 0, W2.state.rec.length);
+    chk('两脚实时缓冲都清空', L.samples.length === 0 && R.samples.length === 0
+      && L.frames === 0 && R.frames === 0, L.samples.length + '/' + R.samples.length);
+    chk('左脚零偏重置', L.bias.ready === false && L.bias.g.every((v) => v === 0) && L.bias.win.length === 0,
+      JSON.stringify(L.bias));
+    chk('右脚零偏重置', R.bias.ready === false && R.bias.g.every((v) => v === 0) && R.bias.win.length === 0,
+      JSON.stringify(R.bias));
+    chk('清空后 parquet 回灰', sels['btnIrCsv-l'].disabled === true, String(sels['btnIrCsv-l'].disabled));
+
+    /* 取消 = 只清实时与零偏，已录数据留着导出 */
+    L.recording = true; R.recording = true;
+    L.buf = new Uint8Array(0); R.buf = new Uint8Array(0);
+    W2.irFeed(mkFrame([[0, 3, 701]]), 'l');
+    W2.irFeed(mkFrame([[0, 3, 801]]), 'r');
+    L.recording = false; R.recording = false;
+    W2.state.rec = [1];
+    L.bias = { g: [1, 1, 1], ready: true, still: 3, win: [] };
+    R.bias = { g: [2, 2, 2], ready: true, still: 3, win: [] };
+    global.confirm = (m) => { msg = m; return false; };
+    W2.clear();
+    chk('取消后已录数据保留', L.rec.length === 1 && R.rec.length === 1 && W2.state.rec.length === 1,
+      L.rec.length + '/' + R.rec.length + '/' + W2.state.rec.length);
+    chk('取消后零偏照样重置', L.bias.ready === false && R.bias.ready === false
+      && L.bias.g.every((v) => v === 0) && R.bias.g.every((v) => v === 0),
+      JSON.stringify(L.bias.g) + '/' + JSON.stringify(R.bias.g));
+    chk('保留时 parquet 仍可点', sels['btnIrCsv-l'].disabled === false, String(sels['btnIrCsv-l'].disabled));
+
+    /* 没有任何已录数据就不该弹确认框 */
+    W2.state.rec = []; L.rec.length = 0; R.rec.length = 0;
+    let asked = false;
+    global.confirm = () => { asked = true; return true; };
+    W2.clear();
+    chk('没有已录数据不弹确认框', asked === false, String(asked));
+    delete global.confirm;
+    W2.setCur('l');
+  }
+
   console.log(ok.join('\n'));
   console.log('\n小计 ' + ok.filter((x) => x.startsWith('PASS')).length + '/' + ok.length + ' 通过');
 })();
