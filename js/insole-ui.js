@@ -205,13 +205,7 @@ function pwPush(i, t, v, foot) {
 }
 
 function pwPick(i) {
-  const next = (i === ir.sel) ? -1 : i;
-  /* 换点或取消选中就停掉正在进行的记录，免得数据混到别的点上 */
-  if (ir.pwRecOn && next !== ir.pwRecPt) {
-    ir.pwRecOn = false;
-    log('记录已停止（切换了点位），点「下载」仍可导出刚才那段', 'w');
-  }
-  ir.sel = next;
+  ir.sel = (i === ir.sel) ? -1 : i;
   pwDraw();
   irPressDraw();
   pwName();
@@ -225,12 +219,6 @@ function pwName() {
     $('pwCur').textContent = '—';
     $('pwN').textContent = '0';
   }
-  const canRec = i >= 0 && irOn();
-  $('btnPwRec').disabled = !canRec;
-  $('btnPwCsv').disabled = ir.pwRec.length === 0;
-  $('btnPwRec').textContent = ir.pwRecOn ? '■ 停止记录' : '● 记录这个点';
-  $('btnPwRec').classList.toggle('on', ir.pwRecOn);
-  $('pwRecN').textContent = ir.pwRec.length;
 }
 
 /* 纵轴档位比 IMU 那张细：ADC 值域大，用 1/2/5 会把曲线压到半屏高 */
@@ -481,19 +469,6 @@ function prReset(foot) {
   st.pHit = 0; st.pFrames = 0; st.pSkip = 0; st.pIds = '—'; st.tempRaw = null;
 }
 
-/* 记录只针对选中的这一个点：只导出它的时间序列，不做全 56 点的大表 */
-function pwCsv() {
-  if (!ir.pwRec.length) return;
-  const pt = ir.pwRec[0].pt;
-  const lines = ['time_s,point,row,slot,value_' + prU()];
-  for (const r of ir.pwRec) {
-    lines.push([r.t.toFixed(4), pt, r.row, r.slot, r.v].join(','));
-  }
-  download([lines.join('\r\n')], 'text/csv;charset=utf-8',
-    (ir.foot === 'r' ? 'R' : 'L') + '_point' + pt + '_' + stampName(new Date()) + '.csv');
-  log('已导出点 ' + pt + ' 的 ' + ir.pwRec.length + ' 行', 'i');
-}
-
 /* 点位命中：点内写了数字，但点很密，移上去还要能报出是哪个点 */
 function irHitAt(e) {
   const box = e.currentTarget.getBoundingClientRect();
@@ -514,20 +489,6 @@ function irBindPanel(f) {
 
   $('btnIrOff', f).onclick = () => irClose(f);
   $('btnIrCsv', f).onclick = F(irParquet);
-  $('btnPwCsv', f).onclick = F(pwCsv);
-  $('btnPwRec', f).onclick = F(() => {
-    const i = ir.sel;
-    if (i < 0) return log('先点一个点位再记录', 'w');
-    ir.pwRecOn = !ir.pwRecOn;
-    if (ir.pwRecOn) {
-      ir.pwRec.length = 0;
-      ir.pwRecPt = i;
-      log('开始记录点 #' + (i + 1) + '（第 ' + IR_POS[i].row + ' 行）', 'i');
-    } else {
-      log('停止记录点 #' + (i + 1) + '，共 ' + ir.pwRec.length + ' 行，点「下载」导出', 'i');
-    }
-    pwName();
-  });
   $('btnFmtRead', f).onclick = F(() => {
     const m = irLinkMode(f);
     log('回读设备状态（0x0D，' + (m === 'auto' ? '自动' : IR_LINK_NAME[m]) + '）…', 'i');

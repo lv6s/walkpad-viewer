@@ -90,7 +90,7 @@ function irNewState(foot) {
     recording: false, t0: 0, frames: 0, bad: 0, rate: 0, fpsT: 0, fpsN: 0,
     timer: 0, ymax: { a: 1, g: 60 }, last: null, info: '',
     ps: new Float32Array(PR_N).fill(PR_IDLE), seen: new Uint8Array(PR_N), prec: [],
-    lastSeen: new Float64Array(PR_N).fill(NaN), pwRec: [], pwRecOn: false,
+    lastSeen: new Float64Array(PR_N).fill(NaN),
     frame: new Float32Array(PR_N), frameAt: 0,
     /* 导出用的 70 槽位快照。口径与 app 的 pressure_raw_values 一致：
        每帧只覆盖本帧上报的槽位，没上报的保持上一次的值 —— 它不是一个帧的
@@ -278,7 +278,6 @@ function irGone(foot) {
   const st = irStates[foot || irActive];
   clearInterval(st.timer); st.timer = 0;
   st.chr = null; st.write = null; st.recording = false;
-  if (st.pwRecOn) { st.pwRecOn = false; log('点位记录随断开自动停止，已记 ' + st.pwRec.length + ' 行', 'w'); }
   log('鞋垫断开（' + st.dev.name + ' · ' + (st.foot === 'r' ? '右脚' : '左脚') + '）', 'w');
   irHead();
   withFoot(st.foot, () => { irPressDraw(); pwDraw(); prNums(); });
@@ -291,7 +290,6 @@ function irClose(foot) {
   const d = st.dev;
   if (st.wait) { clearTimeout(st.wait.timer); st.wait = null; }
   st.dev = null; st.chr = null; st.write = null; st.recording = false;
-  st.pwRecOn = false;
   if (d) {
     try { if (d.gatt && d.gatt.connected) d.gatt.disconnect(); } catch (e) {}
   }
@@ -754,10 +752,6 @@ function irFrame(f, foot) {
         st.seen[idx] = 1;
         st.lastSeen[idx] = t;
         fv[idx] = g;
-        if (st.pwRecOn && idx === st.pwRecPt) {
-          st.pwRec.push({ t, pt: idx + 1, row: IR_POS[idx].row, slot: st.lut.indexOf(idx), v: g });
-          if (st.pwRec.length > 300000) { st.pwRecOn = false; log('记录满 30 万行已自动停止，请下载', 'w'); }
-        }
         ids.push(idx + 1);
         if (st.recording) st.prec.push({ t, ch: idx + 1, g, slot: (13 - row) * 5 + col });
       }
@@ -802,7 +796,6 @@ function irTick(foot) {
     irPressDraw();
     prNums();
     pwDraw();
-    $('pwRecN').textContent = st.pwRec.length;
   });
 }
 

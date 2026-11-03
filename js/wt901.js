@@ -501,6 +501,7 @@ async function toggleRec() {
   $('btnRec').classList.add('on');
   $('btnTxt').disabled = true;
   $('btnCsv').disabled = true;
+  irHead();   // 「下载 parquet」的可用态只在 irHead 里算，记录状态一变就要来刷
   requestWake(true);
   const recFeet = IR_SIDES.filter((f) => irStates[f].recording)
     .map((f) => (f === 'r' ? '右' : '左')).join('+');
@@ -518,6 +519,7 @@ function stopRec() {
   requestWake(false);
   if (cam.auto && cam.rec) camStopRec();      // 只停跟随记录起的那次录像，手动开的视频不动
   for (const f of IR_SIDES) irStates[f].recording = false;
+  irHead();   // 停止后立刻让「下载 parquet」变可点，与下面的提示同时成立
   log('停止记录，共 ' + state.rec.length + ' 行，时长 ' + ((Date.now() - state.recT0Wall) / 1000).toFixed(1) + ' s', 'i');
   const nL = irStates.l.rec.length, nR = irStates.r.rec.length;
   if (nL || nR) log('鞋垫帧：左 ' + nL + ' / 右 ' + nR + '，点「下载 parquet」导出（两脚合一份）', 'i');

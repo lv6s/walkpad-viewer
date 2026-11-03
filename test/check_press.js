@@ -42,8 +42,8 @@ const sels = {
   dvUnit: txtEl(''), dvStat: txtEl(''),
   irPress: pressCv, pwChart: pwCv,
   prScaleMax: txtEl(''), pwName: txtEl(''),
-  pwCur: txtEl(''), pwAge: txtEl(''), pwAgeWrap: { hidden: true }, pwN: txtEl(''), pwRecN: txtEl(''),
-  btnPwRec: txtEl(''), btnPwCsv: txtEl('')
+  pwCur: txtEl(''), pwAge: txtEl(''), pwAgeWrap: { hidden: true }, pwN: txtEl(''),
+  btnIrCsv: txtEl('')
 };
 /* 页面按脚取元素（id 带 -l/-r）；测试只驱动左脚，把同一批假元素挂到 -l */
 for (const k of Object.keys(sels)) sels[k + '-l'] = sels[k];
@@ -601,43 +601,30 @@ chk('旧 ACK 尾巴不影响后续测量帧', W.ir.bad === 0, W.ir.bad);
       W2.prCur(0) + '/' + W2.prCur(2));
   }
 
-  /* 11) 单点记录：只记选中的点，换点自动停 */
+  /* 11) 下载 parquet 的可用态跟着录制走：停止记录后必须能点 */
   {
-    W2.ir.dev = { name: 'W02-L', gatt: { connected: true } };
-    W2.ir.chr = {};
-    W2.ir.write = { writeValueWithoutResponse: async () => {} };
-    W2.prReset();
-    W2.ir.t0 = performance.now();
-    W2.ir.sel = 0;
-    W2.ir.pwRec.length = 0; W2.ir.pwRecOn = false;
-
-    document.getElementById('btnPwRec').onclick();
-    chk('点记录后进入记录态', W2.ir.pwRecOn === true, String(W2.ir.pwRecOn));
-    feed([mkFrame([[0, 3, 700]]), mkFrame([[0, 3, 800]])]);
-    chk('记录只收选中点', W2.ir.pwRec.length === 2 && W2.ir.pwRec[0].pt === 1, W2.ir.pwRec.length);
-    chk('记录行带行号与槽位', W2.ir.pwRec[0].row === 1 && W2.ir.pwRec[0].slot === 68,
-      JSON.stringify(W2.ir.pwRec[0]));
-    W2.pwName();
-    chk('记录计数已刷新', sels.pwRecN.textContent === 2, String(sels.pwRecN.textContent));
-
-    /* 别的点上报不该混进来 */
-    const before = W2.ir.pwRec.length;
-    feed([mkFrame([[13, 4, 900]])]);
-    chk('其他点不混入记录', W2.ir.pwRec.length === before, W2.ir.pwRec.length);
-
-    /* 换点自动停，但不丢已记数据 */
-    W2.pwPick(5);
-    chk('换点自动停止记录', W2.ir.pwRecOn === false, String(W2.ir.pwRecOn));
-    chk('已记数据保留可导出', W2.ir.pwRec.length === 2, W2.ir.pwRec.length);
-
-    /* 断开也停 */
-    W2.ir.sel = 0; W2.ir.pwRecOn = true;
-    W2.irGone();
-    chk('断开自动停止记录', W2.ir.pwRecOn === false, String(W2.ir.pwRecOn));
+    const L = W2.irStates.l, R = W2.irStates.r;
+    W2.setCur('l');
+    L.dev = { name: 'W02-L', gatt: { connected: true } };
+    L.chr = {};
+    R.dev = null;
+    L.rec.length = 0; R.rec.length = 0;
+    W2.irHead();
+    chk('没录过帧时 parquet 是灰的', sels['btnIrCsv-l'].disabled === true, String(sels['btnIrCsv-l'].disabled));
+    await W2.toggleRec();
+    feed([mkFrame([[0, 3, 500]])]);
+    chk('录制中的帧落到 rec', L.rec.length === 1, L.rec.length);
+    W2.stopRec();
+    chk('停止记录后 parquet 可点', sels['btnIrCsv-l'].disabled === false, String(sels['btnIrCsv-l'].disabled));
+    await W2.toggleRec();
+    chk('新一轮记录清空后 parquet 回灰', sels['btnIrCsv-l'].disabled === true, String(sels['btnIrCsv-l'].disabled));
+    W2.stopRec();
+    chk('空记录停止后仍灰', sels['btnIrCsv-l'].disabled === true, String(sels['btnIrCsv-l'].disabled));
   }
 
 /* 12) 没上报的时间段按 0 画：不再断线、不再留占位字 */
   {
+    W2.prReset();                  /* frame 是本帧快照：重置后 = 这帧没带值，不靠上一节残留 */
     W2.ir.sel = 0;
     W2.ir.t0 = performance.now() - 8000;
     W2.ir.hist[0].length = 0;

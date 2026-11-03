@@ -2,9 +2,9 @@
 
 /* 面板内元素左右脚各一份（id 带 -l/-r 后缀）：irCur 决定 $() 取哪只脚的，
    也可显式传 foot。面板外元素不受影响。 */
-const IR_ELS = new Set(('btnFmtRead btnFmtSet btnIrCsv btnIrOff btnPwCsv btnPwRec dvFmt dvLink dvStat dvUnit ' +
+const IR_ELS = new Set(('btnFmtRead btnFmtSet btnIrCsv btnIrOff dvFmt dvLink dvStat dvUnit ' +
   'irAux irBad irChart irDev irInfo irLen irN irPress irRate irRaw irStat irTs irax iray iraz irgx irgy irgz ' +
-  'prHover prScaleBar prScaleMax prTopo pwChart pwCur pwLive pwN pwName pwRecN ' +
+  'prHover prScaleBar prScaleMax prTopo pwChart pwCur pwLive pwN pwName ' +
   'irBias irStill btnBiasReset').split(' '));
 
 let irCur = 'l';

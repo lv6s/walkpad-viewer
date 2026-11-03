@@ -168,15 +168,11 @@
         <div class="pwhd">
           <span class="lbl">实时波形</span>
           <b id="pwName-FT">未选中</b>
-          <div class="spacer"></div>
-          <button id="btnPwRec-FT">● 记录这个点</button>
-          <button id="btnPwCsv-FT" disabled>下载</button>
         </div>
         <canvas id="pwChart-FT"></canvas>
         <div class="sub" id="pwLive-FT" style="margin-top:6px">
           <span>当前 <b id="pwCur-FT">—</b></span>
           <span>窗口内 <b id="pwN-FT">0</b> 点</span>
-          <span>记录 <b id="pwRecN-FT">0</b> 行</span>
         </div>
 
       </div>
@@ -209,7 +205,7 @@
     </template>
     <div class="irpanels" id="irPanels"></div>
 
-        <div class="dm" id="prNote">点一个点位看它的实时波形，点「记录这个点」开始采样、再点停止即可下载 CSV。固件是<b>变化才上报</b>：值稳定时不发，所以「最后上报」会一直变旧，那不是卡住。点号与布局图一致（趾端为第 1 行、行内从右往左）；70 个槽位里 14 个不接传感器。数值单位跟固件输出格式走（0 原始 ADC / 4 重量），写入 0x10、回读 0x0D，本机对这两条都不回执但设置确实生效；命令帧须用 144 B。</div>
+        <div class="dm" id="prNote">点一个点位看它的实时波形。固件是<b>变化才上报</b>：值稳定时不发，所以「最后上报」会一直变旧，那不是卡住。点号与布局图一致（趾端为第 1 行、行内从右往左）；70 个槽位里 14 个不接传感器。数值单位跟固件输出格式走（0 原始 ADC / 4 重量），写入 0x10、回读 0x0D，本机对这两条都不回执但设置确实生效；命令帧须用 144 B。</div>
   </div>
 
   <div id="log"></div>
