@@ -1,6 +1,9 @@
 /*
  * 状态推断页面的接线检查：视图切换、模型信息、事件→推理→显示，
- * 以及「缺一只脚」「时间倒退」两条失败路径。
+ * 以及「零偏未就绪」「缺一只脚」「时间倒退」三条失败路径。
+ *
+ * 推断的输入是扣过零偏的角速度，所以喂帧时必须带上已就绪的 bias，
+ * 否则页面按设计拒收——那不是 bug，缺了就测不到正常链路。
  *
  * 需要先起服务（python serve_page.py 8799）与带调试端口的浏览器：
  *   msedge --headless=new --remote-debugging-port=9334 \
@@ -16,19 +19,29 @@ function check(name, ok, extra) {
   else { failed++; console.log('FAIL ' + name + (extra ? ' :: ' + JSON.stringify(extra) : '')); }
 }
 
-/* 2.5 s 的合成步行：不是真数据，只用来打通链路，标签不参与断言 */
-function feed(foot, n, phase) {
+/* 2.5 s 的合成步行：不是真数据，只用来打通链路，标签不参与断言。
+   直接改页面里的 irStates，不另外造 st：推断的就绪判定和喂帧读的是同一份状态。
+   gx 与 gx0 故意不同，用来验证送出去的是扣偏后的那个。 */
+function feed(foot, n, phase, ready = true) {
   return `(() => {
     const feet = Array.isArray(${JSON.stringify(foot)}) ? ${JSON.stringify(foot)} : [${JSON.stringify(foot)}];
-    const n = ${n}, phase = ${phase};
-    for (const foot of feet) for (let i = 0; i < n; i++) {
-      const t = i / 50, w = 2 * Math.PI * 1.8 * t + (feet.length > 1 && foot === 'r' ? Math.PI : phase);
-      __wtDebug.actFeed({ foot }, {
-        perf: 1000 + i * 20,
-        ax: 0.6 * Math.sin(w), ay: 0.15 * Math.sin(2 * w), az: 1 + 0.3 * Math.sin(2 * w),
-        gx: 20 * Math.sin(w), gy: 120 * Math.sin(w), gz: 15 * Math.sin(2 * w),
-        gx0: 20 * Math.sin(w), gy0: 120 * Math.sin(w), gz0: 15 * Math.sin(2 * w)
-      });
+    const n = ${n}, phase = ${phase}, ready = ${ready};
+    for (const foot of feet) {
+      const st = __wtDebug.irStates[foot];
+      st.dev = st.dev || { fake: 1 };
+      st.rate = 50;
+      st.bias.ready = ready;
+      st.bias.g = [0, 0, 0];
+      st.bias.still = ready ? 50 : 0;
+      for (let i = 0; i < n; i++) {
+        const t = i / 50, w = 2 * Math.PI * 1.8 * t + (feet.length > 1 && foot === 'r' ? Math.PI : phase);
+        __wtDebug.actFeed(st, {
+          perf: 1000 + i * 20,
+          ax: 0.6 * Math.sin(w), ay: 0.15 * Math.sin(2 * w), az: 1 + 0.3 * Math.sin(2 * w),
+          gx: 20 * Math.sin(w), gy: 120 * Math.sin(w), gz: 15 * Math.sin(2 * w),
+          gx0: 999 * Math.sin(w), gy0: 999 * Math.sin(w), gz0: 999 * Math.sin(2 * w)
+        });
+      }
     }
     return true;
   })()`;
@@ -58,8 +71,34 @@ function feed(foot, n, phase) {
       + ' return i ? { sha: i.onnx_sha256, axis: i.axis_own_to_train, gyro: i.gyro_source } : null; })()');
     check('模型信息已送达页面', !!info && info.sha.length === 64, info);
     check('轴向为自研→Moticon', JSON.stringify(info.axis) === '[[0,1,0],[-1,0,0],[0,0,1]]', info.axis);
-    check('角速度取原始值', /raw/.test(info.gyro || ''), info.gyro);
+    check('角速度口径为调用方扣偏', /bias-compensated/.test(info.gyro || ''), info.gyro);
 
+    /* 零偏没就绪时必须什么都不做：既不能记账，也不能出一个看似合理的结果 */
+    await c.evalJSON('__wtDebug.actStart()');
+    await sleep(300);
+    await c.evalJSON(feed(['l', 'r'], 150, 0, false));
+    await sleep(700);
+    const rb = await c.evalJSON('(() => { const a = __wtDebug.act; return { on: a.on, steps: a.steps,'
+      + ' buf: a.buf.l.length, why: document.querySelector("#actWhy").textContent }; })()');
+    check('零偏未就绪时不记账', rb.on === true && rb.buf === 0, rb);
+    check('零偏未就绪时不决策', rb.steps === 0, rb);
+    check('零偏未就绪给出等待提示', /等待零偏/.test(rb.why || ''), rb.why);
+
+    await c.evalJSON('(__wtDebug.actStop("test"), true)');
+    await c.evalJSON('__wtDebug.actStart()');
+    await sleep(300);
+    /* 喂一帧就立刻读：跨 evaluate 读会被 200 ms 定时器先把 buffer 发走 */
+    const raw = await c.evalJSON('(() => {'
+      + ' const st = __wtDebug.irStates.l;'
+      + ' st.dev = st.dev || { fake: 1 }; st.rate = 50;'
+      + ' st.bias.ready = true; st.bias.g = [0, 0, 0]; st.bias.still = 50;'
+      + ' __wtDebug.actFeed(st, { perf: 6000, ax: 0, ay: 0, az: 1,'
+      + ' gx: 42, gy: 43, gz: 44, gx0: 999, gy0: 999, gz0: 999 });'
+      + ' const b = __wtDebug.act.buf.l;'
+      + ' return b.length ? b[b.length - 1].slice(4, 7) : null; })()');
+    check('送入的是扣偏后角速度', Array.isArray(raw) && raw[0] === 42 && raw[2] === 44, raw);
+
+    await c.evalJSON('(__wtDebug.actStop("test"), true)');
     await c.evalJSON('__wtDebug.actStart()');
     await sleep(400);
     await c.evalJSON(feed(['l', 'r'], 150, 0));

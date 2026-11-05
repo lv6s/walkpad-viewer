@@ -886,7 +886,7 @@ function irFrame(f, foot) {
   st.frames++; st.fpsN++; st.last = s; st.tempRaw = tempRaw;
   st.lastRaw = f.slice(0, Math.min(f.length, 60));
   st.samples.push(s);
-  /* 状态推断按原始值记账（gx0 那套），不用上面扣过零偏的显示值 */
+  /* 推断吃扣过零偏的 gx/gy/gz（上面这行刚扣完），未就绪时由 actFeed 自己挡住 */
   if (typeof actFeed === 'function') actFeed(st, s);
 
   /* 压力：bitmap 30..43 共 14 字节逐行（bit0..4 对列 0..4，bit5..7 保留为 0），

@@ -87,7 +87,8 @@ class ActEngine:
             "axis_own_to_train": self.axis.tolist(),
             "axis_label": "自研鞋垫 → Moticon 约定（绕 z 轴 +90°）",
             "units": {"acc": "g", "gyro": "dps"},
-            "gyro_source": "raw (no bias subtraction)",
+            "gyro_source": "caller-supplied, expected bias-compensated",
+            "gyro_label": "角速度需由调用方扣掉本机零偏估计（未就绪不得送入）",
             "onnxruntime": ort.__version__,
             "source_student_sha256": m["source_student_sha256"],
         }

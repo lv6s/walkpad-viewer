@@ -1,9 +1,10 @@
 /* 状态推断（walk / run / other）：页面只负责采集、调度和显示。
    模型与预处理都在本地服务里跑（activity/act_imu_v1.onnx + act_engine.py），
-   页面不做任何轴变换或补偿 —— 口径只留一处，否则两边一起改错还互相对不上。
+   页面不做任何轴变换 —— 口径只留一处，否则两边一起改错还互相对不上。
 
-   送出去的一律是原始物理量 ax,ay,az 与 gx0,gy0,gz0：角速度不能用界面上那套
-   扣过零偏的显示值，模型是按「带零偏、不校准」训的，扣了等于换了个输入。 */
+   送出去的是 ax,ay,az 与 gx,gy,gz，其中角速度用本页零偏估计扣过的值。实测零偏
+   可达 18 °/s，叠加后会把 other 大量判成 walk，扣掉才回到训练分布；但估计没就绪
+   时 gx 等于原始值，此时送出去等于静默出错，所以未就绪一律不记账。 */
 
 const ACT_CLASSES = ['walk', 'run', 'other'];
 const ACT_TEXT = { walk: '步行', run: '跑步', other: '其他' };
@@ -12,6 +13,8 @@ const ACT_STEP_MS = 200;
 const ACT_HIST_N = 60;
 /* 单脚最多攒 700 帧（约 13 s）：服务端卡住时不能无限吃内存 */
 const ACT_BUF_MAX = 700;
+/* 零偏被重新初始化的跳变阈值（°/s）。动态估计就绪后是慢跟随，远低于此值 */
+const ACT_BIAS_JUMP = 3;
 
 const ACT_REASON = {
   cold_start: '历史不足 2 秒',
@@ -28,9 +31,19 @@ const ACT_REASON = {
 const act = {
   on: false, inflight: false, last: null, info: null, err: '',
   hist: [], buf: { l: [], r: [] },
+  bias: { l: null, r: null }, waitBias: { l: 0, r: 0 },
   steps: 0, valid: 0, sent: 0, drop: 0,
   fsL: 50, fsR: 50, lastEnd: 0, t0: 0
 };
+
+/* 两脚都拿到零偏估计才允许决策：单脚缺估计时窗内会混进带偏数据 */
+function actBiasReady() {
+  for (const f of ['l', 'r']) {
+    const st = irStates[f];
+    if (!st || !st.dev || !st.bias || !st.bias.ready) return false;
+  }
+  return true;
+}
 
 async function actPost(path, body) {
   const res = await fetch(path, {
@@ -51,7 +64,8 @@ async function actInfo() {
     const sha = (act.info.onnx_sha256 || '').slice(0, 12);
     $('actModel').textContent = '模型 ' + sha + ' · opset ' + (act.info.opset || '?');
     $('actAxis').textContent = '输入口径：' + act.info.axis_label +
-      '；单位 g / °·s⁻¹；角速度不扣零偏；窗口 2 s（' + act.info.window_samples + ' 点 @ ' +
+      '；单位 g / °·s⁻¹；' + (act.info.gyro_label || '角速度扣本页零偏估计') +
+      '；窗口 2 s（' + act.info.window_samples + ' 点 @ ' +
       act.info.fs_out + ' Hz），每 ' + Math.round(act.info.step_s * 1000) + ' ms 一次决策。';
   } catch (e) {
     act.info = null;
@@ -77,6 +91,8 @@ async function actStart() {
     act.steps = 0; act.valid = 0; act.sent = 0; act.drop = 0;
     act.lastEnd = 0; act.t0 = performance.now();
     act.buf.l.length = 0; act.buf.r.length = 0;
+    act.bias.l = null; act.bias.r = null;
+    act.waitBias.l = 0; act.waitBias.r = 0;
     log('状态推断已开始（声明采样率 左 ' + act.fsL + ' / 右 ' + act.fsR + ' Hz）', 'i');
   } catch (e) {
     act.err = e.message;
@@ -89,6 +105,7 @@ function actStop(reason) {
   if (!act.on) return;
   act.on = false;
   act.buf.l.length = 0; act.buf.r.length = 0;
+  act.bias.l = null; act.bias.r = null;
   if (reason) log('状态推断已停止：' + reason, 'w');
   actRender();
 }
@@ -101,8 +118,20 @@ function actFeed(st, s) {
     actStop('帧时间倒退超过 1 秒，请重新开始');
     return;
   }
-  const b = act.buf[st.foot];
-  b.push([s.perf, s.ax, s.ay, s.az, s.gx0, s.gy0, s.gz0]);
+  const f = st.foot;
+  /* 未就绪时 st.bias.g 是 [0,0,0]，gx 就是原始值：送出去等于把实测 -18 °/s 的偏置
+     直接喂给模型，会把 other 判成 walk 且不报错。宁可等它收敛（约 5 s 静立）。 */
+  const bg = st.bias && st.bias.ready ? st.bias.g : null;
+  if (!bg) { act.waitBias[f]++; return; }
+  const prev = act.bias[f];
+  if (prev && Math.hypot(bg[0] - prev[0], bg[1] - prev[1], bg[2] - prev[2]) > ACT_BIAS_JUMP) {
+    /* 零偏被重新初始化：窗内前后不属于同一个输入域，整窗作废重攒 */
+    act.buf[f].length = 0;
+    log('零偏估计已重置，重新积累窗口', 'i');
+  }
+  act.bias[f] = [bg[0], bg[1], bg[2]];
+  const b = act.buf[f];
+  b.push([s.perf, s.ax, s.ay, s.az, s.gx, s.gy, s.gz]);
   if (b.length > ACT_BUF_MAX) {
     const over = b.length - ACT_BUF_MAX;
     b.splice(0, over);
@@ -112,6 +141,8 @@ function actFeed(st, s) {
 
 function actTick() {
   if (!act.on || act.inflight) return;
+  /* 就绪与否看设备侧状态，不看是否喂过帧：缺脚时也要送出去，由服务端判 invalid */
+  if (!actBiasReady()) { actRender(); return; }
   if (!act.buf.l.length && !act.buf.r.length) { actRender(); return; }
   let tEnd = 0;
   for (const f of ['l', 'r']) {
@@ -150,6 +181,18 @@ function actTick() {
   }).finally(() => { act.inflight = false; });
 }
 
+/* 零偏等待期间给出两只脚各自的进度，避免用户分不清是没连上还是没收敛 */
+function actBiasHint() {
+  const one = (f) => {
+    const st = irStates[f];
+    if (!st || !st.dev) return '未连接';
+    if (st.bias && st.bias.ready) return '已就绪';
+    const still = st.bias && st.bias.still ? ' ' + st.bias.still + ' 帧' : '';
+    return '等静止' + still;
+  };
+  return '（左 ' + one('l') + ' · 右 ' + one('r') + '）';
+}
+
 function actRender() {
   if (!$('actCard')) return;
   const on = act.on, last = act.last;
@@ -157,7 +200,8 @@ function actRender() {
   $('btnActOff').disabled = !on;
   $('actState').textContent = act.err
     ? '异常'
-    : (on ? (act.inflight ? '推断中…' : '运行中') : (act.steps ? '已停止' : '未开始'));
+    : (on ? (act.inflight ? '推断中…' : (actBiasReady() ? '运行中' : '等零偏'))
+      : (act.steps ? '已停止' : '未开始'));
 
   const cls = last && last.valid ? last.label : null;
   $('actLabel').textContent = cls ? ACT_TEXT[cls] : '—';
@@ -175,6 +219,7 @@ function actRender() {
   let why;
   if (act.err) why = act.err;
   else if (!on) why = act.steps ? '已停止' : '点「开始推断」，连接鞋垫后自动按 200 ms 出一次结果';
+  else if (!actBiasReady()) why = '等待零偏估计，请两脚静立约 5 秒' + actBiasHint();
   else if (!last) why = '等数据…';
   else if (last.valid) why = '窗口有效 · 支撑点最大滞后 ' + (last.age_ms || 0).toFixed(0) + ' ms';
   else {
@@ -194,8 +239,9 @@ function actRender() {
 
   for (const f of ['l', 'r']) {
     const st = irStates[f];
+    const ready = !!(st.bias && st.bias.ready);
     const txt = (st.dev ? (st.rate || 0) + ' Hz' : '未连接') +
-      (on ? ' · ' + act.buf[f].length + ' 待发' : '');
+      (on ? (ready ? ' · ' + act.buf[f].length + ' 待发' : ' · 等零偏') : '');
     $('actFoot' + f.toUpperCase()).textContent = txt;
   }
   actHistDraw();
