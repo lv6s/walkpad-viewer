@@ -43,7 +43,7 @@ const sels = {
   irPress: pressCv, pwChart: pwCv,
   prScaleMax: txtEl(''), pwName: txtEl(''),
   pwCur: txtEl(''), pwAge: txtEl(''), pwAgeWrap: { hidden: true }, pwN: txtEl(''),
-  btnIrCsv: txtEl('')
+  btnIrParquet: txtEl('')
 };
 /* 页面按脚取元素（id 带 -l/-r）；测试只驱动左脚，把同一批假元素挂到 -l */
 for (const k of Object.keys(sels)) sels[k + '-l'] = sels[k];
@@ -630,16 +630,16 @@ chk('旧 ACK 尾巴不影响后续测量帧', W.ir.bad === 0, W.ir.bad);
     R.dev = null;
     L.rec.length = 0; R.rec.length = 0;
     W2.irHead();
-    chk('没录过帧时 parquet 是灰的', sels['btnIrCsv-l'].disabled === true, String(sels['btnIrCsv-l'].disabled));
+    chk('没录过帧时 parquet 是灰的', sels['btnIrParquet-l'].disabled === true, String(sels['btnIrParquet-l'].disabled));
     await W2.toggleRec();
     feed([mkFrame([[0, 3, 500]])]);
     chk('录制中的帧落到 rec', L.rec.length === 1, L.rec.length);
     W2.stopRec();
-    chk('停止记录后 parquet 可点', sels['btnIrCsv-l'].disabled === false, String(sels['btnIrCsv-l'].disabled));
+    chk('停止记录后 parquet 可点', sels['btnIrParquet-l'].disabled === false, String(sels['btnIrParquet-l'].disabled));
     await W2.toggleRec();
-    chk('新一轮记录清空后 parquet 回灰', sels['btnIrCsv-l'].disabled === true, String(sels['btnIrCsv-l'].disabled));
+    chk('新一轮记录清空后 parquet 回灰', sels['btnIrParquet-l'].disabled === true, String(sels['btnIrParquet-l'].disabled));
     W2.stopRec();
-    chk('空记录停止后仍灰', sels['btnIrCsv-l'].disabled === true, String(sels['btnIrCsv-l'].disabled));
+    chk('空记录停止后仍灰', sels['btnIrParquet-l'].disabled === true, String(sels['btnIrParquet-l'].disabled));
   }
 
 /* 12) 没上报的时间段按 0 画：不再断线、不再留占位字 */
@@ -733,8 +733,10 @@ chk('旧 ACK 尾巴不影响后续测量帧', W.ir.bad === 0, W.ir.bad);
     W2.irFeed(mkFrame([[0, 3, 700]]), 'l');
     W2.irFeed(mkFrame([[0, 3, 800]]), 'r');
     L.recording = false; R.recording = false;
-    L.bias = { g: [1.5, -2, 0.3], ready: true, still: 9, win: [[1, 2, 3, 1]] };
-    R.bias = { g: [0.4, 0.1, -0.2], ready: true, still: 5, win: [[1, 2, 3, 1]] };
+    L.bias = Object.assign(W2.irBiasNew(), { g: [1.5, -2, 0.3], ready: true, still: 9,
+      mode: 'dynamic', anchor: [1.5, -2, 0.3], dynamic: { rows: [[1, 2, 3]] } });
+    R.bias = Object.assign(W2.irBiasNew(), { g: [0.4, 0.1, -0.2], ready: true, still: 5,
+      mode: 'dynamic', anchor: [0.4, 0.1, -0.2], dynamic: { rows: [[4, 5, 6]] } });
 
     let msg = '';
     global.confirm = (m) => { msg = m; return true; };
@@ -745,11 +747,13 @@ chk('旧 ACK 尾巴不影响后续测量帧', W.ir.bad === 0, W.ir.bad);
     chk('确认后 WT901 记录清空', W2.state.rec.length === 0, W2.state.rec.length);
     chk('两脚实时缓冲都清空', L.samples.length === 0 && R.samples.length === 0
       && L.frames === 0 && R.frames === 0, L.samples.length + '/' + R.samples.length);
-    chk('左脚零偏重置', L.bias.ready === false && L.bias.g.every((v) => v === 0) && L.bias.win.length === 0,
+    chk('左脚零偏重置', L.bias.ready === false && L.bias.g.every((v) => v === 0) && L.bias.collect === null && L.bias.still === 0,
       JSON.stringify(L.bias));
-    chk('右脚零偏重置', R.bias.ready === false && R.bias.g.every((v) => v === 0) && R.bias.win.length === 0,
+    chk('右脚零偏重置', R.bias.ready === false && R.bias.g.every((v) => v === 0) && R.bias.collect === null && R.bias.still === 0,
       JSON.stringify(R.bias));
-    chk('清空后 parquet 回灰', sels['btnIrCsv-l'].disabled === true, String(sels['btnIrCsv-l'].disabled));
+    chk('清空后两脚返回自动并清动态窗口和锚', [L, R].every((st) => st.bias.mode === 'dynamic'
+      && st.bias.dynamic === null && st.bias.anchor === null), L.bias.mode + '/' + R.bias.mode);
+    chk('清空后 parquet 回灰', sels['btnIrParquet-l'].disabled === true, String(sels['btnIrParquet-l'].disabled));
 
     /* 取消 = 只清实时与零偏，已录数据留着导出 */
     L.recording = true; R.recording = true;
@@ -758,8 +762,10 @@ chk('旧 ACK 尾巴不影响后续测量帧', W.ir.bad === 0, W.ir.bad);
     W2.irFeed(mkFrame([[0, 3, 801]]), 'r');
     L.recording = false; R.recording = false;
     W2.state.rec = [1];
-    L.bias = { g: [1, 1, 1], ready: true, still: 3, win: [] };
-    R.bias = { g: [2, 2, 2], ready: true, still: 3, win: [] };
+    L.bias = Object.assign(W2.irBiasNew(), { g: [1, 1, 1], ready: true, still: 3,
+      mode: 'dynamic', anchor: [1, 1, 1], dynamic: { rows: [[1, 1, 1]] } });
+    R.bias = Object.assign(W2.irBiasNew(), { g: [2, 2, 2], ready: true, still: 3,
+      mode: 'dynamic', anchor: [2, 2, 2], dynamic: { rows: [[2, 2, 2]] } });
     global.confirm = (m) => { msg = m; return false; };
     W2.clear();
     chk('取消后已录数据保留', L.rec.length === 1 && R.rec.length === 1 && W2.state.rec.length === 1,
@@ -767,7 +773,9 @@ chk('旧 ACK 尾巴不影响后续测量帧', W.ir.bad === 0, W.ir.bad);
     chk('取消后零偏照样重置', L.bias.ready === false && R.bias.ready === false
       && L.bias.g.every((v) => v === 0) && R.bias.g.every((v) => v === 0),
       JSON.stringify(L.bias.g) + '/' + JSON.stringify(R.bias.g));
-    chk('保留时 parquet 仍可点', sels['btnIrCsv-l'].disabled === false, String(sels['btnIrCsv-l'].disabled));
+    chk('保留录制时也返回自动并清动态窗口和锚', [L, R].every((st) => st.bias.mode === 'dynamic'
+      && st.bias.dynamic === null && st.bias.anchor === null), L.bias.mode + '/' + R.bias.mode);
+    chk('保留时 parquet 仍可点', sels['btnIrParquet-l'].disabled === false, String(sels['btnIrParquet-l'].disabled));
 
     /* 没有任何已录数据就不该弹确认框 */
     W2.state.rec = []; L.rec.length = 0; R.rec.length = 0;

@@ -1,5 +1,65 @@
 /* 摄像头：取流、画中画、录像、能力探针。 */
 
+/* ---------- 录像用的格式化 ---------- */
+/* 首选 MP4/H.264（下游工具都吃），浏览器不支持时按顺序退到 WebM */
+const CAM_MIMES = [
+  'video/mp4;codecs=avc1.42E01E',
+  'video/mp4',
+  'video/webm;codecs=vp9',
+  'video/webm;codecs=vp8',
+  'video/webm',
+];
+
+function fmtDur(sec) {
+  const s = Math.max(0, Math.round(sec || 0));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+  return h ? h + ':' + pad(m) + ':' + pad(r) : m + ':' + pad(r);
+}
+
+function fmtSize(n) {
+  if (!n) return '0 B';
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
+  return (n / 1073741824).toFixed(2) + ' GB';
+}
+
+function describeMime(m) {
+  if (!m) return '默认格式';
+  if (m.indexOf('mp4') >= 0) return 'MP4/H.264';
+  if (m.indexOf('webm') >= 0) return 'WebM' + (m.indexOf('vp9') >= 0 ? '/VP9' : m.indexOf('vp8') >= 0 ? '/VP8' : '');
+  return m;
+}
+
+/* MediaRecorder 边录边写头，mvhd 的 duration 落成 0，播放器进度条就废了、也没法按时间定位。
+   按实际录制秒数补回 duration（timescale 不动）；fMP4 或找不到 moov 时原样返回。 */
+async function fixMp4Duration(blob, sec) {
+  const buf = new Uint8Array(await blob.arrayBuffer());
+  const dv = new DataView(buf.buffer);
+  const ascii = (i, s) => { for (let k = 0; k < 4; k++) if (buf[i + k] !== s.charCodeAt(k)) return false; return true; };
+  let moov = -1, moovEnd = buf.length;
+  for (let i = 4; i + 4 <= buf.length; i++) {
+    if (ascii(i, 'moov')) { moov = i; moovEnd = Math.min(buf.length, i - 4 + dv.getUint32(i - 4)); break; }
+  }
+  if (moov < 0) return blob;
+  let at = -1;
+  for (let i = moov; i + 4 <= moovEnd; i++) if (ascii(i, 'mvhd')) { at = i; break; }
+  if (at < 0) return blob;
+  const ver = buf[at + 4];
+  if (ver === 0) {
+    const ts = dv.getUint32(at + 16);
+    if (!ts) return blob;
+    dv.setUint32(at + 20, Math.round(sec * ts));
+  } else if (ver === 1) {
+    const ts = dv.getUint32(at + 24);
+    if (!ts) return blob;
+    const d = Math.round(sec * ts);
+    dv.setUint32(at + 28, Math.floor(d / 4294967296));
+    dv.setUint32(at + 32, d >>> 0);
+  } else return blob;
+  return new Blob([buf], { type: blob.type });
+}
+
 async function camList(prefer) {
   const box = $('camDev');
   if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
@@ -72,6 +132,7 @@ function camFrameCheck(tries) {
     return;
   }
   cam.real = { w: vw, h: vh };
+  camFit();
   const st = cam.stream.getVideoTracks()[0].getSettings() || {};
   if (st.width && (st.width !== vw || st.height !== vh)) {
     log('实际帧 ' + vw + '×' + vh + '，与轨道上报的 ' + st.width + '×' + st.height
@@ -89,7 +150,7 @@ function camFrameCheck(tries) {
 }
 
 function camTick() {
-  if (!cam.stream) return;
+  if (!cam.stream) { camSyncTop(); return; }
   const t = cam.stream.getVideoTracks()[0].getSettings() || {};
   const r = cam.real;
   let s = '预览 ' + (r ? r.w + '×' + r.h : (t.width || '?') + '×' + (t.height || '?'));
@@ -103,6 +164,62 @@ function camTick() {
     if (cam.bps && sec * cam.bps / 8 > 1.5e9) { log('录像按码率估算已超 1.5 GB，自动停止（避免内存耗尽）', 'w'); camStopRec(); }
   }
   $('camStat').textContent = s;
+  camSyncTop();
+}
+
+/* 摄像头状态与上一次录像的下载入口常驻在页面顶部：主操作在维特页时，
+   不用切到「摄像头」视图也能知道在录、录完了能直接下。 */
+function camSyncTop() {
+  const pill = $('camPill'), txt = $('camPillTxt'), dot = $('camDot'), dl = $('btnCamDlTop');
+  pill.hidden = !cam.stream;
+  if (cam.stream) {
+    if (cam.rec) {
+      dot.className = 'dot rec';
+      txt.textContent = '录制 ' + fmtDur((Date.now() - cam.t0) / 1000);
+    } else {
+      const r = cam.real || cam.stream.getVideoTracks()[0].getSettings() || {};
+      dot.className = 'dot on';
+      txt.textContent = '预览 ' + (r.w || r.width || '?') + '×' + (r.h || r.height || '?');
+    }
+  }
+  dl.hidden = !cam.blob;
+  if (cam.blob) { dl.disabled = false; dl.textContent = '⬇ 录像 ' + fmtSize(cam.blob.size); }
+}
+
+/* 有画面才切到「按比例填充」样式；容器高度由卡片 flex 决定，比例交给 object-fit:contain */
+function camFit() {
+  const card = $('camCard');
+  if (!card) return;
+  card.querySelector('.camwrap').classList.toggle('fit', !!cam.stream);
+  syncCamSpan();
+  /* fit 切换后画面脱离文档流，卡片高度这一帧还没更新，下一帧按实测高度定列宽 */
+  requestAnimationFrame(camColFit);
+  requestAnimationFrame(camSpanWide);
+}
+
+/* 画面对外比例（宽/高），已含旋转 */
+function camAspect() {
+  const r = cam.real;
+  if (!r) return 0;
+  const swap = cam.rot === 90 || cam.rot === 270;
+  return swap ? r.h / r.w : r.w / r.h;
+}
+
+/* 摄像头列宽 = 画面宽 + 卡片内边距与边框。高度量 camwrap 实测值：
+   fit 模式下画面是绝对定位，wrap 高度不受卡片宽度影响，两者不会互相喂。 */
+const CAM_COL_PAD = 30;
+
+function camColFit() {
+  const stage = $('stage');
+  const ar = camAspect();
+  if (!stage) return;
+  if (!ar) { stage.style.removeProperty('--cam-col'); return; }
+  const wrap = $('camVideo').parentNode;
+  const h = wrap.classList.contains('fit') && wrap.clientHeight > 120
+    ? wrap.clientHeight
+    : Math.max(240, window.innerHeight - 250);
+  const pic = Math.min(Math.max(h * ar, 200), window.innerWidth * 0.46);
+  stage.style.setProperty('--cam-col', Math.round(pic) + CAM_COL_PAD + 'px');
 }
 
 function camMeter() {
@@ -143,6 +260,7 @@ function camLoopOn() {
   const wrap = $('camVideo').parentNode;
   wrap.classList.toggle('rot', !!cam.rot);
   $('btnCamRot').textContent = '旋转 ' + cam.rot + '°';
+  camFit();
   if (!cam.rot) { camLoopOff(); return; }
   if (cam.raf) return;
   const step = () => {
@@ -165,10 +283,26 @@ function camSetRot() {
   log('画面旋转 ' + cam.rot + '°' + (cam.rec ? '（正在录像：本次录像内部转向会变，建议停掉重录）' : ''), cam.rec ? 'w' : 'i');
 }
 
+/* 设备 / 分辨率 / 帧率跨刷新保留：每开一次页面都要重选一遍，连续采集时很容易漏改 */
+const CAM_CFG_KEY = 'wt901.camcfg';
+const CAM_CFG = camCfgLoad();
+
+function camCfgLoad() {
+  try { return JSON.parse(localStorage.getItem(CAM_CFG_KEY) || 'null') || {}; } catch (e) { return {}; }
+}
+
+function camCfgSave() {
+  try {
+    localStorage.setItem(CAM_CFG_KEY, JSON.stringify({
+      dev: $('camDev').value || cam.devId, res: $('camRes').value, fps: $('camFps').value
+    }));
+  } catch (e) { /* 存不下就算了 */ }
+}
+
 /* 改设备/分辨率/帧率后自动重开；录像中先拦下来，避免把片子切断 */
 /* 摄像头状态。rot 从本地读上次的旋转角，免得每次重设。 */
 const cam = {
-  stream: null, devId: '', rec: null, chunks: [], bytes: 0, auto: false,
+  stream: null, devId: CAM_CFG.dev || '', rec: null, chunks: [], bytes: 0, auto: false,
   t0: 0, name: '', mime: '', blob: null, url: '',
   frames: 0, fps: 0, fpsT: 0, vfc: 0, timer: 0,
   rot: +(localStorage.getItem('wt901.camrot') || 0) || 0,
@@ -245,6 +379,7 @@ async function camOpenStream() {
   $('camHint').classList.add('hide');
   $('btnCamOn').disabled = true; $('btnCamOff').disabled = false;
   $('btnCamRec').disabled = false; $('btnCamShot').disabled = false;
+  $('btnCamPip').disabled = false;
   const cap = cam.caps;
   log('摄像头已开启：轨道 ' + (st.width || '?') + '×' + (st.height || '?') + ' @ ' + Math.round(st.frameRate || 0) + ' fps'
     + (cap && cap.width ? '；驱动给的尺寸上限是 W≤' + cap.width.max + '、H≤' + cap.height.max
@@ -258,8 +393,10 @@ async function camOpenStream() {
   }
   camMeter();
   camFrameCheck(0);
-  camList(cam.devId);
+  camList(cam.devId).then(camCfgSave);   // 设备下拉要等枚举回来才能定位到实际那台
   camLoopOn();
+  camFit();
+  camSyncTop();
 }
 
 function camClose(silent) {
@@ -276,7 +413,10 @@ function camClose(silent) {
   $('camHint').classList.remove('hide');
   $('btnCamOn').disabled = false; $('btnCamOff').disabled = true;
   $('btnCamRec').disabled = true; $('btnCamShot').disabled = true;
+  $('btnCamPip').disabled = true;
   if (!silent) $('camStat').textContent = '未开启';
+  camFit();
+  camSyncTop();
 }
 
 function camStartRec(auto) {
@@ -341,6 +481,9 @@ function camStartRec(auto) {
     $('btnCamRec').textContent = '● 开始录像'; $('btnCamRec').classList.remove('on');
     $('camFile').textContent = cam.name + ' · ' + fmtDur(sec) + ' · ' + fmtSize(blob.size) + '（点「下载录像」保存）';
     log('录像完成 ' + cam.name + '，' + fmtDur(sec) + '，' + fmtSize(blob.size) + '　' + describeMime(cam.mime), 'i');
+    /* 采一次就落一次盘：录像只活在内存里，页面一刷新就没了，丢一整个 take 的代价远大于多一个文件 */
+    download([blob], cam.mime, cam.name);
+    log('已自动存到浏览器下载目录：' + cam.name + '（顶部「⬇ 录像」可重复下载）', 'i');
     if (cam.srcClose) { cam.srcClose(); cam.srcClose = null; }
     cam.rec = null; cam.auto = false;
     camTick();
@@ -494,12 +637,40 @@ $('btnCamProbe').onclick = camProbe;
 
 $('btnCamRot').onclick = camSetRot;
 
-['camRes', 'camDev'].forEach((id) => { $(id).onchange = () => { syncFpsOptions(); camCfgChanged(); }; });
+/* 上次用的档位；换过摄像头导致选项不存在时会被浏览器置空，回落到「自动」 */
+if (CAM_CFG.res) $('camRes').value = CAM_CFG.res;
+if (CAM_CFG.fps) $('camFps').value = CAM_CFG.fps;
 
-$('camFps').onchange = camCfgChanged;
+['camRes', 'camDev'].forEach((id) => { $(id).onchange = () => { syncFpsOptions(); camCfgChanged(); camCfgSave(); }; });
+
+$('camFps').onchange = () => { camCfgChanged(); camCfgSave(); };
+
+$('btnCamPip').onclick = async () => {
+  if (!cam.stream) return log('先点「开启」拿到画面再用画中画', 'w');
+  try {
+    if (document.pictureInPictureElement) { await document.exitPictureInPicture(); return; }
+    if (cam.rot) return log('画面旋转过时预览走画布，不能开画中画（画布无音视频轨道）；先转回 0°', 'w');
+    await $('camVideo').requestPictureInPicture();
+  } catch (e) {
+    log('画中画打不开：' + (e.message || e) + '（这个浏览器或这个摄像头不支持）', 'w');
+  }
+};
 
 $('btnCamDl').onclick = () => {
   if (!cam.blob) return;
   download([cam.blob], cam.mime, cam.name);
   $('camFile').textContent = cam.name + ' · ' + fmtSize(cam.blob.size) + '（已保存到下载目录）';
+};
+
+$('btnCamDlTop').onclick = () => {
+  if (!cam.blob) return;
+  download([cam.blob], cam.mime, cam.name);
+  log('已重新下载 ' + cam.name + '（' + fmtSize(cam.blob.size) + '）', 'i');
+};
+
+/* 跟随开关要跨刷新保留：忘了勾会静默漏录一整段视频，而界面在别的视图时看不出来 */
+const CAM_LINK_KEY = 'cam.link';
+try { $('camLink').checked = localStorage.getItem(CAM_LINK_KEY) !== '0'; } catch (e) {}
+$('camLink').onchange = () => {
+  try { localStorage.setItem(CAM_LINK_KEY, $('camLink').checked ? '1' : '0'); } catch (e) {}
 };

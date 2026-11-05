@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WT901BLE 多设备实时采集</title>
+<!-- 空 favicon：不写死这条浏览器会去要 /favicon.ico，本地服务回 404 会在控制台留错误 -->
+<link rel="icon" href="data:,">
 <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
@@ -12,19 +14,20 @@
   <header>
     <h1>多设备实时采集<span>WT901BLE · Web Bluetooth</span></h1>
     <div class="pill"><span class="dot" id="dot"></span><span id="status">未连接</span></div>
+    <div class="pill" id="camPill" hidden title="摄像头状态：任何视图都可见"><span class="dot" id="camDot"></span><span id="camPillTxt">摄像头</span></div>
     <div class="spacer"></div>
     <button class="primary" id="btnAdd">添加设备</button>
     <button id="btnReconn">全部重连</button>
     <button id="btnDropAll" disabled>全部断开</button>
     <button id="btnClear" disabled title="清空实时缓冲、波形与零偏估计（记录过程中不可用）">清空数据</button>
     <button class="rec" id="btnRec" disabled>● 开始记录</button>
+    <button id="btnCamDlTop" hidden title="本次采集的录像；停止记录时已自动存到下载目录，这里可重复下载">⬇ 录像</button>
     <button id="btnTxt" disabled title="官方 WitMotion 导出格式（制表符 23 列 .txt）">导出 TXT</button>
-    <button id="btnCsv" disabled title="长表 CSV，含相对秒">导出 CSV</button>
   </header>
 
   <div class="toolbar">
     <span class="lbl">视图</span>
-    <div class="seg" id="segMode">
+    <div class="seg" id="segMode" title="可多选：同时开几个面板就并排看几个">
       <button data-m="grid" class="on">分设备</button>
       <button data-m="compare">对比叠加</button>
       <button data-m="cam">摄像头</button>
@@ -51,9 +54,10 @@
     <span class="dm" id="recStat">未记录</span>
   </div>
 
+  <div id="stage">
   <div id="devGrid"></div>
 
-  <div class="card cmp" id="cmpCard" style="margin-top:12px">
+  <div class="card cmp" id="cmpCard">
     <div class="toolbar" style="margin:0 0 6px">
       <span class="lbl">多台叠加</span>
       <div class="spacer"></div>
@@ -63,7 +67,7 @@
     <div class="legend" id="legend"></div>
   </div>
 
-  <div class="card" id="camCard" style="margin-top:12px">
+  <div class="card" id="camCard">
     <div class="toolbar" style="margin:0 0 8px">
       <span class="lbl">摄像头</span>
       <select id="camDev"><option value="">默认摄像头</option></select>
@@ -84,6 +88,7 @@
       </select>
       <button class="primary" id="btnCamOn">开启</button>
       <button id="btnCamOff" disabled>关闭</button>
+      <button id="btnCamPip" disabled title="把人像浮在屏幕最上层：切到别的程序、全屏做动作也看得见">画中画</button>
       <div class="spacer"></div>
       <button class="rec" id="btnCamRec" disabled>● 开始录像</button>
       <button id="btnCamShot" disabled>拍照</button>
@@ -104,7 +109,7 @@
     </div>
   </div>
 
-  <div class="card" id="imurCard" style="margin-top:12px">
+  <div class="card" id="imurCard">
     <div class="toolbar" style="margin:0 0 8px">
       <span class="lbl">自研鞋垫</span>
       <button class="primary" id="btnIrOn">连接鞋垫</button>
@@ -119,7 +124,7 @@
         <span class="dm" id="irInfo-FT"></span>
         <div class="spacer"></div>
         <button id="btnIrOff-FT" disabled>断开</button>
-        <button id="btnIrCsv-FT" disabled>下载 parquet</button>
+        <button id="btnIrParquet-FT" disabled>下载 parquet</button>
       </div>
     <div class="irgrid">
       <div>
@@ -150,9 +155,11 @@
           <span>帧长 <b id="irLen-FT">—</b></span>
         </div>
         <div class="sub">
-          <span>零偏 <b id="irBias-FT">未估计</b></span>
-          <span>静止帧 <b id="irStill-FT">0</b></span>
-          <button id="btnBiasReset-FT" title="只清空本页的估计，不改设备里的任何值">重置</button>
+          <span>零偏 <b id="irBias-FT">未校准</b></span>
+          <label>模式 <select id="irBiasMode-FT" title="默认为自动模式：网页六轴无法区分恒速转动与常量偏置，稳定匀速转动也可能误判为静止并被补偿；未就绪时显示原始角速度，静止后自动生效。连上、重置或重连后自动等待静止重新学习；切到手动模式可锁定当前补偿。仅改本页显示与导出，不改设备。"><option value="dynamic" selected>自动模式</option><option value="manual">手动模式</option></select></label>
+          <span>候选采样 <b id="irStill-FT">0</b> 帧</span>
+          <button id="btnBiasCal-FT" title="固定静置至少3秒；仅改本页补偿，不改设备或导出。自动模式会自行学习，此按钮用于立即手动校准；手动模式通过后锁定。">静止校准</button>
+          <button id="btnBiasReset-FT" title="只清空本页的补偿，不改设备或导出；重置后自动等待静止重新学习。">重置</button>
         </div>
         <div class="dm" id="irRaw-FT" style="max-width:100%"></div>
       </div>
@@ -206,6 +213,8 @@
     <div class="irpanels" id="irPanels"></div>
 
         <div class="dm" id="prNote">点一个点位看它的实时波形。固件是<b>变化才上报</b>：值稳定时不发，所以「最后上报」会一直变旧，那不是卡住。点号与布局图一致（趾端为第 1 行、行内从右往左）；70 个槽位里 14 个不接传感器。数值单位跟固件输出格式走（0 原始 ADC / 4 重量），写入 0x10、回读 0x0D，本机对这两条都不回执但设置确实生效；命令帧须用 144 B。</div>
+  </div>
+
   </div>
 
   <div id="log"></div>

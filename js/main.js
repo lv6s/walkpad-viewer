@@ -56,7 +56,7 @@ function loop() {
       drawGizmo(d.ui.giz, last && last.ang);
       drawDeviceChart(d);
     }
-    if (state.mode === 'compare') drawCompare();
+    if (state.views.has('compare')) drawCompare();
   }
 
   if (now - lastStat > 200) {
@@ -89,7 +89,7 @@ function loop() {
     } else {
       $('recStat').textContent = state.rec.length ? ('上次记录 ' + state.rec.length + ' 行，可导出') : '未记录';
     }
-    if (state.mode === 'compare') renderLegend();
+    if (state.views.has('compare')) renderLegend();
     const tk = new Set();
     for (const d of state.devices.values()) Object.keys(d.types).forEach((k) => tk.add(k));
     $('ftypes').textContent = tk.size ? [...tk].sort().join(' ') : '—';
@@ -98,18 +98,22 @@ function loop() {
   requestAnimationFrame(loop);
 }
 
-window.addEventListener('resize', () => { lastDraw = 0; irDraw(); irPressDraw(); });
+window.addEventListener('resize', () => { lastDraw = 0; irDraw(); irPressDraw(); camColFit(); camSpanWide(); });
+
+/* 吸顶 header 只在内容滚到它下面时才加投影，静止时保持与页面平齐 */
+const headerEl = document.querySelector('header');
+window.addEventListener('scroll', () => headerEl.classList.toggle('stuck', scrollY > 4), { passive: true });
 
 /* 启动 */
 (async function boot() {
+  state.views = loadViews();
+  syncViewBtns();
+  applyViews();
   syncGrid();
   requestAnimationFrame(loop);
   const qs = new URLSearchParams(location.search);
   const view = qs.get('view');
-  if (view) {
-    const b = document.querySelector('#segMode [data-m="' + view + '"]');
-    if (b) b.click();
-  }
+  if (view && VIEWS.includes(view)) setMode(view, true);
   const demo = qs.get('demo');
   if (demo) return startDemo(+demo);
   log('页面已就绪。点「添加设备」逐台授权；下次可点「全部重连」直接恢复。', 'i');
@@ -137,7 +141,7 @@ window.__wtDebug = { state, header: OFFICIAL_HEADER, build: buildTxt, names: exp
   irStates, irActive, setCur, withFoot, irRenderPanels, irBindPanel, irNewState, IR_SIDES, footFromName,
   irFramesRows, irParquetBuffer, irParquetColumns, IR_CONNS, irConnNew,
   ulid, sha256Hex,
-  irTick, irRedraw, irBiasTrack, irBiasReset, irBiasText, irDevClock, irDevSync, irClkNew,
+  irTick, irRedraw, irBiasNew, irBiasSetMode, irBiasDynamic, irBiasStart, irBiasCancel, irBiasTrack, irBiasReset, irBiasText, irDevClock, irDevSync, irClkNew,
   IR_POS, prColor, prCur, prLabel, irPressDraw, prNums, prReset, irLut, irBuildLut, IR_RAW_V1, IR_RAW_V2, irCrcOk,
   pwDraw, pwPush, pwPick, prFmt, prBase, prSpan, prU, pwName, PR_IDLE,
   irCmd, irCrcAck, irCrcIbm, irAck, irState, irStateText, irQueryState, irSetFmt, irSend, irWrite, irFmtText,

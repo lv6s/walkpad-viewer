@@ -97,7 +97,7 @@ function buildCard(d) {
           '</div>' +
         '</div>' +
       '</div>' +
-      '<canvas class="dchart"></canvas>' +
+      '<div class="dchartwrap"><canvas class="dchart"></canvas></div>' +
     '</div>';
 
   root.querySelector('.sw').style.background = d.color;
@@ -152,6 +152,7 @@ function syncGrid() {
   }
   syncNames();
   updateBtns();
+  syncCamSpan();   /* 设备增减会改变摄像头卡要不要占半列 */
 }
 
 $('devGrid').onclick = async (e) => {
@@ -201,9 +202,9 @@ function onlineCount() {
 function updateBtns() {
   const on = onlineCount() + (irOnOf('l') ? 1 : 0) + (irOnOf('r') ? 1 : 0);
   $('btnDropAll').disabled = on === 0;
-  $('btnRec').disabled = on === 0 && !state.recording;
+  /* 只开摄像头也算一次采集：这时没有 IMU 也要能一键起停 */
+  $('btnRec').disabled = on === 0 && !(cam.stream && $('camLink').checked) && !state.recording;
   $('btnTxt').disabled = state.rec.length === 0;
-  $('btnCsv').disabled = state.rec.length === 0;
   let has = 0;
   for (const d of state.devices.values()) if (d.samples.length || d.frames) has++;
   for (const f of IR_SIDES) if (irStates[f].samples.length || irStates[f].frames || irStates[f].rec.length) has++;
@@ -417,8 +418,8 @@ $('btnAdd').onclick = async () => {
     if (e.name !== 'NotFoundError') log('添加设备未完成：' + (e.message || e), 'e');
     return;
   }
-  if (isImurDev(device)) {                      // 自研 IMU-R 走另一条协议，切到它自己的页
-    setMode('imur', true);
+  if (isImurDev(device)) {                      // 自研 IMU-R 走另一条协议，把它的页加进当前视图
+    if (!state.views.has('imur')) toggleView('imur');
     return irConnect(device);
   }
   try {
@@ -521,14 +522,18 @@ async function toggleRec() {
   $('btnRec').textContent = '■ 停止记录';
   $('btnRec').classList.add('on');
   $('btnTxt').disabled = true;
-  $('btnCsv').disabled = true;
   irHead();   // 「下载 parquet」的可用态只在 irHead 里算，记录状态一变就要来刷
   requestWake(true);
   const recFeet = IR_SIDES.filter((f) => irStates[f].recording)
     .map((f) => (f === 'r' ? '右' : '左')).join('+');
   log('开始记录（统一时间轴，' + onlineCount() + ' 台'
     + (recAny ? ' + 鞋垫 ' + recFeet : '') + '）', 'i');
-  if ($('camLink').checked && cam.stream && !cam.rec) camStartRec(true);
+  if ($('camLink').checked) {
+    if (cam.stream && !cam.rec) camStartRec(true);
+    else if (!cam.stream) log('摄像头没「开启」，本次只录 IMU/鞋垫、不录视频（要录请到「摄像头」视图点开启）', 'w');
+  } else if (cam.stream && !cam.rec) {
+    log('「录像跟随」没勾选，本次不录视频', 'w');
+  }
 }
 
 function stopRec() {
@@ -770,18 +775,4 @@ $('btnTxt').onclick = () => {
   download(buildTxt(), 'text/plain;charset=utf-8', stampName(new Date()) + '.txt');
   const names = [...exportNames().values()].join('、');
   log('已导出官方格式 ' + rows + ' 行（' + state.devices.size + ' 台合并）设备名：' + names, 'i');
-};
-
-$('btnCsv').onclick = () => {
-  const names = exportNames();
-  const f = (v, dec) => (v === null || v === undefined || !isFinite(v)) ? '' : v.toFixed(dec === undefined ? 4 : dec);
-  const rows = state.rec.slice().sort((a, b) => a.t - b.t);
-  const head = 'device,time_iso,t_s,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,roll_deg,pitch_deg,yaw_deg';
-  const lines = ['\ufeff' + head];
-  for (const r of rows) {
-    const c = r.line.split('\t');
-    lines.push([names.get(r.k) || 'WT901BLE', c[0], r.t.toFixed(4), c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10]].join(','));
-  }
-  download([lines.join('\r\n')], 'text/csv;charset=utf-8', stampName(new Date()) + '.csv');
-  log('已导出 ' + rows.length + ' 行 CSV', 'i');
 };

@@ -12,9 +12,11 @@ function irHead() {
     withFoot(f, () => {
       const s0 = irState0();
       $('btnIrOff').disabled = !on;
-      $('btnIrCsv').disabled = !(irStates.l.rec.length || irStates.r.rec.length);
+      $('btnIrParquet').disabled = !(irStates.l.rec.length || irStates.r.rec.length);
       $('btnFmtRead').disabled = !on;
       $('btnFmtSet').disabled = !on || !s0.write;
+      $('btnBiasCal').disabled = !on;
+      $('irBiasMode').disabled = !on;
       $('irDev').textContent = s0.dev ? ((s0.dev.name || '鞋垫') + (on ? '' : ' · 已断开'))
         : '未连接';
       $('irInfo').textContent = s0.info;
@@ -177,7 +179,7 @@ function irFmtText() {
   if ($('dvFmt') && ir.fmt != null && $('dvFmt').value !== String(ir.fmt)) $('dvFmt').value = String(ir.fmt);
   if (u) {
     /* 这里的字要短：工具栏一行还要放下两个下拉、两个按钮和下载键，
-       长标签会把「下载压力 CSV」挤到第二行，而「无回执」下面状态行已经写了 */
+       长标签会把「下载 parquet」挤到第二行，而「无回执」下面状态行已经写了 */
     u.textContent = ir.fmtSrc === 'read' ? '已回读 · ' + FMT_NAME[prFmt()]
       : ir.fmtSrc === 'write' ? '已写入 · ' + FMT_NAME[prFmt()]
       : ir.fmtSrc === 'saved' ? '上次写入 · ' + FMT_NAME[prFmt()]
@@ -489,7 +491,7 @@ function irBindPanel(f) {
   const st = irStates[f];
 
   $('btnIrOff', f).onclick = () => irClose(f);
-  $('btnIrCsv', f).onclick = F(irParquet);
+  $('btnIrParquet', f).onclick = F(irParquet);
   $('btnFmtRead', f).onclick = F(() => {
     const m = irLinkMode(f);
     log('回读设备状态（0x0D，' + (m === 'auto' ? '自动' : IR_LINK_NAME[m]) + '）…', 'i');
@@ -500,6 +502,19 @@ function irBindPanel(f) {
     const v = +$('dvFmt').value;
     log('写入输出格式：' + FMT_NAME[v] + '（0x10）…', 'i');
     irSetFmt(st, v).catch((e) => log('写入失败：' + (e.message || e) + (st.lastTx ? '｜TX ' + st.lastTx : ''), 'e'));
+  });
+  $('btnBiasCal', f).onclick = F(() => {
+    if (!irOnOf(f)) return log('请先连接这只鞋垫再静止校准', 'w');
+    if (!confirm('将这只鞋垫固定静置，接下来至少3秒不能移动或匀速转动。\n仅改本页显示与波形的补偿，不改设备或导出；温度变化需重新校准。\n确认开始静止校准？')) return;
+    irBiasStart(st);
+  });
+  $('irBiasMode', f).onchange = F(() => {
+    if (!irOnOf(f)) { irBiasText(st); return log('请先连接这只鞋垫再切换补偿模式', 'w'); }
+    const mode = $('irBiasMode', f).value;
+    if (mode === 'dynamic' && st.bias.mode !== 'dynamic') {
+      log('已启用自动补偿：未就绪显示原始角速度，静止后自动生效；稳定匀速转动也可能误判为静止并被补偿', 'w');
+    }
+    irBiasSetMode(st, mode);
   });
   $('btnBiasReset', f).onclick = F(() => irBiasReset(st));
   $('dvLink', f).onchange = F(() => {

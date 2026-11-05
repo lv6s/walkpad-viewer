@@ -90,12 +90,16 @@ put('insole-proto', `U16 IR_ACC_G IR_GYR_DPS IR_KEEP IR_COLORS PR_W PR_H PR_N
   PR_ROWS IR_POS PR_IDLE PR_MAX PR_SPAN_G PR_SPAN_RAW FMT_NAME FMT_UNIT
   irLinkMode PR_EDGE IR_RAW_V2 IR_RAW_V1 irNewState IR_SIDES irStates
   irActive ir irOf irLut irLutOf irBuildLut footFromName irOnOf irAnyOn irOn
-  setCur withFoot isImurDev irConnect irReadInfo irGone irClose irEvt irEvtW
-  IR_LINK_NAME irCrcIbm irCrcAck irCmd irDropWait irWrite irRxHint irSend irProbe
+  setCur withFoot isImurDev irConnect irReadInfo irDetach irGone irClose irEvt irEvtW
+  IR_LINK_NAME irCrcIbm irCrcAck irCmd irLinkGuard irDropWait irWrite irRxHint irSend irProbe
   irAck irState irCalibBrief irStateText irQueryState FMT_SELF irSetFmt
   IR_ACK_TYPES IR_LOOSE_SIZE irSniff irCrcOk irFeed irFrame irTick
-  IR_BIAS_WIN IR_BIAS_GSTD IR_BIAS_ASTD IR_BIAS_AERR IR_BIAS_ALPHA IR_BIAS_STEP
-  IR_BIAS_MAX irBiasTrack irBiasReset irBiasText`);
+  IR_BIAS_MS IR_BIAS_TIMEOUT IR_BIAS_MIN IR_BIAS_GAP IR_BIAS_GSTD IR_BIAS_GRANGE IR_BIAS_DRIFT
+  IR_BIAS_ASTD IR_BIAS_ARANGE IR_BIAS_AERR IR_BIAS_MAX
+  IR_DYN_INIT_MS IR_DYN_MS IR_DYN_INIT_MIN IR_DYN_MIN IR_DYN_ROWS IR_DYN_RAW_MAX
+  IR_DYN_GSTD IR_DYN_GRANGE IR_DYN_DRIFT IR_DYN_ASTD IR_DYN_ARANGE IR_DYN_AERR IR_DYN_ADIR
+  IR_DYN_TAU IR_DYN_RATE IR_DYN_NOTE
+  irBiasNew irBiasSetMode irBiasDynamicClear irBiasDynamicStats irBiasDynamic irBiasStart irBiasCancel irBiasSegment irBiasTrack irBiasReset irBiasText`);
 
 put('insole-ui', `irHead irState0 irNums irDraw PW_WIN PW_KEEP prFmt prU prBase prSpan
   prColorSpan prCap fmtV FMT_KEY irFmtLoad irFmtSave irFmtText irRedraw

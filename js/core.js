@@ -2,10 +2,10 @@
 
 /* 面板内元素左右脚各一份（id 带 -l/-r 后缀）：irCur 决定 $() 取哪只脚的，
    也可显式传 foot。面板外元素不受影响。 */
-const IR_ELS = new Set(('btnFmtRead btnFmtSet btnIrCsv btnIrOff dvFmt dvLink dvStat dvUnit ' +
+const IR_ELS = new Set(('btnFmtRead btnFmtSet btnIrParquet btnIrOff dvFmt dvLink dvStat dvUnit ' +
   'irAux irBad irChart irDev irInfo irLen irN irPress irRate irRaw irStat irTs irax iray iraz irgx irgy irgz ' +
   'prHover prScaleBar prScaleMax prTopo pwChart pwCur pwLive pwN pwName ' +
-  'irBias irStill btnBiasReset').split(' '));
+  'irBias irBiasMode irStill btnBiasCal btnBiasReset').split(' '));
 
 let irCur = 'l';
 
@@ -17,11 +17,38 @@ const CLOCK = { wall0: Date.now(), perf0: performance.now() };
 
 const state = {
   devices: new Map(), order: [],
-  T0: 0, tEnd: 0, window: 10, mode: 'grid',
+  T0: 0, tEnd: 0, window: 10, views: new Set(['grid']),
   cmp: { key: 'acc', axis: '2' }, cmpYmax: 1,
   recording: false, rec: [], recT0Wall: 0,
   demoN: 0, wakeLock: null
 };
+
+/* 警告与错误另浮一份在右上角：日志区在页面最底部，盯着摄像头 / 鞋垫面板时
+   「这次没录视频」这类提醒根本看不到，等发现时一段数据已经废了 */
+const toastLast = new Map();
+
+function toast(msg, kind) {
+  const now = performance.now();
+  /* 逐帧路径上的警告（时钟跳变之类）会连发，同一句 3 s 内只留一条 */
+  if (now - (toastLast.get(msg) || 0) < 3000) return;
+  if (toastLast.size > 60) toastLast.clear();
+  toastLast.set(msg, now);
+  let box = document.getElementById('toast');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'toast';
+    document.body.append(box);
+  }
+  const el = document.createElement('div');
+  el.className = 't' + (kind === 'e' ? ' e' : '');
+  el.textContent = msg;
+  box.append(el);
+  while (box.childElementCount > 3) box.firstChild.remove();
+  setTimeout(() => {
+    el.classList.add('out');
+    setTimeout(() => el.remove(), 400);
+  }, 5200);
+}
 
 function log(msg, kind) {
   const el = document.createElement('div');
@@ -29,6 +56,7 @@ function log(msg, kind) {
   el.textContent = new Date().toLocaleTimeString('zh-CN', { hour12: false }) + '  ' + msg;
   $('log').prepend(el);
   while ($('log').childElementCount > 60) $('log').lastChild.remove();
+  if (kind === 'w' || kind === 'e') toast(msg, kind);
 }
 
 /* ---------- 时间与数值格式 ---------- */

@@ -3,7 +3,7 @@
 /* ---------- IMU-R（自研 BLE IMU，数据走 0x180D 的 2A37）---------- */
 const U16 = (s) => '0000' + s + '-0000-1000-8000-00805f9b34fb';
 
-/* 加速度 2048 LSB/g、角速度 0.07 mdps/LSB（与 d56-imu-acc488ug-gyro70mdps contract 同值）。
+/* 加速度 2048 LSB/g、角速度 0.07 °/s/LSB（与 d56-imu-acc488ug-gyro70mdps contract 同值）。
    静置 az≈2098 与 1 g 吻合；固件改量程就只动这两个常数。 */
 const IR_ACC_G = 1 / 2048, IR_GYR_DPS = 0.07, IR_KEEP = 40;
 
@@ -89,7 +89,8 @@ const irClkNew = () => ({ ofs: null, n: 0, bad: 0, reanchor: 0, same: 0, coarse:
 function irNewState(foot) {
   return {
     foot,                                        /* 'l' | 'r' */
-    dev: null, chr: null, write: null, buf: new Uint8Array(0), samples: [], rec: [],
+    dev: null, chr: null, write: null, listeners: null, linkEpoch: 0,
+    buf: new Uint8Array(0), samples: [], rec: [],
     recording: false, t0: 0, frames: 0, bad: 0, rate: 0, fpsT: 0, fpsN: 0,
     timer: 0, ymax: { a: 1, g: 60 }, last: null, info: '',
     ps: new Float32Array(PR_N).fill(PR_IDLE), seen: new Uint8Array(PR_N), prec: [],
@@ -100,8 +101,8 @@ function irNewState(foot) {
        稀疏集合，而是"截至此刻每个槽位的读数"。显示用的 frame 是另一套。 */
     slots: new Float32Array(70),
     slotOf: new Int8Array(PR_N).fill(-1),         /* 布局点 -> 槽位，导出 canonical 序用 */
-    /* 零偏由本页估计（设备侧不改）：g 是显示轴上的 °/s，win 存最近几帧的原始值 */
-    bias: { g: [0, 0, 0], ready: false, still: 0, win: [] },
+    /* 默认自动补偿；连接之间不继承补偿 */
+    bias: irBiasNew(),
     lut: new Int8Array(70).fill(-1),              /* 每只脚各自的槽位映射 */
     /* 设备日历对页面单调时钟的偏移（ms）：首帧锚定，校时跳变就重锚。
        coarse = 设备时钟变化太粗（整秒级），这种只能退回用帧的到达时刻 */
@@ -234,30 +235,59 @@ async function irConnect(picked, foot) {
     $('btnIrOn').disabled = false;
     return log((want === 'r' ? '右脚' : '左脚') + '已连着 ' + (st.dev.name || '') + '，先断开再连', 'w');
   }
-  st.dev = dev;
-  st.dev.addEventListener('gattserverdisconnected', () => irGone(target));
+  irDetach(st);
+  irDropWait(st, true);
+  const generation = ++st.linkEpoch;
+  st.dev = dev; st.chr = null; st.write = null;
+  st.buf = new Uint8Array(0); st.clk = irClkNew(); st.effMs = 0;
+  irBiasReset(st, true);
+  const current = () => st.dev === dev && st.linkEpoch === generation;
+  const stale = () => {
+    if (current()) return false;
+    if (st.dev !== dev && dev.gatt && dev.gatt.connected) {
+      try { dev.gatt.disconnect(); } catch (e) {}
+    }
+    return true;
+  };
+  const listeners = { dev, chr: null, write: null,
+    gone: () => { if (current()) irGone(target, dev, generation); }, notify: null, reply: null };
+  st.listeners = listeners;
+  dev.addEventListener('gattserverdisconnected', listeners.gone);
   try {
-    const server = await st.dev.gatt.connect();
+    const server = await dev.gatt.connect();
+    if (stale()) return;
     const hr = await server.getPrimaryService(U16('180d'));
-    st.chr = await hr.getCharacteristic(U16('2a37'));
-    st.chr.addEventListener('characteristicvaluechanged', (e) => irEvt(e, target));
-    await st.chr.startNotifications();
-    try { st.write = await hr.getCharacteristic(U16('ffe1')); }
-    catch (e) { st.write = null; log('没找到 FFE1 写入通道：输出格式只能看不能改', 'w'); }
-    /* 有些固件把命令回执从写通道原路 notify 回来，而不是走 2A37。
-       支持就顺手订阅，收到的一并交给同一个解析器（帧头相同，分不干净也无害）。 */
-    if (st.write && st.write.properties && (st.write.properties.notify || st.write.properties.indicate)) {
+    if (stale()) return;
+    const chr = await hr.getCharacteristic(U16('2a37'));
+    if (stale()) return;
+    st.chr = chr; listeners.chr = chr;
+    listeners.notify = (e) => { if (current() && st.chr === chr) irEvt(e, target); };
+    chr.addEventListener('characteristicvaluechanged', listeners.notify);
+    await chr.startNotifications();
+    if (stale()) return;
+    let write = null;
+    try { write = await hr.getCharacteristic(U16('ffe1')); }
+    catch (e) { if (current()) log('没找到 FFE1 写入通道：输出格式只能看不能改', 'w'); }
+    if (stale()) return;
+    st.write = write;
+    /* 部分固件从写通道回执，监听器同样受连接代次保护。 */
+    if (write && write.properties && (write.properties.notify || write.properties.indicate)) {
       try {
-        st.write.addEventListener('characteristicvaluechanged', (e) => irEvtW(e, target));
-        await st.write.startNotifications();
-      } catch (e) { log('FFE1 订阅失败（不影响采集）：' + (e.message || e), 'w'); }
+        listeners.write = write;
+        listeners.reply = (e) => { if (current() && st.write === write) irEvtW(e, target); };
+        write.addEventListener('characteristicvaluechanged', listeners.reply);
+        await write.startNotifications();
+      } catch (e) { if (current()) log('FFE1 订阅失败（不影响采集）：' + (e.message || e), 'w'); }
+      if (stale()) return;
     }
   } catch (e) {
+    if (!current()) return;
     log('连接失败：' + (e.message || e), 'e');
-    irHead();
+    irClose(target);
     return;
   }
-  await irReadInfo(st);
+  await irReadInfo(st, dev, generation);
+  if (stale()) return;
   st.capI = irConnNew();
   st.buf = new Uint8Array(0);
   st.samples.length = 0; st.frames = 0; st.bad = 0; st.last = null; st.t0 = 0;
@@ -268,18 +298,15 @@ async function irConnect(picked, foot) {
   log('IMU-R 已连接（' + (st.dev.name || '') + '），订阅 2A37', 'i');
   if (st.info) log('设备信息：' + st.info, 'i');
   irHead();
-  withFoot(target, irDraw);
-  irQueryState(st, true).catch((e) => {
-    withFoot(target, irFmtText);
-    log('没读到输出格式（' + (e.message || e) + '）：这台固件不回 0x0D 时只能按压自查，'
-      + '写入 0x10 仍然有效，页面按你写入的格式显示', 'w');
-  });
+  withFoot(target, () => { irDraw(); irFmtText(); });
+  /* 这版鞋垫固件对 0x0D 不回执，连接时自动试探两套命令可能干扰数据链路。
+     状态回读只由用户点击按钮触发；平时按本地保存的最近一次写入格式显示。 */
 }
 
-async function irReadInfo(st) {
+async function irReadInfo(st, expected = st.dev, generation = st.linkEpoch) {
   const parts = [];
   try {
-    const di = await st.dev.gatt.getPrimaryService(U16('180a'));
+    const di = await expected.gatt.getPrimaryService(U16('180a'));
     for (const [id, name] of [['2a29', '厂商'], ['2a24', '型号'], ['2a26', '固件'], ['2a25', '序列号']]) {
       try {
         const b = await (await di.getCharacteristic(U16(id))).readValue();
@@ -288,18 +315,33 @@ async function irReadInfo(st) {
     }
   } catch (e) { /* 没有设备信息服务不影响采集 */ }
   try {
-    const bs = await st.dev.gatt.getPrimaryService(U16('180f'));
+    const bs = await expected.gatt.getPrimaryService(U16('180f'));
     const v = await (await bs.getCharacteristic(U16('2a19'))).readValue();
     if (v.byteLength) parts.push('电量 ' + v.getUint8(0) + '%');
   } catch (e) { /* 没有电量服务同理 */ }
-  st.info = parts.join(' · ');
+  if (st.dev === expected && st.linkEpoch === generation) st.info = parts.join(' · ');
 }
 
-function irGone(foot) {
+function irDetach(st) {
+  const l = st.listeners;
+  if (!l) return;
+  l.dev.removeEventListener('gattserverdisconnected', l.gone);
+  if (l.chr && l.notify) l.chr.removeEventListener('characteristicvaluechanged', l.notify);
+  if (l.write && l.reply) l.write.removeEventListener('characteristicvaluechanged', l.reply);
+  st.listeners = null;
+}
+
+function irGone(foot, expected, generation) {
   const st = irStates[foot || irActive];
+  if ((expected && st.dev !== expected) || (generation !== undefined && st.linkEpoch !== generation)) return;
+  const d = st.dev;
+  irDetach(st); st.linkEpoch++;
   clearInterval(st.timer); st.timer = 0;
-  st.chr = null; st.write = null; st.recording = false; st.capI = -1;
-  log('鞋垫断开（' + st.dev.name + ' · ' + (st.foot === 'r' ? '右脚' : '左脚') + '）', 'w');
+  irDropWait(st, true);
+  st.dev = null; st.chr = null; st.write = null; st.recording = false; st.capI = -1;
+  st.buf = new Uint8Array(0); st.clk = irClkNew(); st.effMs = 0;
+  irBiasReset(st, true);
+  log('鞋垫断开（' + ((d && d.name) || '未连接') + ' · ' + (st.foot === 'r' ? '右脚' : '左脚') + '）', 'w');
   irHead();
   withFoot(st.foot, () => { irPressDraw(); pwDraw(); prNums(); });
 }
@@ -307,12 +349,13 @@ function irGone(foot) {
 function irClose(foot) {
   const f = foot || irActive;
   const st = irStates[f];
-  clearInterval(st.timer); st.timer = 0;
   const d = st.dev;
-  if (st.wait) { clearTimeout(st.wait.timer); st.wait = null; }
+  irDetach(st); st.linkEpoch++;
+  clearInterval(st.timer); st.timer = 0;
+  irDropWait(st, true);
   st.dev = null; st.chr = null; st.write = null; st.recording = false; st.capI = -1;
-  st.clk = irClkNew();                 /* 换了设备或重连后重新锚定时钟 */
-  st.effMs = 0;
+  st.buf = new Uint8Array(0); st.clk = irClkNew(); st.effMs = 0;
+  irBiasReset(st, true);
   if (d) {
     try { if (d.gatt && d.gatt.connected) d.gatt.disconnect(); } catch (e) {}
   }
@@ -383,8 +426,25 @@ function irCmd(st, type, payload, link) {
   return b;
 }
 
-function irDropWait(st) {
-  if (st.wait) { clearTimeout(st.wait.timer); st.wait = null; }
+function irLinkGuard(st) {
+  const dev = st.dev, generation = st.linkEpoch;
+  return () => {
+    if (st.dev === dev && st.linkEpoch === generation) return;
+    const e = new Error('连接已变化，命令已取消');
+    e.cancelled = true;
+    throw e;
+  };
+}
+
+function irDropWait(st, cancel) {
+  const w = st.wait;
+  if (!w) return;
+  clearTimeout(w.timer); st.wait = null;
+  if (cancel) {
+    const e = new Error('连接已断开，命令已取消');
+    e.cancelled = true;
+    w.rej(e);
+  }
 }
 
 /* 浏览器没有「单次 SDK 操作」这个开关：只要超过 MTU-3，Chrome 会自动拆成多个
@@ -394,6 +454,7 @@ function irDropWait(st) {
    不受 MTU-3 限制），带响应写次之。都不行就如实报出来，别假装写入成功。 */
 async function irWrite(st, pkt) {
   const c = st.write;
+  const guard = irLinkGuard(st);
   if (!c) throw new Error('没有写入通道（FFE1）');
   const props = c.properties || {};
   const ways = [];
@@ -405,12 +466,14 @@ async function irWrite(st, pkt) {
   let err = null;
   for (const [name, fn] of ways) {
     try {
+      guard();
       const r = await fn(pkt);
+      guard();
       if (pkt.length > 120 && name === '带响应') {
         log('本次用带响应写发出 ' + pkt.length + ' B，超过 MTU 时会被自动拆包，固件可能不认', 'w');
       }
       return r;
-    } catch (e) { err = err || [name, e]; }
+    } catch (e) { guard(); err = err || [name, e]; }
   }
   const m = (err[1] && (err[1].name || err[1].message)) || String(err[1]);
   throw new Error('写入 ' + pkt.length + ' B 失败（' + err[0] + '）：' + m
@@ -435,23 +498,30 @@ async function irSend(st, type, payload, ms, link) {
   const ln = link || st.link;
   const pkt = irCmd(st, type, payload, ln);
   st.rxBytes = 0; st.rxTail.length = 0; st.ffBytes = 0; st.odd.length = 0;
+  const guard = irLinkGuard(st);
+  let pending;
   const p = new Promise((res, rej) => {
     const timer = setTimeout(() => {
-      if (st.wait && st.wait.timer === timer) st.wait = null;
+      if (st.wait !== pending) return;
+      st.wait = null;
       const e = new Error('等不到回执（' + IR_LINK_NAME[ln] + '）：' + irRxHint(st));
-      e.sent = true;                      // 帧已写出去了，只是没等到确认
+      e.sent = true;
       rej(e);
     }, ms || 1200);
-    st.wait = { type, link: ln, res, rej, timer };
+    pending = { type, link: ln, res, rej, timer };
+    st.wait = pending;
   });
-  try {
-    await irWrite(st, pkt);
-  } catch (e) {
+  irWrite(st, pkt).then(() => {
+    try { guard(); } catch (e) { pending.rej(e); return; }
+    if (st.wait !== pending) return;
+    st.lastTx = hexOf(pkt);
+  }, (e) => {
+    try { guard(); } catch (cancelled) { pending.rej(cancelled); return; }
+    if (st.wait !== pending) return;
     irDropWait(st);
     e.sent = false;
-    throw e;
-  }
-  st.lastTx = hexOf(pkt);
+    pending.rej(e);
+  });
   return p;
 }
 
@@ -465,18 +535,23 @@ async function irSend(st, type, payload, ms, link) {
 
    错误带 sent 标记表示「帧写出去了但没回执」，由调用方决定能否当成功。 */
 async function irProbe(st, type, payload, ms) {
+  const guard = irLinkGuard(st);
   const mode = irLinkMode(st.foot);
   const first = mode === 'auto' ? st.link : mode;
   const order = mode === 'auto' ? [first, first === 'v2' ? 'v1' : 'v2'] : [first];
   let last = null, sentOne = null, writeFail = null;
   for (const ln of order) {
+    guard();
     try {
       const r = await irSend(st, type, payload, ms, ln);
+      guard();
       if (st.link !== ln) log('命令帧改用 ' + IR_LINK_NAME[ln] + '（这一套有回执）', 'i');
       st.link = ln;
       try { localStorage.setItem('irCmdLink', ln); } catch (e) { /* 隐私模式写不了就算了 */ }
       return r;
     } catch (e) {
+      guard();
+      if (e.cancelled) throw e;
       if (e.sent) { sentOne = e; e.link = ln; last = e; continue; }
       /* 写就失败的（多半是 144 B 超过本条链路的单包容量）也要换一套再试 */
       writeFail = e; e.link = ln;
@@ -799,7 +874,7 @@ function irFrame(f, foot) {
     ax: r2 * IR_ACC_G, ay: -r1 * IR_ACC_G, az: r3 * IR_ACC_G,
     gx: r5 * IR_GYR_DPS, gy: -r4 * IR_GYR_DPS, gz: r6 * IR_GYR_DPS
   };
-  /* 原始值另存一份：CSV 导出给原始值，显示与波形给扣偏后的值。
+  /* 原始值另存一份：parquet 导出给原始值，显示与波形给扣偏后的值。
      估计逻辑在 irBiasTrack 里，只读原始值 —— 用扣后的值再估会自己吃自己。 */
   s.gx0 = s.gx; s.gy0 = s.gy; s.gz0 = s.gz;
   irBiasTrack(st, s);
@@ -879,6 +954,7 @@ function irFrame(f, foot) {
 /* 两只脚各有一个定时器，但只有活动那只刷新可见面板，省掉一半无谓重绘 */
 function irTick(foot) {
   const st = irStates[foot || irActive];
+  irBiasTrack(st);
   if (!st.samples.length) return;
   const now = performance.now();
   if (now - st.fpsT >= 1000) {
@@ -894,83 +970,267 @@ function irTick(foot) {
   });
 }
 
-/* ---------- 网页侧零偏估计 ----------
-   判据只用「变化量」：常量偏置对差分免疫，而按模长阈值筛静止会被十几 °/s 的偏置
-   直接吃掉（实测右脚 |g| < 10 一帧都筛不出来）。
-   估出来不直接替换，而是限速一阶跟踪 —— 逐段硬替换会让补偿量以几 °/s 跳动，
-   等于把恒定偏置换成随机跳变。 */
-const IR_BIAS_WIN = 5;
+/* ---------- 网页侧零偏补偿 ----------
+   六轴不能区分恒速 yaw 和常量偏置；默认自动学习静止窗，稳定常量（无论大小）
+   都可能被当作偏置吸收。以下为工程门限，需要真机验证，不代表精度保证。 */
+const IR_BIAS_MS = 3000, IR_BIAS_TIMEOUT = 12000, IR_BIAS_MIN = 30, IR_BIAS_GAP = 250;
+const IR_BIAS_GSTD = 1.5, IR_BIAS_GRANGE = 6, IR_BIAS_DRIFT = 0.5;
+const IR_BIAS_ASTD = 0.02, IR_BIAS_ARANGE = 0.06, IR_BIAS_AERR = 0.12, IR_BIAS_MAX = 40;
 
-        /* 5 帧 = 0.1 s @ 50 Hz */
-const IR_BIAS_GSTD = 1.5;
+const IR_DYN_INIT_MS = 5000, IR_DYN_MS = 3000, IR_DYN_INIT_MIN = 50, IR_DYN_MIN = 30;
+const IR_DYN_ROWS = 16384, IR_DYN_RAW_MAX = 40;
+const IR_DYN_GSTD = 0.12, IR_DYN_GRANGE = 0.56, IR_DYN_DRIFT = 0.14;
+const IR_DYN_ASTD = 0.01, IR_DYN_ARANGE = 0.04, IR_DYN_AERR = 0.08, IR_DYN_ADIR = 0.02;
+const IR_DYN_TAU = 10, IR_DYN_RATE = 0.5;
+const IR_DYN_NOTE = '稳定匀速转动也可能误判为静止并被补偿';
 
-     /* 三轴角速度标准差上限 °/s */
-const IR_BIAS_ASTD = 0.05;
+function irBiasNew() {
+  return { g: [0, 0, 0], ready: false, still: 0, collect: null,
+    status: '未就绪 · 等待静止',
+    mode: 'dynamic', anchor: null, boundary: false, dynamic: null };
+}
 
-    /* 三轴加速度标准差上限 g */
-const IR_BIAS_AERR = 0.12;
+function irBiasSetMode(st, mode) {
+  if (mode !== 'manual' && mode !== 'dynamic') return;
+  const b = st.bias;
+  if (b.mode === mode) { irBiasText(st); return; }
+  if (b.collect) { clearTimeout(b.collect.timer); b.collect = null; }
+  b.mode = mode; b.dynamic = null; b.still = 0;
+  b.status = mode === 'manual'
+    ? (b.ready ? '手动模式，保留当前补偿' : '手动模式，请点「静止校准」')
+    : (b.ready ? '等待静止窗' : '未就绪 · 等待静止');
+  irBiasText(st);
+}
 
-    /* ‖a‖ 与 1 g 的偏差上限（设备本身有 2~3% 标度误差） */
-const IR_BIAS_ALPHA = 0.06;
+function irBiasDynamicClear(st, reason) {
+  if (st.bias.dynamic) st.bias.dynamic.rows = [];
+  st.bias.still = 0;
+  st.bias.status = '等待下一段静止：' + reason + (st.bias.ready ? ' · 保留补偿' : ' · 未就绪');
+  irBiasText(st);
+}
 
-   /* 每帧增益：约 0.3 s 时间常数 */
-const IR_BIAS_STEP = 0.25;
+function irBiasDynamicStats(rows, start, end) {
+  const mu = Array(6).fill(0), square = Array(6).fill(0), span = end - start;
+  // 按时间积分线性插值，不能让密集到达的帧稀释真实运动时长。
+  for (let i = 1; i < rows.length; i++) {
+    const p = rows[i - 1], q = rows[i];
+    const lo = Math.max(start, p[6]), hi = Math.min(end, q[6]);
+    if (hi <= lo) continue;
+    const width = q[6] - p[6], weight = (hi - lo) / span;
+    for (let k = 0; k < 6; k++) {
+      const a = p[k] + (q[k] - p[k]) * (lo - p[6]) / width;
+      const z = p[k] + (q[k] - p[k]) * (hi - p[6]) / width;
+      mu[k] += (a + z) * 0.5 * weight;
+      square[k] += (a * a + a * z + z * z) / 3 * weight;
+    }
+  }
+  return { mu, std: square.map((v, k) => Math.sqrt(Math.max(0, v - mu[k] ** 2))) };
+}
 
-    /* 单帧最大改动 °/s */
-const IR_BIAS_MAX = 40;
+function irBiasDynamic(st, s) {
+  const b = st.bias;
+  if (!s) return;
+  const now = performance.now(), eps = 1e-12;
+  if (!Number.isFinite(now) || !Number.isInteger(s.seq) || s.seq < 0 || s.seq > 0xffffffff) {
+    irBiasDynamicClear(st, '时间或帧序号无效'); return;
+  }
+  let c = b.dynamic;
+  if (!c) c = b.dynamic = { rows: [], lastSeq: null, lastHost: null, lastEpoch: null, coarse: false };
+  if (s.seq === c.lastSeq) return;
+  const epoch = s.clk && Number.isFinite(s.clk.epoch) ? s.clk.epoch : null;
+  const hostDelta = c.lastHost === null ? null : now - c.lastHost;
+  const devDelta = epoch !== null && c.lastEpoch !== null ? epoch - c.lastEpoch : null;
+  const gap = (c.lastSeq !== null && s.seq !== ((c.lastSeq + 1) >>> 0))
+    || (hostDelta !== null && (hostDelta < 0 || hostDelta > IR_BIAS_GAP))
+    || (devDelta !== null && (devDelta < 0
+      || (c.coarse ? Math.abs(devDelta - hostDelta) > 1000 : devDelta > IR_BIAS_GAP)));
+  c.lastSeq = s.seq; c.lastHost = now; c.lastEpoch = epoch;
+  if (gap) { irBiasDynamicClear(st, '数据不连续'); return; }
+  if (epoch === null || devDelta === 0) c.coarse = true;
+  const q = [s.gx0, s.gy0, s.gz0, s.ax, s.ay, s.az];
+  if (!q.every(Number.isFinite) || (s.raw6 && s.raw6.some((v) => !Number.isFinite(v) || Math.abs(v) >= 32767))) {
+    irBiasDynamicClear(st, '数据无效或传感器满量程'); return;
+  }
+  /* 每轴 40 °/s 只是数值保护（与手动校准同上限）；是否运动由窗内变化判，
+     不用“离偏置 0 多远”推断。 */
+  if (Math.abs(s.gx0) > IR_DYN_RAW_MAX + eps || Math.abs(s.gy0) > IR_DYN_RAW_MAX + eps
+    || Math.abs(s.gz0) > IR_DYN_RAW_MAX + eps) {
+    irBiasDynamicClear(st, '角速度超出数值保护范围'); return;
+  }
+  /* 同 host 的重复帧也要先过加速度门，否则异常加速度会被直接吞掉。 */
+  if (Math.abs(Math.hypot(s.ax, s.ay, s.az) - 1) > IR_DYN_AERR + eps) {
+    irBiasDynamicClear(st, '加速度模长超出静止范围'); return;
+  }
+  if (hostDelta === 0) return;
+  q.push(now, epoch); c.rows.push(q); b.still = c.rows.length;
+  if (c.rows.length > IR_DYN_ROWS) { irBiasDynamicClear(st, '候选窗口超长'); return; }
+  const rows = c.rows, span = now - rows[0][6], ms = b.ready ? IR_DYN_MS : IR_DYN_INIT_MS;
+  const devSpan = !c.coarse && epoch !== null && rows[0][7] !== null ? epoch - rows[0][7] : null;
+  const acceptedSpan = devSpan === null ? span : Math.min(span, devSpan);
+  b.status = (b.ready ? '采样中 ' : '未就绪 · 等待静止 ')
+    + Math.min(acceptedSpan / 1000, ms / 1000).toFixed(1) + '/' + (ms / 1000).toFixed(1) + ' 秒';
+  if (acceptedSpan < ms || rows.length < (b.ready ? IR_DYN_MIN : IR_DYN_INIT_MIN)) { irBiasText(st); return; }
+  const stats = irBiasDynamicStats(rows, rows[0][6], now), mu = stats.mu;
+  for (let k = 0; k < 6; k++) {
+    let lo = Infinity, hi = -Infinity;
+    for (const row of rows) { lo = Math.min(lo, row[k]); hi = Math.max(hi, row[k]); }
+    if (stats.std[k] > (k < 3 ? IR_DYN_GSTD : IR_DYN_ASTD) + eps
+      || hi - lo > (k < 3 ? IR_DYN_GRANGE : IR_DYN_ARANGE) + eps) {
+      irBiasDynamicClear(st, '窗口变化超限'); return;
+    }
+  }
+  const first = irBiasDynamicStats(rows, rows[0][6], rows[0][6] + span / 3).mu;
+  const last = irBiasDynamicStats(rows, rows[0][6] + span * 2 / 3, now).mu;
+  const drift = last.map((v, k) => v - first[k]);
+  if (Math.hypot(...drift.slice(0, 3)) > IR_DYN_DRIFT + eps || Math.hypot(...drift.slice(3)) > IR_DYN_ADIR + eps) {
+    irBiasDynamicClear(st, '首尾角速度或重力方向变化'); return;
+  }
+  if (Math.abs(Math.hypot(...mu.slice(3)) - 1) > IR_DYN_AERR + eps) {
+    irBiasDynamicClear(st, '窗口重力模长超限'); return;
+  }
+  const obs = mu.slice(0, 3);
+  if (!b.ready) {
+    b.g = obs; b.ready = true;
+    b.status = '已初始化 · 等待下一段静止';
+  } else {
+    // 不重叠窗只积分一次；累计位移无人工解锁，允许缓慢跟随真实零偏漂移。
+    const dt = acceptedSpan / 1000, alpha = -Math.expm1(-dt / IR_DYN_TAU);
+    const delta = obs.map((v, k) => v - b.g[k]).map((v) => v * alpha), norm = Math.hypot(...delta);
+    const scale = norm > IR_DYN_RATE * dt ? IR_DYN_RATE * dt / norm : 1;
+    b.g = b.g.map((v, k) => v + delta[k] * scale);
+    b.status = '已更新 · 等待下一段静止';
+  }
+  c.rows = []; b.still = 0;
+  irBiasText(st);
+}
 
-       /* 估计值超过这个就当误判，整体丢弃重来 */
+function irBiasStart(st) {
+  const b = st.bias;
+  b.dynamic = null;
+  if (b.collect) clearTimeout(b.collect.timer);
+  const now = performance.now();
+  const c = { start: now, deadline: now + IR_BIAS_TIMEOUT, timer: 0, rows: [],
+    lastSeq: null, lastHost: null, lastEpoch: null, hostStart: null, devStart: null,
+    devLast: null, coarse: false };
+  b.collect = c; b.still = 0; b.status = '等待稳定' + (b.ready ? ' · 保留上次补偿' : ' · 未校准');
+  c.timer = setTimeout(() => {
+    if (st.bias === b && b.collect === c) irBiasCancel(st, '校准超时');
+  }, IR_BIAS_TIMEOUT);
+  irBiasText(st);
+}
+
+function irBiasCancel(st, reason) {
+  const b = st.bias;
+  if (b.collect) clearTimeout(b.collect.timer);
+  b.collect = null; b.dynamic = null; b.still = 0;
+  b.status = (reason || '校准取消') + (b.ready ? ' · 保留上次补偿' : ' · 未校准')
+    + (b.mode === 'dynamic' ? ' · 自动学习继续' : '');
+  irBiasText(st);
+}
+
+function irBiasSegment(st, reason) {
+  const b = st.bias, c = b.collect;
+  c.rows.length = 0; c.hostStart = null; c.devStart = null; c.devLast = null; c.coarse = false;
+  b.still = 0; b.status = '等待稳定：' + reason + (b.ready ? ' · 保留上次补偿' : ' · 未校准');
+  irBiasText(st);
+}
 
 function irBiasTrack(st, s) {
-  const b = st.bias, w = b.win;
-  w.push([s.gx0, s.gy0, s.gz0, Math.hypot(s.ax, s.ay, s.az)]);
-  if (w.length > IR_BIAS_WIN) w.shift();
-  if (w.length < IR_BIAS_WIN) return;
-
-  const n = w.length;
-  for (let k = 0; k < 3; k++) {
-    let m = 0;
-    for (const q of w) m += q[k];
-    m /= n;
-    let v = 0;
-    for (const q of w) v += (q[k] - m) ** 2;
-    if (Math.sqrt(v / n) > IR_BIAS_GSTD) return;     /* 角速度在变，不是静止 */
+  const b = st.bias, c = b.collect;
+  if (!c) {
+    if (b.mode === 'dynamic') irBiasDynamic(st, s);
+    return;
   }
-  /* 加速度也要稳：脚缓慢翻转时角速度变化可能很小，但重力方向在变 */
-  let am = 0;
-  for (const q of w) am += q[3];
-  am /= n;
-  if (Math.abs(am - 1) > IR_BIAS_AERR) return;
-  let av = 0;
-  for (const q of w) av += (q[3] - am) ** 2;
-  if (Math.sqrt(av / n) > IR_BIAS_ASTD) return;
-
-  const obs = [0, 0, 0];
-  for (const q of w) for (let k = 0; k < 3; k++) obs[k] += q[k] / n;
-  if (!b.ready) { b.g = obs; b.ready = true; b.still = 1; irBiasText(st); return; }
-
-  let peak = 0;
-  for (let k = 0; k < 3; k++) {
-    const d = (obs[k] - b.g[k]) * IR_BIAS_ALPHA;
-    b.g[k] += Math.max(-IR_BIAS_STEP, Math.min(IR_BIAS_STEP, d));
-    peak = Math.max(peak, Math.abs(b.g[k]));
+  const now = performance.now();
+  if (now >= c.deadline) { irBiasCancel(st, '校准超时'); return; }
+  if (!s) { irBiasText(st); return; }
+  if (!Number.isInteger(s.seq) || s.seq < 0 || s.seq > 0xffffffff) {
+    irBiasSegment(st, '帧序号无效'); return;
   }
-  if (peak > IR_BIAS_MAX) { irBiasReset(st, true); return; }
-  b.still++;
+  if (s.seq === c.lastSeq) return;
+  const seqGap = c.lastSeq !== null && s.seq !== ((c.lastSeq + 1) >>> 0);
+  const hostGap = c.lastHost !== null && (now < c.lastHost || now - c.lastHost > IR_BIAS_GAP);
+  const epoch = s.clk && Number.isFinite(s.clk.epoch) ? s.clk.epoch : null;
+  const devDelta = epoch !== null && c.lastEpoch !== null ? epoch - c.lastEpoch : null;
+  const hostDelta = c.lastHost !== null ? now - c.lastHost : 0;
+  const devGap = devDelta !== null && (devDelta < 0
+    || (c.coarse ? Math.abs(devDelta - hostDelta) > 1000 : devDelta > IR_BIAS_GAP));
+  c.lastSeq = s.seq; c.lastHost = now; c.lastEpoch = epoch;
+  if (seqGap || hostGap || devGap) irBiasSegment(st, '数据不连续，重新采样');
+  const row = [s.gx0, s.gy0, s.gz0, s.ax, s.ay, s.az];
+  if (!row.every(Number.isFinite) || (s.raw6 && s.raw6.some((v) => !Number.isFinite(v) || Math.abs(v) >= 32767))) {
+    irBiasSegment(st, '数据无效或传感器满量程'); return;
+  }
+  row.push(Math.hypot(s.ax, s.ay, s.az));
+  if (Math.abs(row[6] - 1) > IR_BIAS_AERR || row.slice(0, 3).some((v) => Math.abs(v) > IR_BIAS_MAX)) {
+    irBiasSegment(st, '加速度或零偏超出校准范围'); return;
+  }
+  if (c.hostStart === null) c.hostStart = now;
+  if (epoch !== null) {
+    if (c.devStart === null) c.devStart = epoch;
+    if (c.devLast === epoch) c.coarse = true;
+    c.devLast = epoch;
+  } else c.coarse = true;
+  row.push(now);
+  c.rows.push(row); b.still = c.rows.length;
+  const n = c.rows.length, mu = Array(7).fill(0);
+  for (const q of c.rows) for (let k = 0; k < 7; k++) mu[k] += q[k];
+  for (let k = 0; k < 7; k++) mu[k] /= n;
+  for (let k = 0; k < 6; k++) {
+    let variance = 0, lo = Infinity, hi = -Infinity;
+    for (const q of c.rows) {
+      variance += (q[k] - mu[k]) ** 2;
+      lo = Math.min(lo, q[k]); hi = Math.max(hi, q[k]);
+    }
+    if (Math.sqrt(variance / n) > (k < 3 ? IR_BIAS_GSTD : IR_BIAS_ASTD)
+      || hi - lo > (k < 3 ? IR_BIAS_GRANGE : IR_BIAS_ARANGE)) {
+      irBiasSegment(st, '检测到变化，重新采样'); return;
+    }
+  }
+  const hostSpan = now - c.hostStart;
+  b.status = '校准采样 ' + Math.min(hostSpan / 1000, 3).toFixed(1) + '/3.0 秒 · ' + n + ' 帧';
+  if (b.ready) b.status += ' · 保留上次补偿';
+  if (hostSpan < IR_BIAS_MS || n < IR_BIAS_MIN
+    || (!c.coarse && c.devStart !== null && c.devLast - c.devStart < IR_BIAS_MS)) {
+    irBiasText(st); return;
+  }
+  const firstRows = c.rows.filter((q) => q[7] - c.hostStart <= hostSpan / 3);
+  const lastRows = c.rows.filter((q) => q[7] - c.hostStart >= hostSpan * 2 / 3);
+  for (let k = 0; k < 3; k++) {
+    const first = firstRows.reduce((sum, q) => sum + q[k], 0) / firstRows.length;
+    const last = lastRows.reduce((sum, q) => sum + q[k], 0) / lastRows.length;
+    if (Math.abs(first - last) > IR_BIAS_DRIFT) {
+      irBiasSegment(st, '角速度缓变，重新采样'); return;
+    }
+  }
+  if (Math.abs(mu[6] - 1) > IR_BIAS_AERR || mu.slice(0, 3).some((v) => Math.abs(v) > IR_BIAS_MAX)) {
+    irBiasSegment(st, '校准均值超出范围'); return;
+  }
+  clearTimeout(c.timer);
+  b.g = mu.slice(0, 3); b.anchor = b.g.slice(); b.boundary = false;
+  b.ready = true; b.collect = null; b.dynamic = null;
+  b.status = b.mode === 'dynamic' ? '手动校准成功 · 自动模式继续' : '校准成功，补偿已锁定';
   irBiasText(st);
 }
 
 function irBiasReset(st, silent) {
-  st.bias = { g: [0, 0, 0], ready: false, still: 0, win: [] };
-  if (!silent && st.foot) log('已清空' + (st.foot === 'r' ? '右' : '左') + '脚的零偏估计，重新等静止段', 'i');
+  if (st.bias.collect) clearTimeout(st.bias.collect.timer);
+  st.bias = irBiasNew();
+  if (!silent && st.foot) log('已清空' + (st.foot === 'r' ? '右' : '左') + '脚的本页零偏补偿，将自动等待静止后重新估计', 'i');
   irBiasText(st);
 }
 
-/* 显示层：括号里是正在用的三轴偏置，后面跟累计静止帧数（只作可信度参考） */
 function irBiasText(st) {
   const b = st.bias;
   const el = $('irBias', st.foot);
-  if (el) el.textContent = b.ready ? '(' + b.g.map((v) => v.toFixed(2)).join(', ') + ') °/s' : '未估计';
+  if (el) {
+    el.textContent = (b.ready ? '(' + b.g.map((v) => v.toFixed(2)).join(', ') + ') °/s · ' : '') + b.status;
+    el.title = '仅补偿本页显示与波形，不改设备或导出。网页六轴无法区分恒速转动与常量偏置：' + IR_DYN_NOTE
+      + '。未就绪时显示原始角速度，静止后自动生效；初始需静止约5秒，之后每段静止约3秒自动更新。'
+      + '重置或重连后重新自动学习；切到手动模式可锁定当前补偿。';
+  }
+  const mode = $('irBiasMode', st.foot);
+  if (mode) mode.value = b.mode;
   const n = $('irStill', st.foot);
   if (n) n.textContent = b.still;
 }

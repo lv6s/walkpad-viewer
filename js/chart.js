@@ -7,33 +7,100 @@ const GREY = '#adb5bd';
 const DEV_COLORS = ['#1971c2', '#e8590c', '#2f9e44', '#9c36b5', '#0b7285', '#c2255c', '#5f3dc4', '#847545'];
 
 /* ---------- 工具栏 ---------- */
-function segPick(id, onPick) {
+function segPick(id, onPick, multi) {
   $(id).onclick = (e) => {
     const b = e.target.closest('button'); if (!b) return;
-    [...e.currentTarget.children].forEach((x) => x.classList.toggle('on', x === b));
+    /* multi 段由 onPick 自己同步高亮（面板可叠加，不能在这里按单选互斥） */
+    if (!multi) [...e.currentTarget.children].forEach((x) => x.classList.toggle('on', x === b));
     onPick(b.dataset);
   };
 }
 
-function setMode(m, syncBtns) {
-  state.mode = m;
-  const cmp = m === 'compare', cm = m === 'cam', im = m === 'imur';
+/* 四个面板可任意叠加：现场采集时经常要同时盯维特波形和摄像头画面，
+   互斥切换会逼着来回点。哪些开着记进 localStorage，下次打开还是同一套。 */
+const VIEWS = ['grid', 'compare', 'cam', 'imur'];
+const VIEW_KEY = 'wt901.views';
+
+function loadViews() {
+  try {
+    const v = JSON.parse(localStorage.getItem(VIEW_KEY) || 'null');
+    if (Array.isArray(v) && v.length) {
+      const ok = v.filter((x) => VIEWS.includes(x));
+      if (ok.length) return new Set(ok);
+    }
+  } catch (e) { /* 存不下或格式坏了就回默认 */ }
+  return new Set(['grid']);
+}
+
+function saveViews(v) {
+  try { localStorage.setItem(VIEW_KEY, JSON.stringify([...v])); } catch (e) { /* 忽略 */ }
+}
+
+/* 摄像头卡只在有设备卡同排时占半列。没有设备卡就独占整行，
+   否则单开「摄像头 + 鞋垫」时右半屏整块是空的。
+   摄像头是竖画面时改成按画面比例收窄那一列，见 #stage.withcam。 */
+function syncCamSpan() {
+  const n = $('devGrid').querySelectorAll('.dev').length;
+  const pair = state.views.has('grid') && n > 0;
+  $('camCard').classList.toggle('solo', state.views.has('cam') && !pair);
+  /* 横画面的比例本来就接近半列，收窄反而把画面变小；只在竖画面时动手。
+     「分设备」没开时设备卡不显示，摄像头独占两列，收了反而把画面挤到左边 */
+  const ar = camAspect();
+  $('stage').classList.toggle('withcam',
+    state.views.has('cam') && state.views.has('grid') && n === 1 && ar > 0 && ar < 0.9);
+  camColFit();
+  requestAnimationFrame(camSpanWide);
+}
+
+/* 摄像头卡被挤到新的一行、那一行只有它自己时（设备数是偶数），
+   让它跨整行：否则旁边留半格空洞，比画面两侧的留白更扎眼。 */
+function camSpanWide() {
+  const card = $('camCard');
+  if (!card.classList.contains('on')) { card.classList.remove('wide'); return; }
+  const top = card.getBoundingClientRect().top;
+  const same = [...$('devGrid').querySelectorAll('.dev')]
+    .some((d) => Math.abs(d.getBoundingClientRect().top - top) < 2);
+  card.classList.toggle('wide', !same);
+}
+
+function applyViews() {
+  const v = state.views;
+  const cmp = v.has('compare'), cm = v.has('cam'), im = v.has('imur');
   $('segMetric').style.display = cmp ? '' : 'none';
   $('segAxis').style.display = cmp ? '' : 'none';
   $('cmpCard').classList.toggle('on', cmp);
   $('camCard').classList.toggle('on', cm);
   $('imurCard').classList.toggle('on', im);
-  $('devGrid').style.display = (cmp || cm || im) ? 'none' : 'grid';   // 对比/摄像头/IMU-R 页各自独占，避免被卡片挤到屏外
-  if (syncBtns) {
-    for (const b of $('segMode').children) b.classList.toggle('on', b.dataset.m === m);
-  }
+  $('devGrid').style.display = v.has('grid') ? 'contents' : 'none';
+  syncCamSpan();
   if (cm) { camList(); camPermNote(); }
   if (im) { irHead(); irNums(ir.last); irDraw(); irPressDraw(); prNums(); }
   renderLegend();
   lastDraw = 0;
 }
 
-segPick('segMode', (ds) => setMode(ds.m));
+function syncViewBtns() {
+  for (const b of $('segMode').children) b.classList.toggle('on', state.views.has(b.dataset.m));
+}
+
+/* 单选语义：只留指定面板（?view= 参数和代码里切页用） */
+function setMode(m, syncBtns) {
+  state.views = new Set([m]);
+  if (syncBtns) syncViewBtns();
+  saveViews(state.views);
+  applyViews();
+}
+
+function toggleView(m) {
+  const v = state.views;
+  if (v.has(m)) v.delete(m); else v.add(m);
+  if (!v.size) v.add('grid');           // 全关掉会剩一片空白，兜底回「分设备」
+  saveViews(v);
+  syncViewBtns();
+  applyViews();
+}
+
+segPick('segMode', (ds) => { toggleView(ds.m); renderLegend(); }, true);
 
 segPick('segWin', (ds) => { state.window = +ds.w; });
 
@@ -44,7 +111,7 @@ segPick('segAxis', (ds) => { state.cmp.axis = ds.a; renderLegend(); });
 function renderLegend() {
   const box = $('legend');
   box.innerHTML = '';
-  if (state.mode !== 'compare') return;
+  if (!state.views.has('compare')) return;
   for (const k of state.order) {
     const d = state.devices.get(k);
     if (!(d.connected || d.demo)) continue;
