@@ -98,7 +98,7 @@ function loop() {
   requestAnimationFrame(loop);
 }
 
-window.addEventListener('resize', () => { lastDraw = 0; irDraw(); irPressDraw(); camColFit(); camSpanWide(); });
+window.addEventListener('resize', () => { lastDraw = 0; irDraw(); irPressDraw(); camColFit(); camSpanWide(); actHistDraw(); });
 
 /* 吸顶 header 只在内容滚到它下面时才加投影，静止时保持与页面平齐 */
 const headerEl = document.querySelector('header');
@@ -117,6 +117,7 @@ window.addEventListener('scroll', () => headerEl.classList.toggle('stuck', scrol
   const demo = qs.get('demo');
   if (demo) return startDemo(+demo);
   log('页面已就绪。点「添加设备」逐台授权；下次可点「全部重连」直接恢复。', 'i');
+  actInfo();
   $('btnCamRot').textContent = '旋转 ' + cam.rot + '°';
   camList();
   if (navigator.bluetooth && navigator.bluetooth.getDevices) {
@@ -147,4 +148,5 @@ window.__wtDebug = { state, header: OFFICIAL_HEADER, build: buildTxt, names: exp
   irCmd, irCrcAck, irCrcIbm, irAck, irState, irStateText, irQueryState, irSetFmt, irSend, irWrite, irFmtText,
   irProbe, irLinkMode, hexOf, IR_LINK_NAME, IR_LOOSE_SIZE, FMT_KEY, irFmtLoad, irFmtSave, irSniff, irRxHint,
   FMT_NAME, FMT_UNIT,
+  act, actInfo, actStart, actStop, actTick, actFeed, actRender, actHistDraw, ACT_CLASSES, ACT_REASON,
   REG: { MAC: REG_MAC, BATT: REG_BATT, VER: REG_VER } };

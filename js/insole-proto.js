@@ -342,6 +342,8 @@ function irGone(foot, expected, generation) {
   st.buf = new Uint8Array(0); st.clk = irClkNew(); st.effMs = 0;
   irBiasReset(st, true);
   log('鞋垫断开（' + ((d && d.name) || '未连接') + ' · ' + (st.foot === 'r' ? '右脚' : '左脚') + '）', 'w');
+  /* 断开后帧时间会重新锚定，旧会话的时钟不再可比 */
+  if (typeof actStop === 'function') actStop('鞋垫断开');
   irHead();
   withFoot(st.foot, () => { irPressDraw(); pwDraw(); prNums(); });
 }
@@ -360,6 +362,7 @@ function irClose(foot) {
     try { if (d.gatt && d.gatt.connected) d.gatt.disconnect(); } catch (e) {}
   }
   log('鞋垫已断开（' + (f === 'r' ? '右脚' : '左脚') + '）', 'i');
+  if (typeof actStop === 'function') actStop('鞋垫断开');
   irHead();
   withFoot(f, () => { irPressDraw(); pwDraw(); prNums(); });
 }
@@ -883,6 +886,8 @@ function irFrame(f, foot) {
   st.frames++; st.fpsN++; st.last = s; st.tempRaw = tempRaw;
   st.lastRaw = f.slice(0, Math.min(f.length, 60));
   st.samples.push(s);
+  /* 状态推断按原始值记账（gx0 那套），不用上面扣过零偏的显示值 */
+  if (typeof actFeed === 'function') actFeed(st, s);
 
   /* 压力：bitmap 30..43 共 14 字节逐行（bit0..4 对列 0..4，bit5..7 保留为 0），
      值从 44 起按 sourceRow 升序、列升序排列，每点 int16。canonicalRow = 13 − sourceRow，

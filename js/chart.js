@@ -18,7 +18,7 @@ function segPick(id, onPick, multi) {
 
 /* 四个面板可任意叠加：现场采集时经常要同时盯维特波形和摄像头画面，
    互斥切换会逼着来回点。哪些开着记进 localStorage，下次打开还是同一套。 */
-const VIEWS = ['grid', 'compare', 'cam', 'imur'];
+const VIEWS = ['grid', 'compare', 'cam', 'imur', 'act'];
 const VIEW_KEY = 'wt901.views';
 
 function loadViews() {
@@ -65,16 +65,18 @@ function camSpanWide() {
 
 function applyViews() {
   const v = state.views;
-  const cmp = v.has('compare'), cm = v.has('cam'), im = v.has('imur');
+  const cmp = v.has('compare'), cm = v.has('cam'), im = v.has('imur'), ac = v.has('act');
   $('segMetric').style.display = cmp ? '' : 'none';
   $('segAxis').style.display = cmp ? '' : 'none';
   $('cmpCard').classList.toggle('on', cmp);
   $('camCard').classList.toggle('on', cm);
   $('imurCard').classList.toggle('on', im);
+  $('actCard').classList.toggle('on', ac);
   $('devGrid').style.display = v.has('grid') ? 'contents' : 'none';
   syncCamSpan();
   if (cm) { camList(); camPermNote(); }
   if (im) { irHead(); irNums(ir.last); irDraw(); irPressDraw(); prNums(); }
+  if (ac) { actRender(); actHistDraw(); }
   renderLegend();
   lastDraw = 0;
 }

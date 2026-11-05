@@ -9,3 +9,9 @@ tmp_*
 
 # 依赖
 node_modules/
+
+# python 字节码
+__pycache__/
+
+# serve_page.py 实际选中的端口
+_port.txt

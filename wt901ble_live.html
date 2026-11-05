@@ -32,6 +32,7 @@
       <button data-m="compare">对比叠加</button>
       <button data-m="cam">摄像头</button>
       <button data-m="imur">自研鞋垫</button>
+      <button data-m="act">状态推断</button>
     </div>
     <span class="lbl">时间窗</span>
     <div class="seg" id="segWin">
@@ -215,6 +216,48 @@
         <div class="dm" id="prNote">点一个点位看它的实时波形。固件是<b>变化才上报</b>：值稳定时不发，所以「最后上报」会一直变旧，那不是卡住。点号与布局图一致（趾端为第 1 行、行内从右往左）；70 个槽位里 14 个不接传感器。数值单位跟固件输出格式走（0 原始 ADC / 4 重量），写入 0x10、回读 0x0D，本机对这两条都不回执但设置确实生效；命令帧须用 144 B。</div>
   </div>
 
+  <div class="card" id="actCard">
+    <div class="toolbar" style="margin:0 0 8px">
+      <span class="lbl">状态推断</span>
+      <button class="primary" id="btnActOn">开始推断</button>
+      <button id="btnActOff" disabled>停止</button>
+      <span class="dm" id="actState">未开始</span>
+      <div class="spacer"></div>
+      <span class="dm">声明采样率</span>
+      <input class="tin" id="actFsL" type="number" min="1" max="500" step="0.1" value="50" title="左脚原生采样率，只影响因果低通设计；与实际不符只是滤波略有偏差，不会报错">
+      <input class="tin" id="actFsR" type="number" min="1" max="500" step="0.1" value="50" title="右脚原生采样率，同上">
+      <span class="dm" id="actModel">—</span>
+    </div>
+    <div class="actgrid">
+      <div>
+        <div class="actnow"><b id="actLabel">—</b><span id="actWhy">点「开始推断」</span></div>
+        <div class="actbars">
+          <div class="actbar"><span>步行</span><i><em id="actBar0"></em></i><u id="actPct0">—</u></div>
+          <div class="actbar"><span>跑步</span><i><em id="actBar1"></em></i><u id="actPct1">—</u></div>
+          <div class="actbar"><span>其他</span><i><em id="actBar2"></em></i><u id="actPct2">—</u></div>
+        </div>
+        <canvas id="actHist" height="26"></canvas>
+        <div class="dm" style="margin-top:4px">最近 60 次决策，每 200 ms 一次；灰条是本次无效（灰条下红线），无效不输出类别，也不退回成「其他」。</div>
+      </div>
+      <div>
+        <div class="sub" style="border-top:0;padding-top:0;margin-top:0">
+          <span>决策 <b id="actSteps">0</b> 次</span>
+          <span>有效 <b id="actValid">0</b></span>
+          <span>已送事件 <b id="actSent">0</b></span>
+        </div>
+        <div class="sub">
+          <span>单次推理 <b id="actLat">—</b> ms</span>
+          <span>丢弃 <b id="actDrop">0</b> 帧</span>
+          <span>会话 <b id="actUp">0</b> s</span>
+        </div>
+        <div class="sub">
+          <span>左脚 <b id="actFootL">未连接</b></span>
+          <span>右脚 <b id="actFootR">未连接</b></span>
+        </div>
+        <div class="dm" id="actAxis" style="white-space:normal;line-height:1.5;margin-top:6px">—</div>
+      </div>
+    </div>
+  </div>
   </div>
 
   <div id="log"></div>
@@ -244,6 +287,8 @@
 <script src="js/insole-ui.js"></script>
 <!-- 帧导出：把两脚录到的帧写成与 app 同构的 parquet。 -->
 <script src="js/insole-export.js"></script>
+<!-- 状态推断：把 IMU 事件按 200 ms 送本地服务，显示 walk / run / other。 -->
+<script src="js/activity-live.js"></script>
 <!-- 入口：事件绑定、主循环、启动引导、调试出口。 -->
 <script src="js/main.js"></script>
 </body>
