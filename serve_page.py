@@ -28,12 +28,22 @@ MAX_BODY = 2 << 20
 
 _engine = None
 _engine_err = None
+_wt_engine = None
 _lock = threading.Lock()
 
 
-def engine():
+def engine(source='insole'):
     """按需装载：静态页面不该因为 onnxruntime 缺失而打不开。"""
-    global _engine, _engine_err
+    global _engine, _engine_err, _wt_engine
+    if source not in ('insole', 'wt'):
+        raise ValueError('unknown activity source')
+    if source == 'wt':
+        if str(ACT_DIR) not in sys.path:
+            sys.path.insert(0, str(ACT_DIR))
+        if _wt_engine is None:
+            from wt_engine import WTEngine
+            _wt_engine = WTEngine(threads=1)
+        return _wt_engine
     if _engine is not None:
         return _engine
     if _engine_err is not None:
@@ -70,7 +80,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Content-Length', str(len(raw)))
         self.end_headers()
-        self.wfile.write(raw)
+        try:
+            self.wfile.write(raw)
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            pass
 
     def _body(self):
         try:
@@ -96,12 +109,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
         try:
             with _lock:
-                eng = engine()
+                eng = engine(body.get('source', 'insole'))
                 if route == '/act/info':
                     out = eng.info()
                 elif route == '/act/reset':
-                    out = eng.reset(float(body.get('fs_left', 51.2)),
-                                    float(body.get('fs_right', 51.2)),
+                    default_fs = 50.0 if body.get('source') == 'wt' else 51.2
+                    out = eng.reset(float(body.get('fs_left', default_fs)),
+                                    float(body.get('fs_right', default_fs)),
                                     mode=body.get('mode', 'online-v2'))
                 else:
                     if 't_end' not in body:

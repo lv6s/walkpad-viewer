@@ -148,6 +148,6 @@ window.__wtDebug = { state, header: OFFICIAL_HEADER, build: buildTxt, names: exp
   irCmd, irCrcAck, irCrcIbm, irAck, irState, irStateText, irQueryState, irSetFmt, irSend, irWrite, irFmtText,
   irProbe, irLinkMode, hexOf, IR_LINK_NAME, IR_LOOSE_SIZE, FMT_KEY, irFmtLoad, irFmtSave, irSniff, irRxHint,
   FMT_NAME, FMT_UNIT,
-  act, actInfo, actStart, actStop, actTick, actFeed, actRender, actHistDraw, actBiasReady,
+  act, actInfo, actStart, actStop, actTick, actFeed, actWtPacket, actWtChoices, onPacket, makeDevice, actRender, actHistDraw, actBiasReady,
   ACT_CLASSES, ACT_REASON,
   REG: { MAC: REG_MAC, BATT: REG_BATT, VER: REG_VER } };

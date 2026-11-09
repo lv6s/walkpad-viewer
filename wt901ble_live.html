@@ -219,6 +219,8 @@
   <div class="card" id="actCard">
     <div class="toolbar" style="margin:0 0 8px">
       <span class="lbl">状态推断</span>
+      <select id="actSource"><option value="insole">自研鞋垫</option><option value="wt">WT脚背（试用）</option></select>
+      <span id="actWtPick" hidden>左 <select id="actWtL"><option value="">请选择设备</option></select> 右 <select id="actWtR"><option value="">请选择设备</option></select></span>
       <button class="primary" id="btnActOn">开始推断</button>
       <button id="btnActOff" disabled>停止</button>
       <span class="dm" id="actState">未开始</span>

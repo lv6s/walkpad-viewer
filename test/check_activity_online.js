@@ -14,6 +14,7 @@ const states = Object.fromEntries(['l', 'r'].map(f => [f, {
 }]));
 const context = vm.createContext({
   console, performance: { now: () => now }, $: node, irStates: states,
+  state: { devices: new Map() },
   log: () => {}, fit: () => null, setInterval: () => 0,
   fetch: async (url, init) => {
     const data = JSON.parse(init.body); posts.push({ url, data });

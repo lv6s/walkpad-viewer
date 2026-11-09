@@ -32,7 +32,8 @@ const ACT_REASON = {
 };
 
 const act = {
-  on: false, inflight: false, last: null, info: null, err: '',
+  on: false, inflight: false, last: null, info: null, err: '', source: 'insole',
+  wtKeys: { l: '', r: '' }, wtSignature: '',
   hist: [], buf: { l: [], r: [] },
   bias: { l: null, r: null }, waitBias: { l: 0, r: 0 },
   steps: 0, valid: 0, sent: 0, drop: 0,
@@ -42,6 +43,10 @@ const act = {
 
 /* 两脚都拿到零偏估计才允许决策：单脚缺估计时窗内会混进带偏数据 */
 function actBiasReady() {
+  if (act.source === 'wt') return ['l', 'r'].every(f => {
+    const d = state.devices.get(act.wtKeys[f]);
+    return d && d.connected && !d.demo;
+  });
   for (const f of ['l', 'r']) {
     const st = irStates[f];
     if (!st || !st.dev || !st.bias || !st.bias.ready) return false;
@@ -53,7 +58,7 @@ async function actPost(path, body) {
   const res = await fetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body || {})
+    body: JSON.stringify(Object.assign({ source: act.source }, body || {}))
   });
   let data = null;
   try { data = await res.json(); } catch (e) { data = null; }
@@ -71,7 +76,9 @@ async function actInfo() {
       '；单位 g / °·s⁻¹；' + (act.info.gyro_label || '角速度扣本页零偏估计') +
       '；窗口 2 s（' + act.info.window_samples + ' 点 @ ' +
       act.info.fs_out + ' Hz），每 ' + Math.round(act.info.step_s * 1000) + ' ms 一次决策；' +
-      '在线线性 v2：缓冲150 ms，跨度≤80 ms／连续缺≤3帧，补点覆盖≤30%，有效密度≥80%。';
+      (act.source === 'wt'
+        ? 'WT接收时钟：缓冲150 ms，包内分摊；跨度≤80 ms、密度≥80%。无硬件时间戳／缺帧计数，双脚同步为估计。三分类为试用候选。'
+        : '在线线性 v2：缓冲150 ms，跨度≤80 ms／连续缺≤3帧，补点覆盖≤30%，有效密度≥80%。');
   } catch (e) {
     act.info = null;
     $('actModel').textContent = '推断服务不可用';
@@ -83,7 +90,8 @@ async function actInfo() {
 
 async function actStart() {
   if (act.on || act.inflight) return;
-  if (!act.info || !act.info.online_policy || act.info.online_policy.version !== 'activity-online-linear-v2') {
+  const expected = act.source === 'wt' ? 'activity-wt-receipt-v1' : 'activity-online-linear-v2';
+  if (!act.info || !act.info.online_policy || act.info.online_policy.version !== expected) {
     act.err = '请关闭旧服务窗口，重新打开IMU页面以加载在线插值v2';
     actRender();
     return;
@@ -92,6 +100,13 @@ async function actStart() {
     const v = parseFloat($(id).value);
     return Number.isFinite(v) && v > 0 ? v : def;
   };
+  if (act.source === 'wt') {
+    act.wtKeys = { l: $('actWtL').value, r: $('actWtR').value };
+    if (!act.wtKeys.l || !act.wtKeys.r || act.wtKeys.l === act.wtKeys.r || !actBiasReady()) {
+      act.err = '请先添加并连接两台WT设备，明确选择不同的左脚和右脚';
+      actRender(); return;
+    }
+  }
   act.fsL = rate('actFsL', 51.2);
   act.fsR = rate('actFsR', 51.2);
   $('btnActOn').disabled = true;
@@ -126,7 +141,7 @@ function actStop(reason) {
 
 /* irFrame 每收一帧调一次；只在推断开着时记账 */
 function actFeed(st, s) {
-  if (!act.on || !s) return;
+  if (!act.on || act.source !== 'insole' || !s) return;
   const f = st.foot;
   if (!['l', 'r'].includes(f)) return;
   if (!s.clk || !Number.isFinite(s.clk.epoch) || !Number.isInteger(s.seq) ||
@@ -174,6 +189,33 @@ function actFeed(st, s) {
   }
 }
 
+function actWtPacket(d, frames, receipt) {
+  if (!act.on || act.source !== 'wt' || !d.connected || d.demo) return;
+  const foot = ['l', 'r'].find(f => act.wtKeys[f] === d.key);
+  if (!foot) return;
+  // Do not forward held accel/gyro from split frame types as simultaneous measurements.
+  const values = frames.filter(f => f.acc && f.gyr).map(f => [...f.acc, ...f.gyr]);
+  if (!values.length) return;
+  act.buf[foot].push({ foot, receipt_ms: receipt, segment: d.key + ':' + (d.actEpoch || 0), values });
+  if (act.buf[foot].length > ACT_BUF_MAX) {
+    act.drop += act.buf[foot].shift().values.length;
+  }
+}
+
+function actWtChoices() {
+  const signature = [...state.devices.values()].map(d => [d.key, d.label, d.mac, d.connected].join(':')).join('|');
+  if (signature === act.wtSignature) return;
+  act.wtSignature = signature;
+  for (const f of ['l', 'r']) {
+    const el = $('actWt' + f.toUpperCase()), prev = el.value;
+    el.replaceChildren(new Option('请选择设备', ''));
+    for (const d of state.devices.values()) if (!d.demo) {
+      el.add(new Option(d.label + (d.mac ? ' ' + d.mac : '') + (d.connected ? '' : '（未连接）'), d.key));
+    }
+    el.value = prev;
+  }
+}
+
 function actTick() {
   if (!act.on || act.inflight) return;
   /* 就绪与否看设备侧状态，不看是否喂过帧：缺脚时也要送出去，由服务端判 invalid */
@@ -184,7 +226,7 @@ function actTick() {
 
   const events = [];
   for (const f of ['l', 'r']) for (const e of act.buf[f]) events.push(e);
-  const n = events.length;
+  const n = act.source === 'wt' ? events.reduce((sum, e) => sum + e.values.length, 0) : events.length;
   act.buf.l.length = 0; act.buf.r.length = 0;
 
   act.inflight = true;
@@ -226,12 +268,15 @@ function actBiasHint() {
 
 function actRender() {
   if (!$('actCard')) return;
+  actWtChoices();
+  $('actSource').disabled = act.on || act.inflight;
+  $('actWtL').disabled = $('actWtR').disabled = act.on || act.inflight;
   const on = act.on, last = act.last;
   $('btnActOn').disabled = on || act.inflight;
   $('btnActOff').disabled = !on;
   $('actState').textContent = act.err
     ? '异常'
-    : (on ? (act.inflight ? '推断中…' : (actBiasReady() ? '运行中' : '等零偏'))
+    : (on ? (act.inflight ? '推断中…' : (actBiasReady() ? '运行中' : (act.source === 'wt' ? '等连接' : '等零偏')))
       : (act.steps ? '已停止' : '未开始'));
 
   const usable = on && actBiasReady() && !act.clockBad.l && !act.clockBad.r &&
@@ -251,10 +296,10 @@ function actRender() {
 
   let why;
   if (act.err) why = act.err;
-  else if (!on) why = act.steps ? '已停止' : '点「开始推断」，连接鞋垫后自动按 200 ms 出一次结果';
-  else if (!actBiasReady()) why = '等待零偏估计，请两脚静立约 5 秒' + actBiasHint();
+  else if (!on) why = act.steps ? '已停止' : '连接两脚设备并选择输入类型，点「开始推断」，每 200 ms 出一次结果';
+  else if (!actBiasReady()) why = act.source === 'wt' ? '等待所选左右WT设备连接；断连不输出类别' : '等待零偏估计，请两脚静立约 5 秒' + actBiasHint();
   else if (act.clockBad.l || act.clockBad.r) why = '缺少有效设备时间戳／序号，不能用写入时间替代';
-  else if (!last) why = '等数据…';
+  else if (!last) why = act.source === 'wt' ? '等待WT同步六轴打包帧（0x61），不支持拼接过期拆分帧' : '等数据…';
   else if (last.valid && !usable) why = '结果已过期，等待新鲜窗口';
   else if (last.valid) {
     const q = last.quality || {};
@@ -281,9 +326,9 @@ function actRender() {
   $('actUp').textContent = on || act.steps ? ((performance.now() - act.t0) / 1000).toFixed(0) : '0';
 
   for (const f of ['l', 'r']) {
-    const st = irStates[f];
-    const ready = !!(st.bias && st.bias.ready);
-    const txt = (st.dev ? (st.rate || 0) + ' Hz' : '未连接') +
+    const st = act.source === 'wt' ? (state.devices.get(act.wtKeys[f]) || {}) : irStates[f];
+    const ready = act.source === 'wt' ? !!st.connected : !!(st.bias && st.bias.ready);
+    const txt = ((act.source === 'wt' ? st.connected : st.dev) ? (st.rate || 0) + ' Hz' : '未连接') +
       (on ? (ready ? ' · ' + act.buf[f].length + ' 待发' : ' · 等零偏') : '');
     $('actFoot' + f.toUpperCase()).textContent = txt;
   }
@@ -312,6 +357,15 @@ function actHistDraw() {
   }
 }
 
+$('actSource').onchange = async () => {
+  if (act.on || act.inflight) return;
+  act.source = $('actSource').value;
+  act.info = null; act.last = null; act.err = ''; act.hist = [];
+  $('actWtPick').hidden = act.source !== 'wt';
+  $('actFsL').value = $('actFsR').value = act.source === 'wt' ? '50' : '51.2';
+  actWtChoices();
+  await actInfo();
+};
 $('btnActOn').onclick = () => actStart();
 $('btnActOff').onclick = () => actStop('手动停止');
 

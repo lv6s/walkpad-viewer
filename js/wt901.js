@@ -325,6 +325,7 @@ function parse(d, dv) {
 function onPacket(d, dv) {
   const tArr = performance.now() / 1000;
   const frames = parse(d, dv);
+  if (typeof actWtPacket === 'function') actWtPacket(d, frames, tArr * 1000);
   if (!frames.length) return;
   if (!state.T0) state.T0 = tArr;          // 全局零点：全场第一帧
   if (d.lastPkt) {
@@ -385,7 +386,10 @@ async function connectOne(d) {
     const server = await d.device.gatt.connect();
     const svc = await server.getPrimaryService(SERVICE);
     const ch = await svc.getCharacteristic(CHAR_NOTIFY);
-    ch.addEventListener('characteristicvaluechanged', (ev) => onPacket(d, ev.target.value));
+    if (d.actNotify && d.char) d.char.removeEventListener('characteristicvaluechanged', d.actNotify);
+    d.actEpoch = (d.actEpoch || 0) + 1;
+    d.actNotify = (ev) => onPacket(d, ev.target.value);
+    ch.addEventListener('characteristicvaluechanged', d.actNotify);
     await ch.startNotifications();
     d.char = ch;
     try { d.wchar = await svc.getCharacteristic(CHAR_WRITE); } catch (e) { d.wchar = null; }
@@ -743,6 +747,7 @@ function labelKey(d) {
 
 /* 卡片副标题：MAC · 电量（就是导出文件「设备名称」列里的那个 MAC） */
 function syncNames() {
+  if (typeof actWtChoices === 'function') actWtChoices();
   const names = exportNames();
   for (const k of state.order) {
     const d = state.devices.get(k);
