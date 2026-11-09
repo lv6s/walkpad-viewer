@@ -43,7 +43,7 @@ def replay(eng: ActEngine, npz, key: str) -> list:
     t_us = npz[key + "_t_us"]
     foot = npz[key + "_foot"]
     vals = npz[key + "_values"].astype(np.float64)
-    eng.reset(50.0, 50.0)
+    eng.reset(50.0, 50.0, mode="legacy-v1")
     out, next_us = [], COLD_US
 
     def decide(us):
@@ -92,7 +92,7 @@ def check_replays(eng: ActEngine) -> None:
 
 
 def check_contract(eng: ActEngine) -> None:
-    eng.reset(50.0, 50.0)
+    eng.reset(50.0, 50.0, mode="legacy-v1")
     r = eng.decide(1000.0)
     assert not r["valid"] and r["reason"] == "no_data", r
     ok = eng.push([["l", [0.0, 0, 0, 1, 0, 0, 0]] * 1])

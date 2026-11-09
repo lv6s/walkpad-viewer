@@ -6,8 +6,8 @@ http.server 不发 Cache-Control，Chrome 会按启发式缓存直接吃旧 JS�
 
 推断接口（POST，JSON）：
   /act/info    读模型与契约信息
-  /act/reset   新建一段会话（可带 fs_left / fs_right）
-  /act/step    {events: [[foot, [t_ms, ax..gz]], ...], t_end} -> 一次决策
+  /act/reset   新建会话（fs_left / fs_right / mode，默认 online-v2）
+  /act/step    online-v2 事件含设备时间、接收时间、序号和分段；另传 t_end / now_ms
 
 改成多线程是必须的：推断占住一个连接时，静态文件和下一次决策不能被堵住。
 """
@@ -100,12 +100,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if route == '/act/info':
                     out = eng.info()
                 elif route == '/act/reset':
-                    out = eng.reset(float(body.get('fs_left', 50.0)),
-                                    float(body.get('fs_right', 50.0)))
+                    out = eng.reset(float(body.get('fs_left', 51.2)),
+                                    float(body.get('fs_right', 51.2)),
+                                    mode=body.get('mode', 'online-v2'))
                 else:
                     if 't_end' not in body:
                         raise ValueError('t_end is required')
-                    out = eng.step(body.get('events') or [], float(body['t_end']))
+                    out = eng.step(body.get('events') or [], float(body['t_end']),
+                                   now_ms=body.get('now_ms'))
         except RuntimeError as exc:            # 引擎装不上（缺 onnxruntime / 模型损坏）
             self._json(503, {'ok': False, 'reason': 'engine_unavailable', 'detail': str(exc)})
             return

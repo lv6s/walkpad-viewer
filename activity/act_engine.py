@@ -1,11 +1,6 @@
-"""实时 walk/run/other 推断引擎：事件进，决策出。
+"""实时 walk/run/other 推断；输入为自研坐标系 g/dps，角速度由调用方扣偏。
 
-ONNX 图是「原始 g/dps → logits」，归一化在图内；本文件只负责因果重采样、
-窗口网格、缺口门控与轴向映射，重采样算子直接复用交付包里的同一份实现。
-
-两条改错不报错、只是变差的约束：
-  * 送进来的是**未扣零偏**的原始角速度（页面的 gx0/gy0/gz0），不是显示值；
-  * 送进来的是自研鞋垫自身坐标系的物理量，必须经 AXIS_OWN_TO_TRAIN 转到训练域。
+ONNX 内含归一化；轴变换只在本引擎执行。online-v2 与 legacy-v1 分开版本。
 """
 from __future__ import annotations
 
@@ -18,6 +13,7 @@ import numpy as np
 import onnxruntime as ort
 
 import runtime_activity_v1 as rt
+from online_preprocess import OnlineInput, POLICY
 
 HERE = Path(__file__).resolve().parent
 CLASSES = ("walk", "run", "other")
@@ -61,17 +57,23 @@ class ActEngine:
         self.reset()
 
     # ---------------------------------------------------------------- state
-    def reset(self, fs_left: float = 50.0, fs_right: float = 50.0) -> dict:
+    def reset(self, fs_left: float = 51.2, fs_right: float = 51.2,
+              mode: str = "online-v2") -> dict:
         for fs in (fs_left, fs_right):
             if not np.isfinite(fs) or fs <= 0:
                 raise ValueError("declared native rate must be finite and positive")
+        if mode not in ("online-v2", "legacy-v1"):
+            raise ValueError("unknown preprocessing mode")
+        online = OnlineInput(fs_left, fs_right) if mode == "online-v2" else None
+        self.mode = mode
+        self.online = online
         self.fs = {"l": float(fs_left), "r": float(fs_right)}
         self.streams = {f: rt.Stream(fs_in=self.fs[f]) for f in FEET}
         self.origin = None
         self.last_t = {"l": None, "r": None}
         self.decisions = 0
         self.last_valid_at = None
-        return {"ok": True, "fs": self.fs}
+        return {"ok": True, "fs": self.fs, "mode": self.mode, "policy": POLICY}
 
     def info(self) -> dict:
         m = self.manifest
@@ -83,7 +85,10 @@ class ActEngine:
             "window_samples": WINDOW,
             "fs_out": rt.PREPROCESS["fs_out"],
             "step_s": STEP_S,
-            "max_gap_s": rt.PREPROCESS["max_gap_s"],
+            "max_gap_s": POLICY["max_span_ms"] / 1000,
+            "mode": self.mode,
+            "online_policy": POLICY,
+            "opset": m["opset"],
             "axis_own_to_train": self.axis.tolist(),
             "axis_label": "自研鞋垫 → Moticon 约定（绕 z 轴 +90°）",
             "units": {"acc": "g", "gyro": "dps"},
@@ -152,8 +157,41 @@ class ActEngine:
             n += len(t)
         return {"ok": True, "accepted": n}
 
-    def step(self, events, t_end: float) -> dict:
-        """页面用的合并入口：先入流，再在 t_end 处出一次决策。"""
+    def step(self, events, t_end: float, now_ms=None) -> dict:
+        """页面用的合并入口；online-v2 明确传入接收可用时刻。"""
+        if self.mode == "online-v2":
+            if now_ms is None or not np.isfinite([t_end, now_ms]).all():
+                return self._invalid("bad_time", "online-v2 requires finite now_ms", t_end)
+            if len(events) > MAX_EVENTS_PER_STEP:
+                return self._invalid("too_many_events", "too many online events", t_end)
+            if now_ms-t_end < POLICY["buffer_ms"]-1e-6:
+                return self._invalid("bad_time", "insufficient availability delay", t_end)
+            if self.online.last_now is not None and (now_ms < self.online.last_now or t_end <= self.online.last_end):
+                return self._invalid("bad_time", "decision clock moved backwards", t_end)
+            if self.online.grid_origin is not None:
+                phase = (t_end-self.online.grid_origin)/20
+                if abs(phase-round(phase)) > 1e-5:
+                    return self._invalid("bad_time", "decision is off the established grid", t_end)
+            try:
+                accepted = self.online.push(events, float(now_ms))
+            except (ValueError, TypeError, KeyError) as exc:
+                return self._invalid("bad_request", str(exc), t_end)
+            feeds, quality, reason = self.online.decide(float(t_end), float(now_ms))
+            if reason:
+                out = self._invalid(reason, "online input quality gate", t_end)
+                out.update(quality=quality, preprocess=POLICY["version"],
+                           result_age_ms=float(now_ms-t_end))
+                return out
+            feeds = np.concatenate([self._rotate(feeds[0, :6].T),
+                                    self._rotate(feeds[0, 6:].T)], axis=1).T[None].astype(np.float32)
+            out = self._predict(feeds, t_end)
+            out.update(quality=quality, preprocess=POLICY["version"],
+                       quality_level="degraded" if any(q["repaired_fraction"] > 0 or q["density"] < .95
+                                                       for q in quality.values()) else "normal",
+                       result_age_ms=float(now_ms-t_end),
+                       age_ms=max(q["max_span_ms"] for q in quality.values()),
+                       pushed={"ok": True, "accepted": accepted})
+            return out
         pushed = self.push(events)
         if not pushed["ok"]:
             t = float(t_end) if np.isfinite(t_end) else None
@@ -194,6 +232,11 @@ class ActEngine:
             cols.append(x)
 
         feeds = np.concatenate(cols, axis=1).T[None].astype(np.float32)
+        out = self._predict(feeds, t_end)
+        out["age_ms"] = age_max * 1000.0
+        return out
+
+    def _predict(self, feeds, t_end):
         t0 = time.perf_counter()
         logits = self.session.run(None, {"x": feeds})[0][0]
         latency = (time.perf_counter() - t0) * 1000.0
@@ -209,5 +252,5 @@ class ActEngine:
             "probabilities": [float(v) for v in prob],
             "t_end": t_end,
             "latency_ms": latency,
-            "age_ms": age_max * 1000.0,
+            "age_ms": None,
         }

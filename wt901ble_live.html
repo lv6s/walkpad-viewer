@@ -224,8 +224,8 @@
       <span class="dm" id="actState">未开始</span>
       <div class="spacer"></div>
       <span class="dm">声明采样率</span>
-      <input class="tin" id="actFsL" type="number" min="1" max="500" step="0.1" value="50" title="左脚原生采样率，只影响因果低通设计；与实际不符只是滤波略有偏差，不会报错">
-      <input class="tin" id="actFsR" type="number" min="1" max="500" step="0.1" value="50" title="右脚原生采样率，同上">
+      <input class="tin" id="actFsL" type="number" min="45" max="110" step="0.1" value="51.2" title="左脚设备参考采样率，用于密度与缺口门控；不要填掉帧后的接收Hz">
+      <input class="tin" id="actFsR" type="number" min="45" max="110" step="0.1" value="51.2" title="右脚设备参考采样率，用于密度与缺口门控；不要随掉帧向下调整">
       <span class="dm" id="actModel">—</span>
     </div>
     <div class="actgrid">

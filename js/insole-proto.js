@@ -368,16 +368,18 @@ function irClose(foot) {
 }
 
 function irEvt(e, foot) {
+  const received = performance.now();
   const v = e.target.value;
-  irFeed(new Uint8Array(v.buffer, v.byteOffset, v.byteLength), foot);
+  irFeed(new Uint8Array(v.buffer, v.byteOffset, v.byteLength), foot, received);
 }
 
 /* FFE1 回执：单独计数，方便判断「设备从写通道回了、只是没走 2A37」 */
 function irEvtW(e, foot) {
+  const received = performance.now();
   const v = e.target.value;
   const st = irStates[foot || irActive];
   st.ffBytes += v.byteLength;
-  irFeed(new Uint8Array(v.buffer, v.byteOffset, v.byteLength), foot);
+  irFeed(new Uint8Array(v.buffer, v.byteOffset, v.byteLength), foot, received);
 }
 
 /* ---------- 主机命令：读/写设备的压力输出格式 ----------
@@ -724,7 +726,7 @@ function irCrcOk(f) {
   return crc === (f[f.length - 2] | (f[f.length - 1] << 8));
 }
 
-function irFeed(chunk, foot) {
+function irFeed(chunk, foot, received = performance.now()) {
   const st = irStates[foot || irActive];
   if (st.wait) {
     st.rxBytes += chunk.length;
@@ -751,7 +753,7 @@ function irFeed(chunk, foot) {
       if (d.length - h < need) { i = h; break; }            // 整帧还没收齐
       const f = d.subarray(h, h + need);
       if (!irCrcOk(f)) { st.bad++; i = h + 1; continue; }
-      irFrame(f, foot);
+      irFrame(f, foot, received);
       i = h + need;
       continue;
     }
@@ -859,7 +861,7 @@ function irDevSync(st, s, now) {
   return e + ck.ofs;
 }
 
-function irFrame(f, foot) {
+function irFrame(f, foot, received = performance.now()) {
   const st = irStates[foot || irActive];
   const dv = new DataView(f.buffer, f.byteOffset, f.byteLength);
   const now = performance.now();
@@ -869,7 +871,7 @@ function irFrame(f, foot) {
   const r4 = dv.getInt16(23, true), r5 = dv.getInt16(25, true), r6 = dv.getInt16(27, true);
   const tempRaw = dv.getInt16(15, true);
   const s = {
-    t, len: f.length, pts: f[29], tempRaw,
+    t, len: f.length, pts: f[29], tempRaw, receiptPerf: received,
     seq: dv.getUint32(3, true), ts: dv.getUint32(7, true), date: dv.getUint32(11, true),
     /* 线序原始 int16，导出 imu_raw_values 用（物理值是它的轴变换结果） */
     raw6: [r1, r2, r3, r4, r5, r6],
