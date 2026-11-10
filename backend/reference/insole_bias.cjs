@@ -1,5 +1,8 @@
 'use strict';
-function createBiasTracker() {
+function createBiasTracker(options = {}) {
+  const adaptive = options.adaptive === true;
+  const assessNoise = adaptive ? require('../noise_gate.cjs').assessNoise : null;
+  let lastReject = null, diagnostics = null, acceptedWindows = 0, rejectedWindows = 0, bootstrap = null;
   let now = 0, nextId = 0;
   const timers = new Map();
   const performance = { now: () => now };
@@ -37,6 +40,7 @@ function irBiasSetMode(st, mode) {
 }
 
 function irBiasDynamicClear(st, reason) {
+  lastReject = reason; rejectedWindows++; bootstrap = null;
   if (st.bias.dynamic) st.bias.dynamic.rows = [];
   st.bias.still = 0;
   st.bias.status = '等待下一段静止：' + reason + (st.bias.ready ? ' · 保留补偿' : ' · 未就绪');
@@ -105,7 +109,17 @@ function irBiasDynamic(st, s) {
     + Math.min(acceptedSpan / 1000, ms / 1000).toFixed(1) + '/' + (ms / 1000).toFixed(1) + ' 秒';
   if (acceptedSpan < ms || rows.length < (b.ready ? IR_DYN_MIN : IR_DYN_INIT_MIN)) { irBiasText(st); return; }
   const stats = irBiasDynamicStats(rows, rows[0][6], now), mu = stats.mu;
-  for (let k = 0; k < 6; k++) {
+  if (adaptive) {
+    diagnostics = assessNoise(rows, stats, irBiasDynamicStats);
+    if (diagnostics.reject) {
+      lastReject = diagnostics.reject; rejectedWindows++; bootstrap = null;
+      c.rows = rows.filter(q => q[6] >= rows[0][6] + 500);
+      b.still = c.rows.length;
+      b.status = '等待下一段静止：' + diagnostics.reject + (b.ready ? ' · 保留补偿' : ' · 未就绪');
+      return;
+    }
+  }
+  for (let k = adaptive ? 3 : 0; k < 6; k++) {
     let lo = Infinity, hi = -Infinity;
     for (const row of rows) { lo = Math.min(lo, row[k]); hi = Math.max(hi, row[k]); }
     if (stats.std[k] > (k < 3 ? IR_DYN_GSTD : IR_DYN_ASTD) + eps
@@ -123,6 +137,19 @@ function irBiasDynamic(st, s) {
     irBiasDynamicClear(st, '窗口重力模长超限'); return;
   }
   const obs = mu.slice(0, 3);
+  const needsConfirmation = adaptive && !b.ready && (bootstrap !== null || [0, 1, 2].some(k =>
+    stats.std[k] > IR_DYN_GSTD || Math.max(...rows.map(q => q[k])) - Math.min(...rows.map(q => q[k])) > IR_DYN_GRANGE));
+  if (needsConfirmation) {
+    if (!bootstrap || Math.hypot(...obs.map((v, k) => v - bootstrap[k])) > 0.08) {
+      bootstrap = obs;
+      c.rows = []; b.still = 0;
+      b.status = '候选零偏已取得 · 等待独立静置窗复核';
+      return;
+    }
+    for (let k = 0; k < 3; k++) obs[k] = (obs[k] + bootstrap[k]) / 2;
+    bootstrap = null;
+  }
+  acceptedWindows++; lastReject = null;
   if (!b.ready) {
     b.g = obs; b.ready = true;
     b.status = '已初始化 · 等待下一段静止';
@@ -267,14 +294,15 @@ function irBiasReset(st, silent) {
   }
   function snapshot() {
     const b = st.bias;
-    return { ready: b.ready, gyro_bias_dps: [...b.g], mode: b.mode, status: b.status, candidate_frames: b.still };
+    return { ready: b.ready, gyro_bias_dps: [...b.g], mode: b.mode, status: b.status, candidate_frames: b.still,
+      ...(adaptive ? { gate_version: 'bounded-noise-v1', last_reject: lastReject, accepted_windows: acceptedWindows, rejected_windows: rejectedWindows, diagnostics } : {}) };
   }
   return {
     advance, snapshot,
-    reset() { irBiasReset(st, true); },
-    setMode(mode) { irBiasSetMode(st, mode); },
-    startCalibration() { irBiasStart(st); },
-    cancelCalibration() { irBiasCancel(st, 'cancelled'); },
+    reset() { irBiasReset(st, true); lastReject = null; diagnostics = null; acceptedWindows = 0; rejectedWindows = 0; bootstrap = null; },
+    setMode(mode) { if (mode !== st.bias.mode && (mode === 'manual' || mode === 'dynamic')) bootstrap = null; irBiasSetMode(st, mode); },
+    startCalibration() { bootstrap = null; irBiasStart(st); },
+    cancelCalibration() { bootstrap = null; irBiasCancel(st, 'cancelled'); },
     push(sample, processingMs) {
       advance(processingMs);
       irBiasTrack(st, sample);

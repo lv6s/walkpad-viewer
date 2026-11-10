@@ -4,7 +4,7 @@ const readline = require('node:readline');
 const { createBiasTracker } = require(path.resolve(__dirname, 'reference/insole_bias.cjs'));
 let feet;
 function reset() {
-  feet = Object.fromEntries(['l', 'r'].map(f => [f, { tracker: createBiasTracker(), connection: null, retired: new Set(), generation: 0, previous: null, clock: null }]));
+  feet = Object.fromEntries(['l', 'r'].map(f => [f, { tracker: createBiasTracker({ adaptive: process.env.WALKPAD_BIAS_GATE !== 'legacy' }), connection: null, retired: new Set(), generation: 0, previous: null, clock: null }]));
 }
 reset();
 function prepare(records) {
