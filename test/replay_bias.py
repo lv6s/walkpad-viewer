@@ -24,9 +24,9 @@ def replay(sid):
                if r['foot'] in ('l', 'r') and r['imu_raw_values'] and r['device_calendar_ms'] is not None]
     result = {'session': sid, 'rows': len(records), 'modes': {}, 'source_sha256': {
         name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in
-        ['backend/reference/insole_bias.cjs', 'backend/noise_gate.cjs', 'backend/bias_worker.cjs']}}
-    for mode in ('legacy', 'bounded'):
-        env = dict(os.environ, WALKPAD_BIAS_GATE='legacy' if mode == 'legacy' else 'bounded')
+        ['backend/reference/insole_bias.cjs', 'backend/noise_gate.cjs', 'backend/bias_recovery.cjs', 'backend/bias_worker.cjs']}}
+    for mode in ('legacy', 'bounded', 'confirmed'):
+        env = dict(os.environ, WALKPAD_BIAS_GATE=mode)
         p = subprocess.run(['node', str(ROOT / 'backend' / 'bias_worker.cjs')],
                            input=json.dumps({'records': records}) + '\n', capture_output=True,
                            text=True, encoding='utf-8', env=env,
@@ -46,16 +46,26 @@ def replay(sid):
                 g = r['gyro_bias_dps']
                 if g != before:
                     changes.append({'t': round((r['processing_ms'] - t0) / 1000, 3), 'bias': g,
-                                    'diagnostics': r.get('diagnostics')})
+                                    'diagnostics': r.get('diagnostics'), 'recovery': r.get('recovery')})
                     before = g
             rejected = collections.Counter(r['status'].split('：', 1)[-1].split(' · ')[0]
                                            for r in tr if r['status'].startswith('等待下一段静止：'))
+            block_residuals = []
+            for start in range(0, int((tr[-1]['processing_ms'] - t0) / 1000) - 9, 10):
+                block = [r for r in ready if start * 1000 <= r['processing_ms'] - t0 < (start + 10) * 1000]
+                if len(block) < 2:
+                    continue
+                t = np.array([(r['processing_ms'] - t0) / 1000 for r in block])
+                corrected = np.array([np.array(r['own_before_bias'][3:]) - np.array(r['gyro_bias_dps']) for r in block])
+                mean = np.trapezoid(corrected, t, axis=0) / (t[-1] - t[0])
+                block_residuals.append({'start_s': start, 'mean_dps': mean.tolist(), 'std_dps': corrected.std(0).tolist()})
             feet[foot] = dict(frames=len(tr), span_s=round((tr[-1]['processing_ms'] - t0) / 1000, 3),
                               first_ready_s=round((ready[0]['processing_ms'] - t0) / 1000, 3) if ready else None,
                               final_bias=ready[-1]['gyro_bias_dps'] if ready else None,
                               updates=len(changes), reject_counts=dict(rejected),
                               accepted_windows=tr[-1].get('accepted_windows'),
-                              last_reject=tr[-1].get('last_reject'), changes=changes)
+                              last_reject=tr[-1].get('last_reject'), changes=changes,
+                              corrected_blocks=block_residuals, recovery=tr[-1].get('recovery'))
             # 只报告跨窗一致性；没有外部静止标签，不称真实误差。
             if changes:
                 b = np.array([c['bias'] for c in changes])

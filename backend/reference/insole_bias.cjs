@@ -1,6 +1,7 @@
 'use strict';
 function createBiasTracker(options = {}) {
-  const adaptive = options.adaptive === true;
+  const recovery = options.recovery === true ? require('../bias_recovery.cjs').createBiasRecovery() : null;
+  const adaptive = options.adaptive === true || recovery !== null;
   const assessNoise = adaptive ? require('../noise_gate.cjs').assessNoise : null;
   let lastReject = null, diagnostics = null, acceptedWindows = 0, rejectedWindows = 0, bootstrap = null;
   let now = 0, nextId = 0;
@@ -41,6 +42,7 @@ function irBiasSetMode(st, mode) {
 
 function irBiasDynamicClear(st, reason) {
   lastReject = reason; rejectedWindows++; bootstrap = null;
+  if (recovery) recovery.invalidate();
   if (st.bias.dynamic) st.bias.dynamic.rows = [];
   st.bias.still = 0;
   st.bias.status = '等待下一段静止：' + reason + (st.bias.ready ? ' · 保留补偿' : ' · 未就绪');
@@ -113,6 +115,7 @@ function irBiasDynamic(st, s) {
     diagnostics = assessNoise(rows, stats, irBiasDynamicStats);
     if (diagnostics.reject) {
       lastReject = diagnostics.reject; rejectedWindows++; bootstrap = null;
+      if (recovery) recovery.invalidate();
       c.rows = rows.filter(q => q[6] >= rows[0][6] + 500);
       b.still = c.rows.length;
       b.status = '等待下一段静止：' + diagnostics.reject + (b.ready ? ' · 保留补偿' : ' · 未就绪');
@@ -149,17 +152,28 @@ function irBiasDynamic(st, s) {
     for (let k = 0; k < 3; k++) obs[k] = (obs[k] + bootstrap[k]) / 2;
     bootstrap = null;
   }
+  let tau = IR_DYN_TAU, target = obs;
+  if (recovery && b.ready) {
+    const decision = recovery.assess({ bias: b.g, gyro: obs, accel: mu.slice(3), start: rows[0][6], end: now });
+    if (decision.hold) {
+      c.rows = []; b.still = 0; lastReject = decision.reason;
+      b.status = decision.reason + ' · 保留补偿';
+      return;
+    }
+    target = decision.gyro; tau = decision.tau;
+  }
   acceptedWindows++; lastReject = null;
   if (!b.ready) {
     b.g = obs; b.ready = true;
+    if (recovery) recovery.initialized();
     b.status = '已初始化 · 等待下一段静止';
   } else {
-    // 不重叠窗只积分一次；累计位移无人工解锁，允许缓慢跟随真实零偏漂移。
-    const dt = acceptedSpan / 1000, alpha = -Math.expm1(-dt / IR_DYN_TAU);
-    const delta = obs.map((v, k) => v - b.g[k]).map((v) => v * alpha), norm = Math.hypot(...delta);
+    const dt = acceptedSpan / 1000, alpha = -Math.expm1(-dt / tau);
+    const delta = target.map((v, k) => v - b.g[k]).map((v) => v * alpha), norm = Math.hypot(...delta);
     const scale = norm > IR_DYN_RATE * dt ? IR_DYN_RATE * dt / norm : 1;
     b.g = b.g.map((v, k) => v + delta[k] * scale);
-    b.status = '已更新 · 等待下一段静止';
+    b.status = recovery && recovery.snapshot().phase === 'fast_tracking'
+      ? '静止复核通过 · 快速重定位' : '已更新 · 等待下一段静止';
   }
   c.rows = []; b.still = 0;
   irBiasText(st);
@@ -295,14 +309,18 @@ function irBiasReset(st, silent) {
   function snapshot() {
     const b = st.bias;
     return { ready: b.ready, gyro_bias_dps: [...b.g], mode: b.mode, status: b.status, candidate_frames: b.still,
-      ...(adaptive ? { gate_version: 'bounded-noise-v1', last_reject: lastReject, accepted_windows: acceptedWindows, rejected_windows: rejectedWindows, diagnostics } : {}) };
+      ...(adaptive ? { gate_version: recovery ? 'confirmed-rest-v2' : 'bounded-noise-v1', last_reject: lastReject, accepted_windows: acceptedWindows, rejected_windows: rejectedWindows, diagnostics } : {}),
+      ...(recovery ? { recovery: recovery.snapshot() } : {}) };
   }
   return {
     advance, snapshot,
-    reset() { irBiasReset(st, true); lastReject = null; diagnostics = null; acceptedWindows = 0; rejectedWindows = 0; bootstrap = null; },
-    setMode(mode) { if (mode !== st.bias.mode && (mode === 'manual' || mode === 'dynamic')) bootstrap = null; irBiasSetMode(st, mode); },
-    startCalibration() { bootstrap = null; irBiasStart(st); },
-    cancelCalibration() { bootstrap = null; irBiasCancel(st, 'cancelled'); },
+    reset() { irBiasReset(st, true); lastReject = null; diagnostics = null; acceptedWindows = 0; rejectedWindows = 0; bootstrap = null; if (recovery) recovery.reset(); },
+    setMode(mode) {
+      if (mode !== st.bias.mode && (mode === 'manual' || mode === 'dynamic')) { bootstrap = null; if (recovery) recovery.invalidate(); }
+      irBiasSetMode(st, mode);
+    },
+    startCalibration() { bootstrap = null; if (recovery) recovery.invalidate(); irBiasStart(st); },
+    cancelCalibration() { bootstrap = null; if (recovery) recovery.invalidate(); irBiasCancel(st, 'cancelled'); },
     push(sample, processingMs) {
       advance(processingMs);
       irBiasTrack(st, sample);
