@@ -864,7 +864,7 @@ function irDevSync(st, s, now) {
 function irFrame(f, foot, received = performance.now()) {
   const st = irStates[foot || irActive];
   const dv = new DataView(f.buffer, f.byteOffset, f.byteLength);
-  const now = performance.now();
+  const now = st.remote ? received : performance.now();
   if (!st.t0) st.t0 = now;
   const t = (now - st.t0) / 1000;
   const r1 = dv.getInt16(17, true), r2 = dv.getInt16(19, true), r3 = dv.getInt16(21, true);
@@ -872,6 +872,7 @@ function irFrame(f, foot, received = performance.now()) {
   const tempRaw = dv.getInt16(15, true);
   const s = {
     t, len: f.length, pts: f[29], tempRaw, receiptPerf: received,
+    desktopReceiveEpochMs: st.remote ? st.remoteReceipt : Date.now(),
     seq: dv.getUint32(3, true), ts: dv.getUint32(7, true), date: dv.getUint32(11, true),
     /* 线序原始 int16，导出 imu_raw_values 用（物理值是它的轴变换结果） */
     raw6: [r1, r2, r3, r4, r5, r6],
@@ -882,7 +883,7 @@ function irFrame(f, foot, received = performance.now()) {
   /* 原始值另存一份：parquet 导出给原始值，显示与波形给扣偏后的值。
      估计逻辑在 irBiasTrack 里，只读原始值 —— 用扣后的值再估会自己吃自己。 */
   s.gx0 = s.gx; s.gy0 = s.gy; s.gz0 = s.gz;
-  irBiasTrack(st, s);
+  if (!st.remote) irBiasTrack(st, s);
   s.gx -= st.bias.g[0]; s.gy -= st.bias.g[1]; s.gz -= st.bias.g[2];
   s.perf = irDevSync(st, s, now);
   st.frames++; st.fpsN++; st.last = s; st.tempRaw = tempRaw;
@@ -919,7 +920,7 @@ function irFrame(f, foot, received = performance.now()) {
         st.lastSeen[idx] = t;
         fv[idx] = g;
         ids.push(idx + 1);
-        if (st.recording) st.prec.push({ t, ch: idx + 1, g, slot: (13 - row) * 5 + col });
+        if (st.recording && (!st.remote || received >= REC_T0)) st.prec.push({ t, ch: idx + 1, g, slot: (13 - row) * 5 + col });
       }
     }
     st.pFrames++;
@@ -932,7 +933,7 @@ function irFrame(f, foot, received = performance.now()) {
   if (st.sel >= 0) pwPush(st.sel, t, fv[st.sel], st.foot);
 
   /* 录制必须在压力解析之后再存快照，否则存到的是上一帧的槽位 */
-  if (st.recording) {
+  if (st.recording && (!st.remote || received >= REC_T0)) {
     s.slots = Array.from(st.slots);
     /* 原始通知包留摘要不留字节：导出的 raw_packet_sha256 要它，但整包留着
        一次长录制就是几十 MB，摘要 64 字符还够用 */
@@ -961,7 +962,7 @@ function irFrame(f, foot, received = performance.now()) {
 /* 两只脚各有一个定时器，但只有活动那只刷新可见面板，省掉一半无谓重绘 */
 function irTick(foot) {
   const st = irStates[foot || irActive];
-  irBiasTrack(st);
+  if (!st.remote) irBiasTrack(st);
   if (!st.samples.length) return;
   const now = performance.now();
   if (now - st.fpsT >= 1000) {

@@ -25,6 +25,22 @@
     <button id="btnTxt" disabled title="官方 WitMotion 导出格式（制表符 23 列 .txt）">导出 TXT</button>
   </header>
 
+  <div class="card" style="margin:12px 0;padding:12px">
+    <div class="toolbar" style="margin:0">
+      <span class="lbl">采集来源</span>
+      <select id="captureSource"><option value="direct">电脑蓝牙直连</option><option value="phone">手机采集（局域网）</option></select>
+      <span id="phoneStatus" class="dm">手机 App 保持原版</span>
+    </div>
+    <div id="phonePanel" hidden>
+      <div class="toolbar" style="margin:8px 0">
+        <span id="phoneAddress"></span><span>配对码 <b id="phoneToken">—</b></span>
+        <button id="phoneRelease">释放手机会话</button><button id="phoneExport">保存手机接收记录</button>
+      </div>
+      <div id="phoneTiming" style="line-height:1.7">等待手机数据</div>
+      <div class="dm" style="white-space:normal;max-width:none">设备→电脑真实单程延迟：未校时，不可测。表观差含时钟偏差；网络额外滞后相对最近600批最低观测路径，不包含未知固定延迟，也可能受长期时钟漂移影响；帧内时间戳尚不能证明就是射频发送时刻。手机模式的零偏与分类以后台为准。</div>
+    </div>
+  </div>
+
   <div class="toolbar">
     <span class="lbl">视图</span>
     <div class="seg" id="segMode" title="可多选：同时开几个面板就并排看几个">
@@ -152,6 +168,7 @@
         </div>
         <div class="sub">
           <span>设备时间戳 <b id="irTs-FT">—</b></span>
+          <span title="电脑收包日历时间减设备日历时间；含未知时钟偏差，不是真实单程延迟">电脑－设备表观差 <b id="irDelay-FT">—</b></span>
           <span>温度 <b id="irAux-FT">—</b></span>
           <span>帧长 <b id="irLen-FT">—</b></span>
         </div>
@@ -293,5 +310,6 @@
 <script src="js/activity-live.js"></script>
 <!-- 入口：事件绑定、主循环、启动引导、调试出口。 -->
 <script src="js/main.js"></script>
+<script src="js/phone-bridge.js"></script>
 </body>
 </html>

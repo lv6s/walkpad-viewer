@@ -19,7 +19,15 @@ import socketserver
 import sys
 import threading
 import traceback
+import urllib.request
+import urllib.error
+import subprocess
+import atexit
+import time
+
 from pathlib import Path
+
+BRIDGE_DIR = Path(__file__).resolve().parent.parent / 'walkpad_repo' / 'android_algorithm_lab' / 'desktop'
 
 HERE = Path(__file__).resolve().parent
 PORT_FILE = HERE / '_port.txt'
@@ -60,6 +68,52 @@ def engine(source='insole'):
     return _engine
 
 
+BRIDGE_URL = 'http://127.0.0.1:8766'
+_bridge_process = None
+_bridge_guard = threading.Lock()
+
+
+def ensure_bridge():
+    global _bridge_process
+    with _bridge_guard:
+        try:
+            with urllib.request.urlopen(BRIDGE_URL + '/api/config', timeout=1) as r:
+                config = json.load(r)
+                if config.get('event_stream_version') == 1:
+                    return
+                if config.get('version'):
+                    raise RuntimeError('8766正在运行旧版工作台：先停止并导出手机记录，关闭旧工作台控制台后再重开IMU入口')
+        except (OSError, ValueError):
+            pass
+        if _bridge_process is None or _bridge_process.poll() is not None:
+            import importlib.util
+            interpreter = sys.executable
+            if importlib.util.find_spec('onnxruntime') is None:
+                candidate = Path(sys.executable).parent / 'envs' / 'agent-shared' / 'python.exe'
+                if candidate.is_file():
+                    interpreter = str(candidate)
+            _bridge_process = subprocess.Popen([interpreter, str(BRIDGE_DIR / 'server.py')],
+                                              cwd=str(BRIDGE_DIR))
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline:
+            try:
+                with urllib.request.urlopen(BRIDGE_URL + '/api/config', timeout=.5):
+                    return
+            except OSError:
+                if _bridge_process.poll() is not None:
+                    break
+                time.sleep(.1)
+        raise RuntimeError('手机桥接服务未就绪，请检查8766端口和运行环境')
+
+
+def close_owned_bridge():
+    if _bridge_process is not None and _bridge_process.poll() is None:
+        _bridge_process.terminate()
+
+
+atexit.register(close_owned_bridge)
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=str(HERE), **kw)
@@ -96,8 +150,44 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return {}
         return json.loads(self.rfile.read(n) or b'{}')
 
+    def _bridge(self):
+        route = self.path[len('/phone'):]
+        allowed = ('/api/config', '/api/status', '/api/events', '/api/export', '/api/release')
+        if route.split('?')[0] not in allowed:
+            self._json(404, {'error': 'not_found'})
+            return
+        if self.command == 'POST' and route != '/api/release':
+            self._json(405, {'error': 'method_not_allowed'})
+            return
+        if self.command == 'POST' and self.headers.get('X-Walkpad-Control') != '1':
+            self._json(403, {'error': 'control_header_required'})
+            return
+        try:
+            ensure_bridge()
+            req = urllib.request.Request(BRIDGE_URL + route,
+                                         method=self.command,
+                                         headers={'X-Walkpad-Control': '1'})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                raw = r.read()
+                self.send_response(200)
+                self.send_header('Content-Type', r.headers.get('Content-Type', 'application/json'))
+                self.send_header('Content-Length', str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+        except urllib.error.HTTPError as exc:
+            self._json(exc.code, {'error': exc.read().decode('utf-8', 'replace')[:300]})
+        except (OSError, RuntimeError) as exc:
+            self._json(503, {'error': str(exc)})
+
+    def do_GET(self):
+        if self.path.startswith('/phone/'):
+            return self._bridge()
+        super().do_GET()
+
     # --------------------------------------------------------------- routes
     def do_POST(self):
+        if self.path.startswith('/phone/'):
+            return self._bridge()
         route = self.path.split('?')[0]
         if route not in ('/act/info', '/act/reset', '/act/step'):
             self._json(404, {'ok': False, 'reason': 'not_found'})

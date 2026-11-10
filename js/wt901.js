@@ -322,8 +322,8 @@ function parse(d, dv) {
 }
 
 /* 一个 BLE 包常含 2 帧，按估计周期把包内各帧时间摊开，避免两条记录时间戳完全相同 */
-function onPacket(d, dv) {
-  const tArr = performance.now() / 1000;
+function onPacket(d, dv, received = performance.now()) {
+  const tArr = received / 1000;
   const frames = parse(d, dv);
   if (typeof actWtPacket === 'function') actWtPacket(d, frames, tArr * 1000);
   if (!frames.length) return;
@@ -362,7 +362,7 @@ function push(d, tAbs, f) {
   if (f.ang) s.ang = f.ang;
   d.samples.push(s);
   d.frames++;
-  if (state.recording) state.rec.push({ t, k: d.key, line: officialLine(d, tAbs, s) });
+  if (state.recording && (!d.remote || tAbs * 1000 >= REC_T0)) state.rec.push({ t, k: d.key, line: officialLine(d, tAbs, s) });
   /* 按时间裁缓冲：一次丢掉 2 s 以上的陈旧头部，避免每帧搬数组；
      用时间而不是固定条数，150 Hz 下也能撑满 30 s 窗口 */
   if (d.samples[0] && t - d.samples[0].t > KEEP_SEC + 2) {

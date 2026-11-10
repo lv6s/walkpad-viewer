@@ -11,12 +11,13 @@ function irHead() {
     }
     withFoot(f, () => {
       const s0 = irState0();
-      $('btnIrOff').disabled = !on;
+      $('btnIrOff').disabled = !on || !!s0.remote;
       $('btnIrParquet').disabled = !(irStates.l.rec.length || irStates.r.rec.length);
-      $('btnFmtRead').disabled = !on;
-      $('btnFmtSet').disabled = !on || !s0.write;
-      $('btnBiasCal').disabled = !on;
-      $('irBiasMode').disabled = !on;
+      $('btnFmtRead').disabled = !on || !!s0.remote;
+      $('btnFmtSet').disabled = !on || !s0.write || !!s0.remote;
+      $('btnBiasCal').disabled = !on || !!s0.remote;
+      $('btnBiasReset').disabled = !!s0.remote;
+      $('irBiasMode').disabled = !on || !!s0.remote;
       $('irDev').textContent = s0.dev ? ((s0.dev.name || '鞋垫') + (on ? '' : ' · 已断开'))
         : '未连接';
       $('irInfo').textContent = s0.info;
@@ -43,12 +44,15 @@ function irNums(s) {
   if (s) {
     /* ts 是打包的 HHMMSSmmm，不是毫秒计数器；跟 date 一起才是设备本地日历 */
     $('irTs').textContent = s.clk ? s.clk.date + ' ' + s.clk.time : '—';
+    if ($('irDelay')) $('irDelay').textContent = s.clk && !irStates[irActive].clk.coarse && Number.isFinite(s.desktopReceiveEpochMs)
+      ? (s.desktopReceiveEpochMs - s.clk.epoch).toFixed(1) + ' ms（未校时）' : '不可测';
     $('irAux').textContent = s.tempRaw + ' ≈ ' + (s.tempRaw / 100).toFixed(2) + ' ℃';
     $('irLen').textContent = s.len + ' B / ' + s.pts + ' 点';
     const hex = Array.from(ir.lastRaw || [], (b) => b.toString(16).padStart(2, '0')).join(' ');
     $('irRaw').textContent = '最近一帧：' + hex;
   } else {
     $('irTs').textContent = '—'; $('irAux').textContent = '—'; $('irLen').textContent = '—';
+    if ($('irDelay')) $('irDelay').textContent = '—';
     $('irRaw').textContent = '';
   }
 }

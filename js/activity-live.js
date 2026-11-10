@@ -267,6 +267,7 @@ function actBiasHint() {
 }
 
 function actRender() {
+  if (window.phoneBridge && window.phoneBridge.enabled) return window.phoneBridge.renderActivity();
   if (!$('actCard')) return;
   actWtChoices();
   $('actSource').disabled = act.on || act.inflight;
