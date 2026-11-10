@@ -237,7 +237,19 @@ def pick_port(start=8765):
 
 
 def main():
-    port = pick_port(int(sys.argv[1]) if len(sys.argv) > 1 else 8765)
+    if '--legacy' not in sys.argv:
+        result = subprocess.run([sys.executable,str(HERE/'launch_workbench.py'),'--no-open'],
+                                cwd=HERE,capture_output=True,text=True,encoding='utf-8')
+        if result.returncode:
+            print(result.stderr or result.stdout,flush=True)
+            raise SystemExit(result.returncode)
+        from urllib.parse import urlsplit
+        port = urlsplit(result.stdout.strip().splitlines()[-1]).port
+        PORT_FILE.write_text(str(port),encoding='ascii')
+        print(result.stdout.strip(),flush=True)
+        return
+    positional = [x for x in sys.argv[1:] if x != '--legacy']
+    port = pick_port(int(positional[0]) if positional else 8765)
     with Server(('127.0.0.1', port), Handler) as httpd:
         PORT_FILE.write_text(str(port), encoding='ascii')
         print('http://127.0.0.1:%d/wt901ble_live.html' % port, flush=True)

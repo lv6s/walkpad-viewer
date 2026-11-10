@@ -1,0 +1,341 @@
+import asyncio
+import base64
+import json
+import struct
+import time
+import zipfile
+from pathlib import Path
+
+import pyarrow.parquet as pq
+import pytest
+from fastapi.testclient import TestClient
+
+from backend.app import create_app
+from backend.capture import Capture
+from backend.exports import export_standard, export_txt
+from backend.phone import Phone, validate
+from backend.protocol import Decoder, RAW_V1, RAW_V2, command_packet, demo_packet, slot_map
+from backend.storage import Recorder
+
+
+@pytest.mark.parametrize('profile',['insole','wt'])
+def test_split_and_combined(profile):
+    data = demo_packet(profile,2,'l',time.time()*1000)
+    for cut in range(1,len(data)):
+        decoder = Decoder(profile)
+        assert decoder.feed(data[:cut]) == []
+        assert len(decoder.feed(data[cut:])) == 1
+    assert len(Decoder(profile).feed(data+data)) == 2
+
+
+def test_insole_crc_bitmap_and_raw():
+    packet = demo_packet('insole',3,'l',time.time()*1000)
+    frame = Decoder('insole').feed(packet)[0]
+    assert frame['values'][2] == 1
+    assert len(frame['pressure_slots']) == len(frame['pressure_sparse']) == 70
+    assert len(frame['pressure_observed_slots']) == 2
+    assert frame['seq'] == 3
+    bad = bytearray(packet); bad[23] ^= 1
+    decoder = Decoder('insole')
+    assert decoder.feed(bad) == [] and decoder.bad > 0
+    assert frame['device_ms'] is not None
+
+
+@pytest.mark.parametrize('foot',['l','r'])
+@pytest.mark.parametrize('topology',['v1','v2'])
+def test_mapping(foot,topology):
+    mapping = slot_map(foot,topology)
+    assert len(mapping) == len(set(mapping)) == 56
+    assert min(mapping) >= 0 and max(mapping) < 70
+    assert slot_map('l','v2') == RAW_V2
+    assert slot_map('r','v1') == RAW_V1
+
+
+def test_commands():
+    packet = command_packet(16,b'\4',5,123,'v2')
+    assert len(packet) == 144 and packet[:2] == b'\x5a\x10'
+    assert packet[14] == 4 and struct.unpack_from('<I',packet,10)[0] == 1
+    assert len(command_packet(13,link='v1')) == 80
+
+
+def test_record_and_export(tmp_path):
+    async def run():
+        c = Capture(tmp_path,demo=True)
+        await c.start()
+        await c.demo('insole')
+        await c.record_start()
+        await asyncio.sleep(1.4)
+        state = await c.record_stop()
+        assert not state['error'],state
+        assert state['frames'] >= 100
+        assert state['queued'] == 0 and state['chunks'] > 0
+        path = c.recorder.current
+        chunks = sorted(path.glob('frames_*.parquet'))
+        assert sum(pq.ParquetFile(p).metadata.num_rows for p in chunks) == state['frames']
+        standard = pq.read_table(export_standard(path))
+        assert standard.num_rows == state['frames']
+        expected = [name for name,kind in json.loads((Path(__file__).parents[1]/'backend/standard_schema.json').read_text())]
+        assert standard.column_names == expected
+        assert standard['effective_elapsed_us'].null_count == standard.num_rows
+        elapsed = standard['observed_session_elapsed_us'].to_pylist()
+        assert min(elapsed) >= 0 and max(elapsed) < 10_000_000
+        assert len(standard['pressure_values'][0].as_py()) == 56
+        assert len(standard['pressure_raw_values'][0].as_py()) == 70
+        archive = c.recorder.export(state['session_id'])
+        with zipfile.ZipFile(archive) as z:
+            assert z.testzip() is None
+            assert 'raw_events.jsonl' in z.namelist()
+        await c.close()
+    asyncio.run(run())
+
+
+def test_wt_export(tmp_path):
+    async def run():
+        c = Capture(tmp_path,demo=True)
+        await c.start(); await c.demo('wt'); await c.record_start()
+        await asyncio.sleep(.3)
+        state = await c.record_stop()
+        assert not state['error']
+        lines = export_txt(c.recorder.current).read_text(encoding='utf-8-sig').splitlines()
+        assert len(lines) > 4
+        assert all(len(line.split('\t')) == 23 for line in lines)
+        await c.close()
+    asyncio.run(run())
+
+
+def test_recovery_and_traversal(tmp_path):
+    path = tmp_path/'interrupted'; path.mkdir()
+    (path/'manifest.json').write_text(json.dumps({'session_id':'interrupted','status':'recording'}))
+    (path/'raw_events.jsonl').write_text('{}\n')
+    recorder = Recorder(tmp_path)
+    assert recorder.recovered == ['interrupted']
+    assert recorder.sessions()[0]['interrupted']
+    for bad in ('../x','..','/tmp','a\\b'):
+        with pytest.raises(ValueError):
+            recorder.directory(bad)
+
+
+def test_video_idempotency(tmp_path):
+    recorder = Recorder(tmp_path)
+    sid = recorder.start({'source':'test'})
+    video_id = 'a'*32
+    assert recorder.append_video(sid,video_id,0,'video/webm',b'abc')['next'] == 1
+    assert recorder.append_video(sid,video_id,0,'video/webm',b'abc')['next'] == 1
+    assert recorder.append_video(sid,video_id,1,'video/webm',b'def')['next'] == 2
+    recorder.stop()
+    assert (recorder.current/('video_'+video_id+'.webm')).read_bytes() == b'abcdef'
+    with pytest.raises(ValueError):
+        recorder.append_video(sid,video_id,4,'video/webm',b'bad')
+
+
+def test_api_tokens_and_websocket_refresh(tmp_path):
+    with TestClient(create_app(tmp_path,demo=True)) as client:
+        cfg = client.get('/api/config').json()
+        token = cfg['control_token']
+        headers = {'X-Walkpad-Token':token}
+        assert client.post('/api/control',json={'action':'demo'}).status_code == 403
+        assert client.post('/api/control',headers=headers|{'Origin':'https://evil.example'},json={'action':'demo'}).status_code == 403
+        assert client.get('/api/status',headers={'Host':'evil.example'}).status_code == 403
+        def command(action,**args):
+            response = client.post('/api/control',headers=headers,json={'action':action,**args})
+            assert response.status_code == 200,response.text
+            return response.json()
+        command('demo',profile='insole')
+        start = command('record_start')
+        with client.websocket_connect('/ws?token='+token) as ws:
+            first = ws.receive_json()
+            before = sum(d['frames'] for d in first['state']['devices'])
+        time.sleep(.25)
+        with client.websocket_connect('/ws?token='+token) as ws:
+            after = ws.receive_json()
+            assert after['state']['recorder']['recording']
+            assert after['state']['recorder']['session_id'] == start['session_id']
+            assert sum(d['frames'] for d in after['state']['devices']) > before
+        command('record_stop')
+        response = client.get('/api/sessions/'+start['session_id']+'/export')
+        assert response.status_code == 200 and response.content[:2] == b'PK'
+
+
+def envelope(seq=1,profile='wt',now=1000.):
+    packet = demo_packet(profile,seq,'l',time.time()*1000)
+    return {'v':1,'session':'testphone123','profile':profile,'phone_now_ms':now,'events':[
+        {'v':1,'session':'testphone123','profile':profile,'id':seq,'phone_ms':now,'type':'notify',
+         'data':{'foot':'l','connection':'conn1','receipt_ms':now,'bytes':base64.b64encode(packet).decode()}}]}
+
+
+def test_phone_validation():
+    validate(envelope())
+    invalid = envelope(); invalid['events'][0]['data']['receipt_ms'] = 1001
+    with pytest.raises(ValueError):validate(invalid)
+    invalid = envelope(); invalid['phone_now_ms'] = float('nan')
+    with pytest.raises(ValueError):validate(invalid)
+
+
+def test_phone_dedup_and_separate_clock(tmp_path):
+    async def run():
+        c = Capture(tmp_path)
+        await c.start(); await c.source_change('phone')
+        phone = Phone(c)
+        body = envelope()
+        first = await phone.ingest(body)
+        frames = c.devices['phone:l']['frames']
+        second = await phone.ingest(body)
+        assert first['ack_id'] == second['ack_id'] == 1
+        assert c.devices['phone:l']['frames'] == frames
+        assert c.phone['oneway_ms'] is None
+        assert c.recorder.accepting
+        assert c.history[-1]['receipt_ms'] > 1000
+        raw = (c.recorder.current/'raw_events.jsonl').read_text(encoding='utf-8')
+        assert 'phone_batch' in raw and 'notify' in raw
+        phone.last_receive = time.monotonic()*1000-2000
+        await asyncio.sleep(.3)
+        assert c.phone['stale'] and not c.devices['phone:l']['connected']
+        await c.record_stop()
+        phone.paused = True
+        with pytest.raises(ValueError,match='停止记录'):
+            await phone.ingest(envelope(2,now=1001))
+        await c.record_start(); phone.paused = False
+        assert (await phone.ingest(envelope(2,now=1001)))['ack_id'] == 2
+        await c.record_stop(); await phone.release(); await phone.close(); await c.close()
+    asyncio.run(run())
+
+
+def test_algorithm_and_bias_controls(tmp_path):
+    async def run():
+        c = Capture(tmp_path,demo=True)
+        await c.start(); await c.demo('wt')
+        result = await asyncio.wrap_future(c.algorithm.control('configure',profile='wt',enabled=True))
+        assert result['model']['source'] == 'wt'
+        await asyncio.sleep(3.5)
+        state = c.algorithm.snapshot()
+        assert state['error'] is None,state
+        assert state['result'].get('published_host_ms') is not None,state
+        assert state['result']['valid'],state
+        await c.stop_virtual()
+        await asyncio.wrap_future(c.algorithm.control('configure',profile='insole',enabled=False))
+        result = await asyncio.wrap_future(c.algorithm.control('bias',foot='l',action='manual',clock_ms=time.monotonic()*1000))
+        assert result['bias']['l']['mode'] == 'manual'
+        await c.close()
+    asyncio.run(run())
+
+
+def test_phone_native_http_and_pause(tmp_path):
+    import socket
+    import httpx
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1',0))
+        port = sock.getsockname()[1]
+    app = create_app(tmp_path,phone_port=port)
+    with TestClient(app) as client:
+        token = client.get('/api/config').json()['control_token']
+        headers = {'X-Walkpad-Token':token}
+        def control(action,**args):
+            return client.post('/api/control',headers=headers,json=dict(action=action,**args))
+        assert control('source',source='phone').status_code == 200
+        phone = app.state.phone
+        url = 'http://127.0.0.1:%d/api/ingest' % port
+        native = {'Authorization':'Bearer '+phone.token}
+        assert httpx.post(url,json=envelope()).status_code == 403
+        assert httpx.post(url,json=envelope(),headers=native|{'Origin':'http://evil.example'}).status_code == 403
+        response = httpx.post(url,json=envelope(),headers=native)
+        assert response.status_code == 200,response.text
+        assert response.json()['ack_id'] == 1
+        raw = (app.state.capture.recorder.current/'raw_events.jsonl').read_text(encoding='utf-8')
+        assert 'phone_batch' in raw and 'notify' in raw
+        assert control('record_stop').status_code == 200
+        assert httpx.post(url,json=envelope(2,now=1001),headers=native).status_code == 400
+        assert control('source',source='direct').status_code == 400
+        assert control('record_start').status_code == 200
+        assert httpx.post(url,json=envelope(2,now=1001),headers=native).json()['ack_id'] == 2
+        assert control('record_stop').status_code == 200
+        assert control('phone_release').status_code == 200
+        assert control('source',source='direct').status_code == 200
+
+
+def test_phone_no_ack_on_storage_failure(tmp_path):
+    async def run():
+        c = Capture(tmp_path)
+        phone = Phone(c)
+        await c.start(); await c.source_change('phone')
+        assert (await phone.ingest(envelope()))['ack_id'] == 1
+        original = c.recorder.flush
+        def fail():
+            raise RuntimeError('disk unavailable')
+        c.recorder.flush = fail
+        with pytest.raises(RuntimeError,match='disk unavailable'):
+            await phone.ingest(envelope(2,now=1001))
+        assert phone.last_id == 1
+        c.recorder.flush = original
+        await phone.close(); await c.close()
+    asyncio.run(run())
+
+
+def test_connected_device_cannot_change_identity(tmp_path):
+    async def run():
+        c = Capture(tmp_path)
+        d = c._device('test','test','wt','l','address1')
+        d['connected'] = True
+        assert (await c.connect('address1','wt','l'))['id'] == 'test'
+        with pytest.raises(ValueError,match='更换协议或脚别'):
+            await c.connect('address1','wt','r')
+        assert d['foot'] == 'l'
+        await c.close()
+    asyncio.run(run())
+
+
+def test_recorder_flush_requires_running(tmp_path):
+    recorder = Recorder(tmp_path)
+    with pytest.raises(RuntimeError,match='记录未运行'):
+        recorder.flush()
+
+
+def test_stale_connection_notification_ignored(tmp_path):
+    async def run():
+        c = Capture(tmp_path)
+        await c.start()
+        d = c._device('test','test','wt','l')
+        d['generation'] = 2
+        c.submit('test',demo_packet('wt',1,'l',time.time()*1000),1,1,generation=1)
+        await c.ingress.join()
+        assert d['frames'] == 0
+        c.submit('test',demo_packet('wt',1,'l',time.time()*1000),1,1,generation=2)
+        d['generation'] = 3
+        await c.ingress.join()
+        assert d['frames'] == 0
+        await c.close()
+    asyncio.run(run())
+
+
+def test_legacy_reply_crc_and_measurement_isolation(tmp_path):
+    from backend.protocol import crc_ccitt
+    async def run():
+        c = Capture(tmp_path)
+        d = c._device('test','test','insole','l')
+        d['command_type'] = 13; d['command_link'] = 'v1'
+        d['command_future'] = asyncio.get_running_loop().create_future()
+        frame = bytearray(83)
+        frame[:3] = b'\x5a\x00\x0d'
+        struct.pack_into('<H',frame,15,42)
+        frame[20] = 4
+        struct.pack_into('<H',frame,81,crc_ccitt(frame[:81]))
+        bad = bytearray(frame); bad[20] = 3
+        c._control_reply(d,bad)
+        assert d['format'] is None and not d['command_future'].done()
+        c._control_reply(d,demo_packet('insole',1,'l',time.time()*1000)+frame[:30])
+        assert d['format'] is None
+        c._control_reply(d,frame[30:])
+        assert d['format'] == 4 and d['command_future'].done()
+        await c.close()
+    asyncio.run(run())
+
+
+def test_replay(tmp_path):
+    async def run():
+        c = Capture(tmp_path,demo=True)
+        await c.start(); await c.demo('wt'); await c.record_start(); await asyncio.sleep(.15)
+        state = await c.record_stop()
+        await c.replay(state['session_id'],speed=10)
+        await c.replay_task
+        assert any(d['frames'] > 0 for d in c.devices.values() if d['source'] == 'replay')
+        await c.close()
+    asyncio.run(run())

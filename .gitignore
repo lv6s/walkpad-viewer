@@ -1,17 +1,20 @@
 # 解包的 apk：301 MB，只作协议参考，不进版本库
 apk_labpad/
 
-# 临时诊断脚本与产物（tmp_* 前缀是全项目约定的一次性文件）
+# 临时诊断脚本与产物
 tmp_*
 
-# 导出的采集数据不进货
+# 导出的采集数据
 *.parquet
 
-# 依赖
+# 依赖与字节码
 node_modules/
-
-# python 字节码
 __pycache__/
+*.pyc
 
-# serve_page.py 实际选中的端口
+# 本地记录、备份与服务状态
 _port.txt
+backups/
+records/
+runtime/
+.pytest_cache/
