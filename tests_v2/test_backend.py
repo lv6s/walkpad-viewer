@@ -169,6 +169,8 @@ def test_phone_validation():
     with pytest.raises(ValueError):validate(invalid)
     invalid = envelope(); invalid['phone_now_ms'] = float('nan')
     with pytest.raises(ValueError):validate(invalid)
+    invalid = envelope(); invalid['ack_mode'] = 'ignore_disk'
+    with pytest.raises(ValueError,match='acknowledgment'):validate(invalid)
 
 
 def test_phone_dedup_and_separate_clock(tmp_path):
@@ -240,13 +242,17 @@ def test_phone_native_http_and_pause(tmp_path):
         response = httpx.post(url,json=envelope(),headers=native)
         assert response.status_code == 200,response.text
         assert response.json()['ack_id'] == 1
+        live = envelope(2,now=1020); live['ack_mode'] = 'received'
+        response = httpx.post(url,json=live,headers=native)
+        assert response.status_code == 200 and response.json()['received_id'] == 2
+        assert response.json()['ack_id'] <= response.json()['received_id']
         raw = (app.state.capture.recorder.current/'raw_events.jsonl').read_text(encoding='utf-8')
         assert 'phone_batch' in raw and 'notify' in raw
         assert control('record_stop').status_code == 200
         assert httpx.post(url,json=envelope(2,now=1001),headers=native).status_code == 400
         assert control('source',source='direct').status_code == 400
         assert control('record_start').status_code == 200
-        assert httpx.post(url,json=envelope(2,now=1001),headers=native).json()['ack_id'] == 2
+        assert httpx.post(url,json=envelope(3,now=1040),headers=native).json()['ack_id'] == 3
         assert control('record_stop').status_code == 200
         assert control('phone_release').status_code == 200
         assert control('source',source='direct').status_code == 200
@@ -267,6 +273,109 @@ def test_phone_no_ack_on_storage_failure(tmp_path):
         assert phone.last_id == 1
         c.recorder.flush = original
         await phone.close(); await c.close()
+    asyncio.run(run())
+
+
+def test_phone_received_ack_does_not_wait_for_disk(tmp_path):
+    import threading
+    async def run():
+        c = Capture(tmp_path)
+        phone = Phone(c)
+        await c.start(); await c.source_change('phone')
+        await phone.ingest(envelope())
+        entered = threading.Event(); release = threading.Event()
+        checkpoint = c.recorder.checkpoint
+        import concurrent.futures
+        def slow_checkpoint():
+            barrier = checkpoint()
+            future = concurrent.futures.Future()
+            def finish():
+                entered.set()
+                try:
+                    if not release.wait(5): raise RuntimeError('test disk barrier timed out')
+                    barrier.result(timeout=5); future.set_result(True)
+                except Exception as exc: future.set_exception(exc)
+            threading.Thread(target=finish,daemon=True).start()
+            return future
+        c.recorder.checkpoint = slow_checkpoint
+        try:
+            body = envelope(2,now=1020); body['ack_mode'] = 'received'
+            response = await asyncio.wait_for(phone.ingest(body),1)
+            assert response['received_id'] == 2
+            assert response['ack_id'] == response['durable_id'] == 1
+            await asyncio.to_thread(entered.wait,1)
+            assert entered.is_set() and not release.is_set()
+            retry = await phone.ingest(body)
+            assert retry['received_id'] == 2 and c.devices['phone:l']['frames'] == 2
+            body = envelope(3,now=1040); body['ack_mode'] = 'received'
+            assert (await phone.ingest(body))['received_id'] == 3
+            assert c.devices['phone:l']['frames'] == 3
+            phone.paused = True
+            await c.record_stop()
+            release.set()
+            await phone.flush_task
+            c.recorder.checkpoint = checkpoint
+            await c.record_start(); phone.paused = False
+            final = envelope(4,now=1060)
+            response = await phone.ingest(final)
+            assert response['ack_id'] == response['received_id'] == 4
+        finally:
+            release.set(); c.recorder.checkpoint = checkpoint
+            await phone.close(); await c.close()
+    asyncio.run(run())
+
+
+def test_phone_gap_inside_batch_resets_fragment_decoder(tmp_path):
+    async def run():
+        c = Capture(tmp_path); phone = Phone(c)
+        await c.start(); await c.source_change('phone')
+        boundaries = []
+        original = c.algorithm.offer
+        def offer(item):
+            if item.get('control') == 'boundary': boundaries.append(item)
+            original(item)
+        c.algorithm.offer = offer
+        packet = demo_packet('wt',1,'l',time.time()*1000)
+        body = envelope()
+        first = body['events'][0]
+        first['data']['bytes'] = base64.b64encode(packet[:8]).decode()
+        import copy
+        second = copy.deepcopy(first)
+        second['id'] = 3
+        second['data']['bytes'] = base64.b64encode(packet[8:]).decode()
+        body['events'].append(second)
+        try:
+            assert (await phone.ingest(body))['ack_id'] == 3
+            assert c.devices['phone:l']['frames'] == 0
+            assert any(x['reason'] == 'network_gap' for x in boundaries)
+            assert (await phone.ingest(envelope(4,now=1020)))['ack_id'] == 4
+            assert c.devices['phone:l']['frames'] == 1
+        finally:
+            await phone.close(); await c.close()
+    asyncio.run(run())
+
+
+def test_phone_background_disk_failure_never_advances_durable_ack(tmp_path):
+    async def run():
+        c = Capture(tmp_path); phone = Phone(c)
+        await c.start(); await c.source_change('phone')
+        await phone.ingest(envelope())
+        import concurrent.futures
+        def fail():
+            future = concurrent.futures.Future()
+            future.set_exception(RuntimeError('background disk unavailable'))
+            return future
+        c.recorder.checkpoint = fail
+        body = envelope(2,now=1020); body['ack_mode'] = 'received'
+        try:
+            assert (await phone.ingest(body))['ack_id'] == 1
+            with pytest.raises(RuntimeError,match='background disk unavailable'):
+                await phone.flush_task
+            assert phone.last_id == 1 and not c.recorder.accepting
+            with pytest.raises(ValueError,match='background disk unavailable'):
+                await phone.ingest(envelope(3,now=1040))
+        finally:
+            await phone.close(); await c.close()
     asyncio.run(run())
 
 

@@ -94,13 +94,16 @@ class Recorder:
                 self.accepting = False
                 return False
 
-    def flush(self):
+    def checkpoint(self):
         if not self.accepting:
             raise RuntimeError(self.error or '记录未运行，不能确认持久化')
         future = concurrent.futures.Future()
         if not self.put('barrier',future):
             raise RuntimeError(self.error or '记录未运行')
-        future.result(timeout=10)
+        return future
+
+    def flush(self):
+        self.checkpoint().result(timeout=10)
 
     def stop(self):
         with self._lock:
