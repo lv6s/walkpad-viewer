@@ -39,7 +39,7 @@ class Command(BaseModel):
     speed: float = 1.
 
 
-def create_app(root=ROOT,demo=False,phone_port=8766,debug=False):
+def create_app(root=ROOT,demo=False,phone_port=8766,debug=False,idle_exit=8):
     root = Path(root)
 
     def forget_state():
@@ -61,6 +61,30 @@ def create_app(root=ROOT,demo=False,phone_port=8766,debug=False):
         threading.Thread(target=watchdog,daemon=True).start()
         return {'ok':True,'pid':os.getpid(),'graceful':True}
 
+    def cancel_idle():
+        task = app.state.idle_task
+        app.state.idle_task = None
+        if task and not task.done():
+            task.cancel()
+
+    async def wait_idle_exit():
+        try:
+            await asyncio.sleep(idle_exit)
+        except asyncio.CancelledError:
+            return
+        app.state.idle_task = None
+        if app.state.clients:
+            return
+        if app.state.capture.recorder.accepting:
+            return
+        request_stop(.2)
+
+    def schedule_idle():
+        if not idle_exit or not app.state.idle_armed or app.state.clients:
+            return
+        cancel_idle()
+        app.state.idle_task = asyncio.create_task(wait_idle_exit())
+
     @asynccontextmanager
     async def lifespan(app):
         capture = Capture(root,demo)
@@ -68,10 +92,14 @@ def create_app(root=ROOT,demo=False,phone_port=8766,debug=False):
         app.state.capture = capture
         app.state.phone = Phone(capture,phone_port)
         app.state.token = secrets.token_urlsafe(32)
+        app.state.clients = 0
+        app.state.idle_armed = False
+        app.state.idle_task = None
         await capture.start()
         try:
             yield
         finally:
+            cancel_idle()
             await app.state.phone.close()
             await capture.close()
             forget_state()
@@ -95,7 +123,7 @@ def create_app(root=ROOT,demo=False,phone_port=8766,debug=False):
 
     @app.get('/api/config')
     async def config():
-        return {'version':'2.0.0','control_token':app.state.token,'demo_allowed':demo,'phone_port':phone_port}
+        return {'version':'2.0.0','control_token':app.state.token,'demo_allowed':demo,'phone_port':phone_port,'idle_exit':idle_exit}
 
     @app.get('/api/status')
     async def status():
@@ -246,6 +274,9 @@ def create_app(root=ROOT,demo=False,phone_port=8766,debug=False):
             await ws.close(code=1008)
             return
         await ws.accept()
+        app.state.clients += 1
+        app.state.idle_armed = True
+        cancel_idle()
         cursor = 0
         try:
             while True:
@@ -255,6 +286,9 @@ def create_app(root=ROOT,demo=False,phone_port=8766,debug=False):
                 await asyncio.sleep(.05)
         except (WebSocketDisconnect,asyncio.TimeoutError,RuntimeError):
             pass
+        finally:
+            app.state.clients -= 1
+            schedule_idle()
 
     @app.get('/wt901ble_live.html')
     async def old_entry():
@@ -296,8 +330,9 @@ def main():
     parser.add_argument('--demo',action='store_true')
     parser.add_argument('--debug',action='store_true')
     parser.add_argument('--data-root',type=Path,default=ROOT)
+    parser.add_argument('--idle-exit',type=int,default=8,help='浏览器全部断开后退出后台的宽限秒数，0 表示不自动退出')
     args = parser.parse_args()
-    app = create_app(args.data_root,args.demo,args.phone_port,args.debug)
+    app = create_app(args.data_root,args.demo,args.phone_port,args.debug,args.idle_exit)
     config = uvicorn.Config(app,host='127.0.0.1',port=args.port,log_level='info',access_log=not args.debug,
                             timeout_graceful_shutdown=15)
     app.state.uvicorn = uvicorn.Server(config)

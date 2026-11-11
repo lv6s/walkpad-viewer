@@ -30,6 +30,7 @@ export interface Status {
 }
 export const status = shallowRef<Status | null>(null)
 export const online = ref(false)
+export const idleExit = ref(0)
 export const error = ref('')
 export const revision = ref(0)
 export const buffers = new Map<string, Frame[]>()
@@ -59,6 +60,7 @@ export async function connect() {
   try {
     const config = await (await fetch('/api/config')).json()
     token = config.control_token
+    idleExit.value = Number(config.idle_exit) || 0
     if (previousServer && previousServer !== token) buffers.clear()
     previousServer = token
     socket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws?token=${encodeURIComponent(token)}`)
