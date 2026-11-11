@@ -1,8 +1,10 @@
 import argparse
 import asyncio
 import json
+import os
 import secrets
 import socket
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -39,6 +41,26 @@ class Command(BaseModel):
 
 def create_app(root=ROOT,demo=False,phone_port=8766,debug=False):
     root = Path(root)
+
+    def forget_state():
+        state = ROOT/'runtime/server.json'
+        try:
+            if state.is_file() and json.loads(state.read_text(encoding='utf-8')).get('pid') == os.getpid():
+                state.unlink()
+        except (OSError,ValueError,AttributeError):
+            pass
+
+    def request_stop(delay=.4):
+        server = getattr(app.state,'uvicorn',None)
+        if server is None:
+            return {'ok':True,'pid':os.getpid(),'graceful':False}
+        asyncio.get_running_loop().call_later(delay,setattr,server,'should_exit',True)
+        def watchdog():
+            time.sleep(30)
+            os._exit(0)
+        threading.Thread(target=watchdog,daemon=True).start()
+        return {'ok':True,'pid':os.getpid(),'graceful':True}
+
     @asynccontextmanager
     async def lifespan(app):
         capture = Capture(root,demo)
@@ -52,6 +74,7 @@ def create_app(root=ROOT,demo=False,phone_port=8766,debug=False):
         finally:
             await app.state.phone.close()
             await capture.close()
+            forget_state()
     app = FastAPI(lifespan=lifespan,docs_url=None,redoc_url=None,openapi_url=None)
     @app.middleware('http')
     async def security(request,call_next):
@@ -162,6 +185,10 @@ def create_app(root=ROOT,demo=False,phone_port=8766,debug=False):
                 for d in c.devices.values():
                     d['samples'].clear()
                 return {'ok':True}
+            if action == 'shutdown':
+                if c.recorder.accepting:
+                    await c.record_stop()
+                return request_stop()
             raise ValueError('unknown action')
         except (ValueError,KeyError) as exc:
             raise HTTPException(400,str(exc))
@@ -270,8 +297,11 @@ def main():
     parser.add_argument('--debug',action='store_true')
     parser.add_argument('--data-root',type=Path,default=ROOT)
     args = parser.parse_args()
-    uvicorn.run(create_app(args.data_root,args.demo,args.phone_port,args.debug),host='127.0.0.1',port=args.port,
-                log_level='info',access_log=not args.debug)
+    app = create_app(args.data_root,args.demo,args.phone_port,args.debug)
+    config = uvicorn.Config(app,host='127.0.0.1',port=args.port,log_level='info',access_log=not args.debug,
+                            timeout_graceful_shutdown=15)
+    app.state.uvicorn = uvicorn.Server(config)
+    app.state.uvicorn.run()
 
 
 if __name__ == '__main__':

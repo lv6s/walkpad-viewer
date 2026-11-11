@@ -24,6 +24,7 @@ const camera = ref<InstanceType<typeof CameraPanel>>()
 const showCamera = ref(false)
 const selectedSession = ref('')
 const message = ref('')
+const closed = ref(false)
 const devices = computed(() => status.value?.devices.filter(device => device.source === status.value?.source || device.connected) || [])
 const recording = computed(() => status.value?.recorder.recording)
 const result = computed(() => status.value?.algorithm.result || {})
@@ -66,8 +67,12 @@ async function loadSessions() {
   try { sessions.value = await (await fetch('/api/sessions')).json(); if (!selectedSession.value && sessions.value.length) selectedSession.value = sessions.value[0]!.session_id }
   catch (e) { error.value = String(e) }
 }
-async function algorithm() { await run('algorithm', { profile: protocol.value, enabled: !status.value?.algorithm.enabled }) }
-async function bias(device: Device, action: string) { await run('bias', { foot: device.foot, bias_action: action }) }
+async function algorithm() { await run('algorithm', { profile: protocol.value, enabled: !status.value?.algorithm.enabled }) }async function bias(device: Device, action: string) { await run('bias', { foot: device.foot, bias_action: action }) }
+async function shutdownServer() {
+  if (!window.confirm('会先停止并保存记录，再断开所有设备、结束后台进程与算法子进程。之后需要重新运行启动入口才能继续采集。确定关闭？')) return
+  const result = await run('shutdown')
+  if (result) { closed.value = true; message.value = '后台服务正在关闭' }
+}
 function download(format: string, session = selectedSession.value) { if (session) window.location.href = `/api/sessions/${encodeURIComponent(session)}/export?format=${format}` }
 function biasFor(device: Device) { return status.value?.algorithm.profile === device.profile && device.profile === 'insole' ? status.value.algorithm.bias[device.foot || ''] : undefined }
 function biasText(device: Device) {
@@ -86,7 +91,8 @@ onUnmounted(disconnect)
 
 <template>
   <div class="workbench">
-    <header class="app-header"><div class="brand"><div class="brand-mark">W</div><div><h1>Walkpad <span>采集工作台</span></h1><p>传感器实时采集 · 本地持久化 · 在线算法</p></div></div><div class="header-right"><span class="connection"><i :class="{ connected: online }"></i>{{ online ? '后台已连接' : '连接后台中' }}</span><span class="version">v2.0</span><button :class="recording ? 'danger' : 'primary'" :disabled="busy || !online" @click="record">{{ recording ? '停止并保存' : '开始记录' }}</button></div></header>
+    <header class="app-header"><div class="brand"><div class="brand-mark">W</div><div><h1>Walkpad <span>采集工作台</span></h1><p>传感器实时采集 · 本地持久化 · 在线算法</p></div></div><div class="header-right"><span class="connection"><i :class="{ connected: online }"></i>{{ online ? '后台已连接' : '连接后台中' }}</span><span class="version">v2.0</span><button :class="recording ? 'danger' : 'primary'" :disabled="busy || !online" @click="record">{{ recording ? '停止并保存' : '开始记录' }}</button><button :disabled="busy || !online" title="停止记录、断开全部设备并结束电脑上的采集后台进程（含算法子进程），不影响已保存的记录" @click="shutdownServer">关闭后台</button></div></header>
+    <div v-if="closed" class="alert warning">后台服务已关闭：记录、蓝牙连接与算法进程都已退出。继续采集请重新运行启动入口。</div>
     <div v-if="error || status?.error || status?.recorder.error" class="alert error" role="alert">{{ error || status?.recorder.error || status?.error }}<button @click="error = ''">关闭提示</button></div>
     <div v-if="status?.source === 'demo'" class="alert warning">当前为模拟数据，仅用于验证软件链路，不是设备实测。</div>
     <div v-if="status?.recorder.recovered.length" class="alert warning">检测到 {{ status.recorder.recovered.length }} 个异常中断记录。已写出的原始日志与Parquet分段仍在记录目录，可在历史记录导出。</div>
