@@ -3,7 +3,7 @@ import { onMounted, onUnmounted, ref, watch } from 'vue'
 import uPlot from 'uplot'
 import { buffers } from '../store'
 
-const props = withDefaults(defineProps<{ deviceId: string; metric: 'acc' | 'gyro' | 'angles' | 'pressure'; window: number; channel?: number; corrected?: number[] }>(), { channel: 0 })
+const props = withDefaults(defineProps<{ deviceId: string; metric: 'acc' | 'gyro' | 'angles' | 'pressure'; window: number; channel?: number; corrected?: boolean }>(), { channel: 0, corrected: false })
 const box = ref<HTMLDivElement>()
 let chart: uPlot | undefined
 let observer: ResizeObserver | undefined
@@ -27,8 +27,10 @@ function draw() {
       let value: number | null | undefined
       if (props.metric === 'pressure') value = frame.pressure?.[props.channel]
       else if (props.metric === 'angles') value = frame.angles?.[axis]
-      else value = frame.values?.[axis + (props.metric === 'gyro' ? 3 : 0)]
-      if (value != null && props.metric === 'gyro' && props.corrected) value -= props.corrected[axis] || 0
+      else {
+        value = frame.values?.[axis + (props.metric === 'gyro' ? 3 : 0)]
+        if (props.metric === 'gyro' && props.corrected) value = value == null || !frame.bias_used ? null : value - (frame.bias_used[axis] ?? 0)
+      }
       ys[axis]!.push(value ?? null)
     }
   }

@@ -37,11 +37,12 @@ class Command(BaseModel):
     speed: float = 1.
 
 
-def create_app(root=ROOT,demo=False,phone_port=8766):
+def create_app(root=ROOT,demo=False,phone_port=8766,debug=False):
     root = Path(root)
     @asynccontextmanager
     async def lifespan(app):
         capture = Capture(root,demo)
+        capture.debug = debug
         app.state.capture = capture
         app.state.phone = Phone(capture,phone_port)
         app.state.token = secrets.token_urlsafe(32)
@@ -94,6 +95,10 @@ def create_app(root=ROOT,demo=False,phone_port=8766):
                 return await c.connect(body.address,body.profile,body.foot)
             if action == 'disconnect':
                 return await c.disconnect(body.device_id)
+            if action == 'forget':
+                if not body.device_id:
+                    raise ValueError('未指定要移除的设备')
+                return c.forget(body.device_id)
             if action == 'disconnect_all':
                 for key in list(c.devices):
                     await c.disconnect(key)
@@ -262,9 +267,11 @@ def main():
     parser.add_argument('--port',type=int,default=8875)
     parser.add_argument('--phone-port',type=int,default=8766)
     parser.add_argument('--demo',action='store_true')
+    parser.add_argument('--debug',action='store_true')
     parser.add_argument('--data-root',type=Path,default=ROOT)
     args = parser.parse_args()
-    uvicorn.run(create_app(args.data_root,args.demo,args.phone_port),host='127.0.0.1',port=args.port,log_level='info')
+    uvicorn.run(create_app(args.data_root,args.demo,args.phone_port,args.debug),host='127.0.0.1',port=args.port,
+                log_level='info',access_log=not args.debug)
 
 
 if __name__ == '__main__':

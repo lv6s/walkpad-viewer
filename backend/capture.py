@@ -40,6 +40,7 @@ class Capture:
         self.source = 'direct'
         self.phone = {'enabled':False}
         self.error = None
+        self.debug = False
         self.loop = None
         self.running = True
         self.connect_lock = asyncio.Lock()
@@ -58,6 +59,8 @@ class Capture:
 
     def log(self, text, level='info'):
         self.logs.append({'text':str(text),'level':level,'time':time.time()*1000})
+        if self.debug:
+            print('[capture]',level,text,flush=True)
 
     def _device(self, key, name, profile, foot, address='', source='direct'):
         if key in self.devices:
@@ -184,6 +187,22 @@ class Capture:
             d['connected'] = False
             self.emit(d,'disconnect',{})
         return self.public(d)
+
+    def forget(self, key):
+        d = self.devices.get(key)
+        if not d:
+            raise ValueError('设备不存在')
+        if d['source'] != 'direct':
+            raise ValueError('只能移除电脑直连设备')
+        if d['connected'] or d['reconnecting']:
+            raise ValueError('先断开该设备再移除')
+        d['manual'] = True
+        d['generation'] += 1
+        self.found.pop(d['address'],None)
+        self.devices.pop(key)
+        self.persist_devices()
+        self.log('已移除设备：'+d['name'])
+        return self.snapshot()
 
     def emit(self,d,kind,data,receipt=None,epoch=None,source_receipt=None,source_domain=None):
         self.sequence += 1

@@ -13,6 +13,8 @@ export interface Frame {
   temperature?: number
   device_ms?: number | null
   seq?: number
+  // 该帧到达时的在线零偏快照，未就绪或缺省时不补偿
+  bias_used?: number[]
 }
 export interface Device {
   id: string; name: string; profile: 'wt' | 'insole'; foot: string | null; source: string
@@ -65,7 +67,11 @@ export async function connect() {
       const update = JSON.parse(event.data)
       status.value = update.state
       if (update.gap) error.value = '显示缓存出现缺口；请以后台保存的原始记录为准'
+      const algorithm = update.state?.algorithm
       for (const frame of update.frames as Frame[]) {
+        // 零偏按帧到达时快照，历史帧不随后续零偏变化重算
+        const bias = frame.profile === 'insole' && algorithm?.profile === 'insole' ? algorithm.bias?.[frame.foot || ''] : undefined
+        if (frame.values && bias?.ready && Array.isArray(bias.gyro_bias_dps)) frame.bias_used = (bias.gyro_bias_dps as unknown[]).slice(0, 3).map(Number)
         const array = buffers.get(frame.device_id) || []
         if (!array.length || frame.cursor > array[array.length - 1]!.cursor) array.push(frame)
         const cutoff = frame.receipt_ms - 35000
@@ -94,5 +100,6 @@ export function disconnect() {
   socket?.close()
 }
 export function clearBuffers() { buffers.clear(); revision.value++ }
+export function dropBuffers(id: string) { buffers.delete(id); revision.value++ }
 export const number = (value: number | null | undefined, digits = 2) => value == null || !Number.isFinite(value) ? '—' : value.toFixed(digits)
 export const side = (value: string | null) => value === 'l' ? '左脚' : value === 'r' ? '右脚' : '未指定侧别'
