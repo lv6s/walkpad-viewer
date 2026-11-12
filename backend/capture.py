@@ -79,6 +79,7 @@ class Capture:
             d = self.devices[key]
             if (d['profile'],d['source'],d['placement']) != (profile,source,placement):
                 d['velocity_tracker'].reset()
+            d['velocity_tracker'].external_bias = profile == 'insole'
             d.update(name=name,profile=profile,foot=foot,address=address,source=source,placement=placement,placement_label=label,bias_key=bias_key)
             return d
         d = dict(id=key,name=name,profile=profile,foot=foot,address=address,source=source,
@@ -88,7 +89,7 @@ class Capture:
                  manual=False,topology='v2',format=None,format_status='未回读，单位未知',command_seq=0,
                  command_lock=asyncio.Lock(),control_buffer=b'',ack=None,command_status='',write_char=None,
                  generation=0,command_future=None,last_notify=0,
-                 velocity_tracker=VelocityEstimator(),velocity_last_receipt=None)
+                 velocity_tracker=VelocityEstimator(external_bias=profile == 'insole'),velocity_last_receipt=None)
         self.devices[key] = d
         return d
 
@@ -277,14 +278,14 @@ class Capture:
         while self.running:
             item = await self.ingress.get()
             try:
-                self._process(*item)
+                await self._process(*item)
             except Exception as exc:
                 self.error = str(exc)
                 self.log('解析失败：'+str(exc),'error')
             finally:
                 self.ingress.task_done()
 
-    def _process(self,key,data,receipt,epoch,source_receipt,source_domain,control,generation=None):
+    async def _process(self,key,data,receipt,epoch,source_receipt,source_domain,control,generation=None):
         d = self.devices[key]
         if generation is not None and generation != d['generation']:
             return
@@ -296,6 +297,23 @@ class Capture:
             return
         frames = d['decoder'].feed(data)
         d['bad'] = d['decoder'].bad
+        connection = d['connection']
+        velocity_epoch = d['velocity_tracker'].epoch
+        prepared = None
+        if frames and d['profile'] == 'insole':
+            try:
+                prepared = await asyncio.wait_for(asyncio.wrap_future(self.algorithm.control('prepare_frames',
+                    bias_key=d['bias_key'],foot=d['foot'],connection=connection,frames=frames,
+                    clock_ms=e['source_receipt_ms'],source_receipt_ms=e['source_receipt_ms'])), 2.)
+            except Exception as exc:
+                prepared = {'states':[], 'events':[], 'error':'bias_unavailable'}
+                self.log('速度零偏不可用：'+str(exc),'warning')
+            if prepared.get('error') and d['velocity_tracker'].status in ('calibrating','estimating'):
+                d['velocity_tracker'].fail(prepared['error'])
+            if connection != d['connection'] or not d['connected']:
+                return
+            if generation is not None and generation != d['generation']:
+                return
         algo_frames = []
         for index, frame in enumerate(frames):
             d['frames'] += 1; d['recent'].append(receipt)
@@ -306,8 +324,15 @@ class Capture:
             if d['profile'] == 'insole' or frame.get('kind') == 0x61:
                 sample_clock = frame.get('device_ms') if d['profile'] == 'insole' else e['source_receipt_ms']
                 domain = 'device_calendar' if d['profile'] == 'insole' else e['source_time_domain']
-                frame['velocity'] = d['velocity_tracker'].push(
-                    frame.get('values'), sample_clock, d['connection'], domain, frame.get('seq'))
+                bias_state = prepared['states'][index] if prepared and len(prepared['states']) == len(frames) else None
+                if bias_state and bias_state.get('ready'):
+                    frame['bias_used'] = list(bias_state['gyro_bias_dps'])
+                if velocity_epoch == d['velocity_tracker'].epoch:
+                    frame['velocity'] = d['velocity_tracker'].push(
+                        frame.get('values'), sample_clock, d['connection'], domain, frame.get('seq'),
+                        bias_state=bias_state)
+                else:
+                    frame['velocity'] = d['velocity_tracker'].snapshot()
                 d['velocity_last_receipt'] = receipt
             elif d['velocity_tracker'].status in ('calibrating','estimating') and frame.get('kind') in (0x51,0x52):
                 frame['velocity'] = d['velocity_tracker'].fail('unsupported_frames')
@@ -335,7 +360,7 @@ class Capture:
                 algo_frames.append(frame)
         if algo_frames:
             self.algorithm.offer(dict(profile=d['profile'],foot=d['foot'],bias_key=d['bias_key'],connection=d['connection'],frames=algo_frames,
-                clock_ms=e['source_receipt_ms'],source_receipt_ms=e['source_receipt_ms'],source_time_domain=e['source_time_domain']))
+                clock_ms=e['source_receipt_ms'],source_receipt_ms=e['source_receipt_ms'],source_time_domain=e['source_time_domain'],prepared=prepared))
 
     def _control_reply(self,d,data):
         b = (d['control_buffer']+bytes(data))[-4096:]

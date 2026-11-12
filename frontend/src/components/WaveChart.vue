@@ -3,7 +3,7 @@ import { onMounted, onUnmounted, ref, watch } from 'vue'
 import uPlot from 'uplot'
 import { buffers } from '../store'
 
-const props = withDefaults(defineProps<{ deviceId: string; metric: 'acc' | 'gyro' | 'angles' | 'pressure' | 'speed'; window: number; channel?: number; corrected?: boolean }>(), { channel: 0, corrected: false })
+const props = withDefaults(defineProps<{ deviceId: string; metric: 'acc' | 'gyro' | 'angles' | 'pressure' | 'speed' | 'velocity'; window: number; channel?: number; corrected?: boolean }>(), { channel: 0, corrected: false })
 const box = ref<HTMLDivElement>()
 let chart: uPlot | undefined
 let observer: ResizeObserver | undefined
@@ -26,6 +26,7 @@ function draw() {
     for (let axis = 0; axis < ys.length; axis++) {
       let value: number | null | undefined
       if (props.metric === 'speed') value = frame.velocity?.valid ? frame.velocity.speed_mps : null
+      else if (props.metric === 'velocity') value = frame.velocity?.valid ? frame.velocity.velocity_mps?.[axis] : null
       else if (props.metric === 'pressure') value = frame.pressure?.[props.channel]
       else if (props.metric === 'angles') value = frame.angles?.[axis]
       else {
@@ -46,7 +47,7 @@ function create() {
     width: box.value.clientWidth || 600, height: 185,
     padding: [12, 12, 0, 0],
     scales: { x: { time: false, auto: false, range: [-props.window, 0] } },
-    series: [{}, ...(single ? [{ label: props.metric === 'speed' ? '合速度 m/s' : `P${props.channel + 1}`, stroke: colors[0], width: 1.4, spanGaps: false }] : colors.map((color, axis) => ({ label: 'XYZ'[axis], stroke: color, width: 1.2, spanGaps: false })))],
+    series: [{}, ...(single ? [{ label: props.metric === 'speed' ? '合速度 m/s' : `P${props.channel + 1}`, stroke: colors[0], width: 1.4, spanGaps: false }] : colors.map((color, axis) => ({ label: props.metric === 'velocity' ? ['水平 Vx m/s', '水平 Vy m/s', '垂直 Vz m/s'][axis] : 'XYZ'[axis], stroke: color, width: 1.2, spanGaps: false })))],
     axes: [{ stroke: '#7e8b9c', grid: { stroke: '#edf1f5' }, values: (_u, ticks) => ticks.map(value => `${value.toFixed(0)}s`) }, { stroke: '#7e8b9c', grid: { stroke: '#edf1f5' }, size: 54 }],
     legend: { show: true },
     cursor: { drag: { x: true, y: false } },

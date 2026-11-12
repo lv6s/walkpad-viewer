@@ -21,11 +21,14 @@ def rotate(q, vector):
 
 
 class VelocityEstimator:
-    """用户确认静止后，限时积分；不从平稳六轴推断绝对零速。"""
-    def __init__(self):
+    """不从平稳六轴或陀螺零偏更新推断绝对零速。"""
+    def __init__(self, external_bias=False):
+        self.external_bias = external_bias
+        self.epoch = 0
         self.reset()
 
     def reset(self, reason='idle'):
+        self.epoch += 1
         self.status = reason
         self.samples = collections.deque()
         self.clock = None
@@ -34,6 +37,7 @@ class VelocityEstimator:
         self.domain = None
         self.q = [1., 0., 0., 0.]
         self.bias = [0., 0., 0.]
+        self.bias_ready = False
         self.gravity = 1.
         self.velocity = [0., 0., 0.]
         self.previous_acc = None
@@ -52,15 +56,16 @@ class VelocityEstimator:
         return dict(status=self.status, valid=valid,
                     speed_mps=norm(self.velocity) if valid else None,
                     velocity_mps=list(self.velocity) if valid else None,
-                    elapsed_s=self.elapsed, remaining_s=max(0., 5.-self.elapsed) if valid else None,
-                    calibration_progress=self.progress, time_basis=self.time_basis,
-                    frame='initial_level_z_up', horizon_s=5.)
+                    elapsed_s=self.elapsed, calibration_progress=self.progress,
+                    time_basis=self.time_basis, frame='initial_level_z_up',
+                    bias_source='online' if self.external_bias else 'initial',
+                    bias_ready=self.bias_ready, gyro_bias_dps=list(self.bias) if self.bias_ready else None)
 
     def fail(self, reason):
         self.reset(reason)
         return self.snapshot()
 
-    def push(self, values, clock_ms, connection, domain, sequence=None):
+    def push(self, values, clock_ms, connection, domain, sequence=None, *, bias_state=None):
         if self.status not in ('calibrating', 'estimating'):
             return self.snapshot()
         if (not isinstance(values, (list, tuple)) or len(values) != 6
@@ -85,23 +90,34 @@ class VelocityEstimator:
         self.domain = domain
         self.time_basis = domain
         acc, gyro = list(values[:3]), list(values[3:])
+        if self.external_bias:
+            if bias_state is None:
+                return self.fail('bias_unavailable')
+            candidate = bias_state.get('gyro_bias_dps')
+            ready = (bias_state.get('ready') and isinstance(candidate, (list, tuple)) and len(candidate) == 3
+                     and all(isinstance(x, (int, float)) and math.isfinite(x) for x in candidate))
+            if self.status == 'estimating' and (not ready or bias_state.get('discontinuity')):
+                return self.fail('bias_boundary')
+            self.bias_ready = bool(ready)
+            if ready:
+                self.bias = list(candidate)
+        corrected = [x-b for x, b in zip(gyro, self.bias)]
         if self.status == 'calibrating':
             if self.calibration_started is None:
                 self.calibration_started = clock_ms
-            if clock_ms-self.calibration_started > 15000:
+            if clock_ms-self.calibration_started > 30000:
                 return self.fail('calibration_timeout')
-            if abs(norm(acc)-1.) > .15 or norm(gyro) > 3.:
+            if abs(norm(acc)-1.) > .15 or norm(corrected) > 3.:
                 self.samples.clear()
                 self.progress = 0.
                 return self.snapshot()
             self.samples.append((clock_ms, acc, gyro))
-            while len(self.samples) > 1 and clock_ms-self.samples[1][0] >= 2000:
+            while len(self.samples) > 1 and clock_ms-self.samples[1][0] >= 5000:
                 self.samples.popleft()
             span = (clock_ms-self.samples[0][0])/1000
-            self.progress = min(1., span/2.)
-            if span < 2. or len(self.samples) < 30:
+            self.progress = min(1., span/5.)
+            if span < 5. or len(self.samples) < 50 or (self.external_bias and not self.bias_ready):
                 return self.snapshot()
-            # 用时间权重，避免通知抖动改变静止均值。
             weights = [self.samples[i+1][0]-s[0] for i, s in enumerate(list(self.samples)[:-1])]
             total = sum(weights)
             means = [[sum(s[group][axis]*w for s, w in zip(self.samples, weights))/total
@@ -112,7 +128,11 @@ class VelocityEstimator:
                     self.samples.clear()
                     self.progress = 0.
                     return self.snapshot()
-            a, self.bias = means
+            a, initial_bias = means
+            # 鞋垫仅使用同帧在线偏置，不能再扣一次初始化残余均值。
+            if not self.external_bias:
+                self.bias = initial_bias
+                self.bias_ready = True
             self.gravity = norm(a)
             u = [x/self.gravity for x in a]
             q = [1.+u[2], u[1], -u[0], 0.]
@@ -125,10 +145,7 @@ class VelocityEstimator:
             self.samples.clear()
             return self.snapshot()
         self.elapsed = (clock_ms-self.started)/1000
-        if self.elapsed >= 5.:
-            self.status = 'expired'
-            return self.snapshot()
-        omega = [(x-b)*math.pi/180 for x, b in zip(gyro, self.bias)]
+        omega = [x*math.pi/180 for x in corrected]
         angle = norm(omega)*dt
         delta = ([math.cos(angle/2), *[x*math.sin(angle/2)/norm(omega) for x in omega]]
                  if angle > 1e-12 else [1., 0., 0., 0.])
@@ -138,4 +155,6 @@ class VelocityEstimator:
         linear = [world[0]*G, world[1]*G, (world[2]-self.gravity)*G]
         self.velocity = [v+(a+b)*dt/2 for v, a, b in zip(self.velocity, self.previous_acc, linear)]
         self.previous_acc = linear
+        if not all(math.isfinite(x) for x in self.velocity):
+            return self.fail('invalid_sample')
         return self.snapshot()

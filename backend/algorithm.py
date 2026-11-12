@@ -76,6 +76,26 @@ class Algorithm:
                 if not result['ok']:
                     raise ValueError(result['error'])
                 return result
+            def prepare_frames(item):
+                key = item['bias_key']; foot = item.get('foot'); clock = item['clock_ms']
+                stamp[key] = clock
+                if active.get(key) != item['connection']:
+                    prepare([{'key':key,'foot':foot,'processing_ms':clock,'action':'reset_bias'}])
+                    active[key] = item['connection']
+                    if foot in ('l','r'):
+                        reset('device_boundary')
+                records = [dict(key=key,foot=foot,connection=item['connection'],processing_ms=clock,
+                                receipt_ms=item['source_receipt_ms'],device_ms=f['device_ms'],seq=f['seq'],raw6=f['raw6'])
+                           for f in item['frames'] if f.get('device_ms') is not None and not f.get('clock_coarse')]
+                if len(records) != len(item['frames']):
+                    return {'events':[], 'states':[], 'error':'device_clock_unusable'}
+                output = prepare(records)
+                for state in output['states']:
+                    with self.lock:
+                        self.state['bias'][key] = state
+                    if state.get('discontinuity') and foot in ('l','r'):
+                        reset('bias_boundary')
+                return output
             def engine():
                 if profile not in engines:
                     sys.path.insert(0,str(ROOT/'activity'))
@@ -109,6 +129,11 @@ class Algorithm:
                         self.overflow = False
                     control = item.get('control')
                     if control:
+                        if control == 'prepare_frames':
+                            output = prepare_frames(item)
+                            if not future.done():
+                                future.set_result(output)
+                            continue
                         if control == 'configure':
                             profile = item.get('profile',profile)
                             enabled = item.get('enabled',enabled)
@@ -153,28 +178,20 @@ class Algorithm:
                             reset('clock_domain_boundary'); prepare(reset=True); active.clear(); stamp.clear()
                         last_clock = clock
                     stamp[key] = clock
-                    if active.get(key) != item['connection']:
-                        prepare([{'key':key,'foot':foot,'processing_ms':clock,'action':'reset_bias'}])
-                        active[key] = item['connection']
-                        if is_foot:
-                            reset('device_boundary')
                     if profile == 'insole':
-                        records = [dict(key=key,foot=foot,connection=item['connection'],processing_ms=clock,
-                                        receipt_ms=item['source_receipt_ms'],device_ms=f['device_ms'],seq=f['seq'],raw6=f['raw6'])
-                                   for f in frames if f.get('device_ms') is not None and not f.get('clock_coarse')]
-                        if len(records) != len(frames):
+                        output = item.get('prepared')
+                        if output is None:
+                            output = prepare_frames(item)
+                        if output.get('error'):
                             if is_foot:
-                                reset('device_clock_unusable')
+                                reset(output['error'])
                             continue
-                        output = prepare(records)
-                        for state in output['states']:
-                            with self.lock:
-                                self.state['bias'][key] = state
-                            if state.get('discontinuity') and is_foot:
-                                reset('bias_boundary')
-                        # 非脚背位置的鞋垫照常补偿零偏，只是不进步态引擎
                         events = [e for e in output['events'] if e.get('foot') in ('l','r')]
                     else:
+                        if active.get(key) != item['connection']:
+                            active[key] = item['connection']
+                            if is_foot:
+                                reset('device_boundary')
                         values = [f['values'] for f in frames if f.get('inference_eligible')]
                         events = [dict(foot=foot,receipt_ms=item['source_receipt_ms'],segment=item['connection'],values=values)] if values else []
                     if not is_foot:

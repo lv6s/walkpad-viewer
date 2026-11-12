@@ -2,8 +2,9 @@ import { shallowRef, ref } from 'vue'
 
 export interface VelocityState {
   status: string; valid: boolean; speed_mps: number | null; velocity_mps: number[] | null
-  elapsed_s: number; remaining_s: number | null; calibration_progress: number
-  time_basis: string | null; horizon_s: number
+  elapsed_s: number; calibration_progress: number; frame: string
+  time_basis: string | null; bias_source: 'online' | 'initial'; bias_ready: boolean
+  gyro_bias_dps: number[] | null
 }
 export interface Frame {
   cursor: number
@@ -20,7 +21,7 @@ export interface Frame {
   temperature?: number
   device_ms?: number | null
   seq?: number
-  // 该帧到达时的在线零偏快照，未就绪或缺省时不补偿
+  // 服务端同帧生效的偏置；不能借后续快照补偿历史帧
   bias_used?: number[]
 }
 export interface Device {
@@ -77,11 +78,7 @@ export async function connect() {
       const update = JSON.parse(event.data)
       status.value = update.state
       if (update.gap) error.value = '显示缓存出现缺口；请以后台保存的原始记录为准'
-      const algorithm = update.state?.algorithm
       for (const frame of update.frames as Frame[]) {
-        // 零偏按帧到达时快照，历史帧不随后续零偏变化重算
-        const bias = frame.profile === 'insole' && algorithm?.profile === 'insole' ? algorithm.bias?.[frame.bias_key ?? frame.foot ?? ''] : undefined
-        if (frame.values && bias?.ready && Array.isArray(bias.gyro_bias_dps)) frame.bias_used = (bias.gyro_bias_dps as unknown[]).slice(0, 3).map(Number)
         const array = buffers.get(frame.device_id) || []
         if (!array.length || frame.cursor > array[array.length - 1]!.cursor) array.push(frame)
         const cutoff = frame.receipt_ms - 35000
