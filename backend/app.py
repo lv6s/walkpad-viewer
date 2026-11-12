@@ -28,6 +28,8 @@ class Command(BaseModel):
     device_id: str | None = None
     profile: str | None = None
     foot: str | None = None
+    placement: str | None = None
+    placement_label: str | None = None
     address: str | None = None
     source: str | None = None
     session_id: str | None = None
@@ -143,7 +145,7 @@ def create_app(root=ROOT,demo=False,phone_port=8766,debug=False,idle_exit=8):
             if action == 'connect':
                 if not body.address or body.profile not in ('wt','insole'):
                     raise ValueError('请选择设备与协议')
-                return await c.connect(body.address,body.profile,body.foot)
+                return await c.connect(body.address,body.profile,body.placement or body.foot,label=body.placement_label)
             if action == 'disconnect':
                 return await c.disconnect(body.device_id)
             if action == 'forget':
@@ -160,7 +162,7 @@ def create_app(root=ROOT,demo=False,phone_port=8766,debug=False,idle_exit=8):
                 for d in list(c.devices.values()):
                     if d['source'] == 'direct' and not d['connected']:
                         try:
-                            result.append(await c.connect(d['address'],d['profile'],d['foot'],d['id']))
+                            result.append(await c.connect(d['address'],d['profile'],d['placement'],d['id'],d['placement_label']))
                         except Exception as exc:
                             c.log(str(exc),'warning')
                 return {'devices':result}

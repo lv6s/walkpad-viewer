@@ -385,9 +385,44 @@ def test_connected_device_cannot_change_identity(tmp_path):
         d = c._device('test','test','wt','l','address1')
         d['connected'] = True
         assert (await c.connect('address1','wt','l'))['id'] == 'test'
-        with pytest.raises(ValueError,match='更换协议或脚别'):
+        with pytest.raises(ValueError,match='更换协议或位置'):
             await c.connect('address1','wt','r')
         assert d['foot'] == 'l'
+        await c.close()
+    asyncio.run(run())
+
+
+def test_placement_assigns_foot_and_allocates_custom(tmp_path):
+    async def run():
+        c = Capture(tmp_path)
+        assert c.resolve_placement('leftInstep') == ('leftInstep','左脚背','l')
+        assert c.resolve_placement('l') == ('leftInstep','左脚背','l')
+        assert c.resolve_placement('leftWrist') == ('leftWrist','左手腕',None)
+        assert c.resolve_placement('custom','腰部') == ('custom1','腰部',None)
+        old = c._device('a','a','wt',None,'addr',placement='custom1',label='腰部')
+        assert c.resolve_placement('custom','小腿') == ('custom2','小腿',None)
+        # 换设备沿用同一位置时复用槽位；该槽位在线时不能重复占用
+        assert c.resolve_placement('custom','腰部') == ('custom1','腰部',None)
+        old['connected'] = True
+        with pytest.raises(ValueError,match='已被占用'):
+            c.resolve_placement('custom','腰部')
+        with pytest.raises(ValueError,match='名称'):
+            c.resolve_placement('custom','  ')
+        with pytest.raises(ValueError,match='位置'):
+            c.resolve_placement('waist')
+        await c.close()
+    asyncio.run(run())
+
+
+def test_placement_is_unique_and_insole_needs_instep(tmp_path):
+    async def run():
+        c = Capture(tmp_path)
+        d = c._device('a','a','wt',None,'addr',placement='leftWrist',label='左手腕')
+        d['connected'] = True
+        with pytest.raises(ValueError,match='该位置已有设备连接'):
+            await c.connect('addr2','wt','leftWrist')
+        with pytest.raises(ValueError,match='只能标为左脚背或右脚背'):
+            await c.connect('addr3','insole','leftWrist')
         await c.close()
     asyncio.run(run())
 

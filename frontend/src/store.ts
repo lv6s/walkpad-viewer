@@ -17,7 +17,7 @@ export interface Frame {
   bias_used?: number[]
 }
 export interface Device {
-  id: string; name: string; profile: 'wt' | 'insole'; foot: string | null; source: string
+  id: string; name: string; address?: string; profile: 'wt' | 'insole'; foot: string | null; placement: string | null; placement_label: string | null; source: string
   connected: boolean; reconnecting: boolean; frames: number; bad: number; rate: number
   last: Frame | null; topology: string; format: number | null; format_status: string; command_status: string
 }
@@ -105,3 +105,5 @@ export function clearBuffers() { buffers.clear(); revision.value++ }
 export function dropBuffers(id: string) { buffers.delete(id); revision.value++ }
 export const number = (value: number | null | undefined, digits = 2) => value == null || !Number.isFinite(value) ? '—' : value.toFixed(digits)
 export const side = (value: string | null) => value === 'l' ? '左脚' : value === 'r' ? '右脚' : '未指定侧别'
+export const places: Record<string, string> = { leftInstep: '左脚背', rightInstep: '右脚背', leftWrist: '左手腕', rightWrist: '右手腕' }
+export const where = (device: Pick<Device, 'foot' | 'placement' | 'placement_label'>) => device.placement_label || places[device.placement || ''] || side(device.foot)

@@ -80,7 +80,9 @@ def export_standard(path):
                 slots = slot_map(r['foot'],r['sensor_topology'])
                 clock = r['device_calendar_ms']
                 observed = max(0,int((r['receipt_monotonic_ms']-origin)*1000))
-                side = 'left' if r['foot'] == 'l' else 'right'
+                side = {'l':'left','r':'right'}.get(r.get('foot'),'unspecified')
+                code = {'leftInstep':'left_instep','rightInstep':'right_instep','leftWrist':'left_wrist','rightWrist':'right_wrist'}
+                placement = code.get(r.get('placement'),side+'_instep' if side != 'unspecified' else 'unspecified')
                 frame = dict(schema_id='standard_measurement_frame',schema_version='1.0.0',dataset_id=r['session_id'],
                     frame_identity=r['raw_packet_sha256']+':'+str(r['event_id'])+':'+str(r['frame_index']),product_code='lab',session_id=r['session_id'],
                     processing_input_snapshot_id=r['session_id'],processing_attempt_id='capture-v2',alignment_revision_id='unaligned-v2',
@@ -105,7 +107,7 @@ def export_standard(path):
                     source_frame_ordinal_delta=1 if prev else None,effective_elapsed_delta_us=None,
                     continuity_status='boundary_start' if prev is None else 'unverified',
                     quality_flag_codes=['cross_clock_alignment_unverified','sequence_gap_not_equated_to_imu_loss'],
-                    placement_code=side+'_instep',gyro_temperature_celsius=r['gyro_temperature_celsius'],device_date='',device_time='',dropped_frames_before=None)
+                    placement_code=placement,gyro_temperature_celsius=r['gyro_temperature_celsius'],device_date='',device_time='',dropped_frames_before=None)
                 rows.append(frame)
                 previous[key] = r
             if rows:

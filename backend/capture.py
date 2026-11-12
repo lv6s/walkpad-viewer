@@ -3,6 +3,7 @@ import base64
 import collections
 import json
 import math
+import re
 import time
 import uuid
 from pathlib import Path
@@ -17,6 +18,11 @@ INSOLE_NOTIFY = '00002a37-0000-1000-8000-00805f9b34fb'
 INSOLE_WRITE = '0000ffe1-0000-1000-8000-00805f9b34fb'
 WT_NOTIFY = '0000ffe4-0000-1000-8000-00805f9a34fb'
 WT_WRITE = '0000ffe9-0000-1000-8000-00805f9a34fb'
+
+# 位置 -> (显示名, 只有标成左右脚背的设备才进左右脚算法与零偏)
+PLACEMENTS = {'leftInstep':('左脚背','l'),'rightInstep':('右脚背','r'),
+              'leftWrist':('左手腕',None),'rightWrist':('右手腕',None)}
+FOOT_PLACEMENT = {'l':'leftInstep','r':'rightInstep'}
 
 
 class Capture:
@@ -62,12 +68,16 @@ class Capture:
         if self.debug:
             print('[capture]',level,text,flush=True)
 
-    def _device(self, key, name, profile, foot, address='', source='direct'):
+    def _device(self, key, name, profile, foot, address='', source='direct', placement=None, label=None):
+        placement = placement or FOOT_PLACEMENT.get(foot)
+        if not label:
+            label = PLACEMENTS[placement][0] if placement in PLACEMENTS else placement
         if key in self.devices:
             d = self.devices[key]
-            d.update(name=name,profile=profile,foot=foot,address=address,source=source)
+            d.update(name=name,profile=profile,foot=foot,address=address,source=source,placement=placement,placement_label=label)
             return d
         d = dict(id=key,name=name,profile=profile,foot=foot,address=address,source=source,
+                 placement=placement,placement_label=label,
                  connected=False,reconnecting=False,connection='',client=None,decoder=Decoder(profile),
                  frames=0,bad=0,last=None,samples=collections.deque(maxlen=4000),recent=collections.deque(maxlen=1000),
                  manual=False,topology='v2',format=None,format_status='未回读，单位未知',command_seq=0,
@@ -76,9 +86,37 @@ class Capture:
         self.devices[key] = d
         return d
 
+    def resolve_placement(self, value, label=None):
+        """返回 (placement 键, 显示名, foot)；自定义位置按当前设备表分配空号。"""
+        value = '' if value is None else str(value)
+        value = FOOT_PLACEMENT.get(value) or value
+        if value in PLACEMENTS:
+            known = PLACEMENTS[value]
+            return value, known[0], known[1]
+        text = str(label or '').strip()
+        if value == 'custom' or re.fullmatch(r'custom\d{1,2}', value):
+            if not text:
+                raise ValueError('自定义位置需要填写名称')
+            if len(text) > 20:
+                raise ValueError('位置名称最多 20 个字符')
+            existing = next((d for d in self.devices.values() if d['placement_label'] == text), None)
+            if existing is not None:
+                if existing['connected']:
+                    raise ValueError('该位置名称已被占用')
+                # 换个设备接同一位置：沿用原槽位，旧设备条目保留为已断开
+                return existing['placement'], text, None
+            if value == 'custom':
+                used = {d['placement'] for d in self.devices.values()}
+                index = 1
+                while 'custom%d' % index in used:
+                    index += 1
+                value = 'custom%d' % index
+            return value, text, None
+        raise ValueError('请选择设备位置')
+
     def persist_devices(self):
         self.config_path.parent.mkdir(exist_ok=True)
-        atomic_json(self.config_path,[{k:d[k] for k in ('id','name','profile','foot','address')} for d in self.devices.values() if d['source'] == 'direct'])
+        atomic_json(self.config_path,[{k:d[k] for k in ('id','name','profile','foot','address','placement','placement_label')} for d in self.devices.values() if d['source'] == 'direct'])
 
     async def scan(self):
         if self.source != 'direct':
@@ -94,27 +132,28 @@ class Capture:
             result.append(dict(address=address,name=name,rssi=adv.rssi,profile=profile))
         return sorted(result,key=lambda x:x['rssi'],reverse=True)
 
-    async def connect(self, address, profile, foot=None, key=None):
+    async def connect(self, address, profile, placement=None, key=None, label=None):
         if self.source != 'direct':
             raise ValueError('非电脑直连模式不能连接电脑蓝牙')
-        if profile not in ('wt','insole') or foot not in (None,'l','r'):
-            raise ValueError('invalid profile or foot')
+        if profile not in ('wt','insole'):
+            raise ValueError('invalid profile')
+        placement, text, foot = self.resolve_placement(placement, label)
         if profile == 'insole' and foot is None:
-            raise ValueError('自研鞋垫必须指定左右脚')
+            raise ValueError('自研鞋垫只能标为左脚背或右脚背')
         for other in self.devices.values():
             if other['connected'] and other['source'] == 'direct' and other['address'] == address:
-                if other['profile'] != profile or other['foot'] != foot:
-                    raise ValueError('该设备已连接；更换协议或脚别前先停止记录并断开')
+                if other['profile'] != profile or other['placement'] != placement:
+                    raise ValueError('该设备已连接；更换协议或位置前先停止记录并断开')
                 return self.public(other)
-            if other['connected'] and other['profile'] == profile and foot and other['foot'] == foot and other['address'] != address:
-                raise ValueError('该来源的这只脚已有设备连接')
+            if other['connected'] and other['placement'] == placement and other['address'] != address:
+                raise ValueError('该位置已有设备连接')
         async with self.connect_lock:
             device = self.found.get(address)
             if not device:
                 device = await BleakScanner.find_device_by_address(address,timeout=8)
             if not device:
                 raise ValueError('未扫描到设备，请确认上电且未被其他程序占用')
-            d = self._device(key or profile+':'+address,device.name or address,profile,foot,address)
+            d = self._device(key or profile+':'+address,device.name or address,profile,foot,address,placement=placement,label=text)
             if d['connected']:
                 return self.public(d)
             d['manual'] = False
@@ -171,7 +210,7 @@ class Capture:
             if d['manual'] or not self.running or d['generation'] != generation or self.source != 'direct':
                 break
             try:
-                await self.connect(d['address'],d['profile'],d['foot'],d['id'])
+                await self.connect(d['address'],d['profile'],d['placement'],d['id'],d['placement_label'])
                 return
             except Exception as exc:
                 self.log('重连未成功：'+str(exc),'warning')
@@ -208,6 +247,7 @@ class Capture:
         self.sequence += 1
         receipt = time.monotonic()*1000 if receipt is None else receipt
         event = dict(v=2,id=self.sequence,type=kind,device_id=d['id'],profile=d['profile'],foot=d['foot'],
+                     placement=d['placement'],placement_label=d['placement_label'],
                      connection=d['connection'],source=d['source'],receipt_monotonic_ms=receipt,
                      receipt_epoch_ms=time.time()*1000 if epoch is None else epoch,
                      source_receipt_ms=receipt if source_receipt is None else source_receipt,
@@ -254,6 +294,7 @@ class Capture:
         for index, frame in enumerate(frames):
             d['frames'] += 1; d['recent'].append(receipt)
             frame = dict(frame,device_id=key,foot=d['foot'],profile=d['profile'],connection=d['connection'],
+                         placement=d['placement'],placement_label=d['placement_label'],
                          source=d['source'],receipt_ms=receipt,epoch_ms=epoch)
             self.cursor += 1
             frame['cursor'] = self.cursor
@@ -265,7 +306,8 @@ class Capture:
             if d['profile'] == 'insole':
                 frame['pressure'] = [frame['pressure_sparse'][slot] for slot in mapping]
             self.recorder.put('frame',dict(schema_version='capture_frames.v2',session_id=self.recorder.session_id,
-                device_id=key,profile=d['profile'],foot=d['foot'],connection=d['connection'],source=d['source'],
+                device_id=key,profile=d['profile'],foot=d['foot'],placement=d['placement'],placement_label=d['placement_label'],
+                connection=d['connection'],source=d['source'],
                 event_id=e['id'],frame_index=index,receipt_monotonic_ms=receipt,receipt_epoch_ms=epoch,
                 source_receipt_ms=e['source_receipt_ms'],source_time_domain=e['source_time_domain'],
                 device_calendar_ms=frame.get('device_ms'),source_frame_number_raw=frame.get('seq'),
@@ -468,7 +510,8 @@ class Capture:
                         await asyncio.sleep(max(0,(stamp-previous)/1000/speed))
                     previous = stamp
                     key = 'replay:'+event['device_id']
-                    d = self._device(key,event['device_id'],event['profile'],event['foot'],source='replay')
+                    d = self._device(key,event['device_id'],event['profile'],event['foot'],source='replay',
+                                     placement=event.get('placement'),label=event.get('placement_label'))
                     d['connection'] = 'replay:'+event['connection']
                     d['connected'] = event['type'] != 'disconnect'
                     if event['type'] == 'connect':
@@ -496,7 +539,7 @@ class Capture:
         recent = d['recent']
         while recent and recent[0] < now-1000:
             recent.popleft()
-        return {k:d[k] for k in ('id','name','profile','foot','address','source','connected','reconnecting','connection','frames','bad','last','topology','format','format_status','command_status')} | {'rate':len(recent)}
+        return {k:d[k] for k in ('id','name','profile','foot','address','placement','placement_label','source','connected','reconnecting','connection','frames','bad','last','topology','format','format_status','command_status')} | {'rate':len(recent)}
 
     def snapshot(self):
         return dict(version='2.0.0',source=self.source,devices=[self.public(d) for d in self.devices.values()],
