@@ -1,5 +1,10 @@
 import { shallowRef, ref } from 'vue'
 
+export interface VelocityState {
+  status: string; valid: boolean; speed_mps: number | null; velocity_mps: number[] | null
+  elapsed_s: number; remaining_s: number | null; calibration_progress: number
+  time_basis: string | null; horizon_s: number
+}
 export interface Frame {
   cursor: number
   device_id: string
@@ -9,6 +14,7 @@ export interface Frame {
   receipt_ms: number
   epoch_ms: number
   values: (number | null)[] | null
+  velocity?: VelocityState
   angles?: number[]
   pressure?: number[]
   temperature?: number
@@ -21,6 +27,7 @@ export interface Device {
   id: string; name: string; address?: string; profile: 'wt' | 'insole'; foot: string | null; bias_key: string; placement: string | null; placement_label: string | null; source: string
   connected: boolean; reconnecting: boolean; frames: number; bad: number; rate: number
   last: Frame | null; topology: string; format: number | null; format_status: string; command_status: string
+  velocity: VelocityState
 }
 export interface Status {
   version: string; source: string; devices: Device[]; cursor: number; demo_allowed: boolean

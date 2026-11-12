@@ -13,6 +13,7 @@ from bleak import BleakClient, BleakScanner
 from .algorithm import Algorithm
 from .protocol import Decoder, command_packet, crc_ccitt, crc_measurement, demo_packet, slot_map
 from .storage import Recorder, atomic_json
+from .velocity import VelocityEstimator
 
 INSOLE_NOTIFY = '00002a37-0000-1000-8000-00805f9b34fb'
 INSOLE_WRITE = '0000ffe1-0000-1000-8000-00805f9b34fb'
@@ -76,6 +77,8 @@ class Capture:
         bias_key = foot or 'd:'+key
         if key in self.devices:
             d = self.devices[key]
+            if (d['profile'],d['source'],d['placement']) != (profile,source,placement):
+                d['velocity_tracker'].reset()
             d.update(name=name,profile=profile,foot=foot,address=address,source=source,placement=placement,placement_label=label,bias_key=bias_key)
             return d
         d = dict(id=key,name=name,profile=profile,foot=foot,address=address,source=source,
@@ -84,7 +87,8 @@ class Capture:
                  frames=0,bad=0,last=None,samples=collections.deque(maxlen=4000),recent=collections.deque(maxlen=1000),
                  manual=False,topology='v2',format=None,format_status='未回读，单位未知',command_seq=0,
                  command_lock=asyncio.Lock(),control_buffer=b'',ack=None,command_status='',write_char=None,
-                 generation=0,command_future=None,last_notify=0)
+                 generation=0,command_future=None,last_notify=0,
+                 velocity_tracker=VelocityEstimator(),velocity_last_receipt=None)
         self.devices[key] = d
         return d
 
@@ -198,6 +202,7 @@ class Capture:
         if generation != d['generation']:
             return
         d['connected'] = False
+        d['velocity_tracker'].fail('disconnected')
         self.emit(d,'disconnect',{})
         self.algorithm.offer(dict(control='boundary',foot=d['foot'],bias_key=d['bias_key'],clock_ms=time.monotonic()*1000,reason='device_boundary'))
         d['decoder'] = Decoder(d['profile'])
@@ -261,6 +266,7 @@ class Capture:
         try:
             self.ingress.put_nowait((key,data,receipt,epoch,source_receipt,source_domain,control,generation))
         except asyncio.QueueFull:
+            self.devices[key]['velocity_tracker'].fail('sequence_gap')
             self.error = '蓝牙接收队列已满，当前记录完整性不可保证'
             self.log(self.error,'error')
             self.algorithm.offer(dict(control='boundary',foot=self.devices[key]['foot'],bias_key=self.devices[key]['bias_key'],clock_ms=receipt,reason='ingress_overflow'))
@@ -296,6 +302,15 @@ class Capture:
             frame = dict(frame,device_id=key,foot=d['foot'],bias_key=d['bias_key'],profile=d['profile'],connection=d['connection'],
                          placement=d['placement'],placement_label=d['placement_label'],
                          source=d['source'],receipt_ms=receipt,epoch_ms=epoch)
+            # WT 分包角速度/姿态帧不重复积分缓存的加速度；缺少同帧六轴时拒绝估速。
+            if d['profile'] == 'insole' or frame.get('kind') == 0x61:
+                sample_clock = frame.get('device_ms') if d['profile'] == 'insole' else e['source_receipt_ms']
+                domain = 'device_calendar' if d['profile'] == 'insole' else e['source_time_domain']
+                frame['velocity'] = d['velocity_tracker'].push(
+                    frame.get('values'), sample_clock, d['connection'], domain, frame.get('seq'))
+                d['velocity_last_receipt'] = receipt
+            elif d['velocity_tracker'].status in ('calibrating','estimating') and frame.get('kind') in (0x51,0x52):
+                frame['velocity'] = d['velocity_tracker'].fail('unsupported_frames')
             self.cursor += 1
             frame['cursor'] = self.cursor
             d['last'] = frame
@@ -534,12 +549,31 @@ class Capture:
         self.replay_task = asyncio.create_task(guarded_play())
         return {'ok':True}
 
+    def velocity_control(self, key, start):
+        d = self.devices.get(key)
+        if not d or not d['connected']:
+            raise ValueError('先连接要估算速度的设备')
+        if start:
+            # 不使用历史帧初始化：按钮代表用户确认当前设备相对地面静止。
+            if d['last'] is None or time.monotonic()*1000-d['last_notify'] > 500:
+                raise ValueError('设备数据已过期，请等待实时六轴数据')
+            d['velocity_last_receipt'] = time.monotonic()*1000
+            return d['velocity_tracker'].arm()
+        d['velocity_tracker'].reset()
+        return d['velocity_tracker'].snapshot()
+
     def public(self,d):
         now = time.monotonic()*1000
+        tracker = d['velocity_tracker']
+        if tracker.status in ('calibrating','estimating'):
+            if not d['connected']:
+                tracker.fail('disconnected')
+            elif d['velocity_last_receipt'] is not None and now-d['velocity_last_receipt'] > 500:
+                tracker.fail('stale')
         recent = d['recent']
         while recent and recent[0] < now-1000:
             recent.popleft()
-        return {k:d[k] for k in ('id','name','profile','foot','bias_key','address','placement','placement_label','source','connected','reconnecting','connection','frames','bad','last','topology','format','format_status','command_status')} | {'rate':len(recent)}
+        return {k:d[k] for k in ('id','name','profile','foot','bias_key','address','placement','placement_label','source','connected','reconnecting','connection','frames','bad','last','topology','format','format_status','command_status')} | {'rate':len(recent),'velocity':tracker.snapshot()}
 
     def snapshot(self):
         return dict(version='2.0.0',source=self.source,devices=[self.public(d) for d in self.devices.values()],

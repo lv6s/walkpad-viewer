@@ -1,0 +1,141 @@
+import collections
+import math
+
+
+G = 9.80665
+
+
+def norm(values):
+    return math.sqrt(sum(x*x for x in values))
+
+
+def multiply(a, b):
+    w, x, y, z = a
+    v, i, j, k = b
+    return [w*v-x*i-y*j-z*k, w*i+x*v+y*k-z*j,
+            w*j-x*k+y*v+z*i, w*k+x*j-y*i+z*v]
+
+
+def rotate(q, vector):
+    return multiply(multiply(q, [0, *vector]), [q[0], -q[1], -q[2], -q[3]])[1:]
+
+
+class VelocityEstimator:
+    """用户确认静止后，限时积分；不从平稳六轴推断绝对零速。"""
+    def __init__(self):
+        self.reset()
+
+    def reset(self, reason='idle'):
+        self.status = reason
+        self.samples = collections.deque()
+        self.clock = None
+        self.sequence = None
+        self.connection = None
+        self.domain = None
+        self.q = [1., 0., 0., 0.]
+        self.bias = [0., 0., 0.]
+        self.gravity = 1.
+        self.velocity = [0., 0., 0.]
+        self.previous_acc = None
+        self.started = None
+        self.calibration_started = None
+        self.progress = 0.
+        self.elapsed = 0.
+        self.time_basis = None
+
+    def arm(self):
+        self.reset('calibrating')
+        return self.snapshot()
+
+    def snapshot(self):
+        valid = self.status == 'estimating'
+        return dict(status=self.status, valid=valid,
+                    speed_mps=norm(self.velocity) if valid else None,
+                    velocity_mps=list(self.velocity) if valid else None,
+                    elapsed_s=self.elapsed, remaining_s=max(0., 5.-self.elapsed) if valid else None,
+                    calibration_progress=self.progress, time_basis=self.time_basis,
+                    frame='initial_level_z_up', horizon_s=5.)
+
+    def fail(self, reason):
+        self.reset(reason)
+        return self.snapshot()
+
+    def push(self, values, clock_ms, connection, domain, sequence=None):
+        if self.status not in ('calibrating', 'estimating'):
+            return self.snapshot()
+        if (not isinstance(values, (list, tuple)) or len(values) != 6
+                or any(not isinstance(x, (int, float)) or not math.isfinite(x) for x in values)
+                or not isinstance(clock_ms, (int, float)) or not math.isfinite(clock_ms)):
+            return self.fail('invalid_sample')
+        if norm(values[:3]) > 15.5 or max(abs(x) for x in values[3:]) > 1900:
+            return self.fail('saturated')
+        if self.clock is not None:
+            if connection != self.connection or domain != self.domain:
+                return self.fail('connection_changed')
+            dt = (clock_ms-self.clock)/1000
+            if not .001 <= dt <= .2:
+                return self.fail('time_gap')
+            if sequence is not None and self.sequence is not None and (sequence-self.sequence) % 2**32 != 1:
+                return self.fail('sequence_gap')
+        else:
+            dt = 0.
+        self.clock = clock_ms
+        self.sequence = sequence
+        self.connection = connection
+        self.domain = domain
+        self.time_basis = domain
+        acc, gyro = list(values[:3]), list(values[3:])
+        if self.status == 'calibrating':
+            if self.calibration_started is None:
+                self.calibration_started = clock_ms
+            if clock_ms-self.calibration_started > 15000:
+                return self.fail('calibration_timeout')
+            if abs(norm(acc)-1.) > .15 or norm(gyro) > 3.:
+                self.samples.clear()
+                self.progress = 0.
+                return self.snapshot()
+            self.samples.append((clock_ms, acc, gyro))
+            while len(self.samples) > 1 and clock_ms-self.samples[1][0] >= 2000:
+                self.samples.popleft()
+            span = (clock_ms-self.samples[0][0])/1000
+            self.progress = min(1., span/2.)
+            if span < 2. or len(self.samples) < 30:
+                return self.snapshot()
+            # 用时间权重，避免通知抖动改变静止均值。
+            weights = [self.samples[i+1][0]-s[0] for i, s in enumerate(list(self.samples)[:-1])]
+            total = sum(weights)
+            means = [[sum(s[group][axis]*w for s, w in zip(self.samples, weights))/total
+                      for axis in range(3)] for group in (1, 2)]
+            for group, limit in ((1, .012), (2, .20)):
+                if any(math.sqrt(sum(w*(s[group][axis]-means[group-1][axis])**2
+                                     for s, w in zip(self.samples, weights))/total) > limit for axis in range(3)):
+                    self.samples.clear()
+                    self.progress = 0.
+                    return self.snapshot()
+            a, self.bias = means
+            self.gravity = norm(a)
+            u = [x/self.gravity for x in a]
+            q = [1.+u[2], u[1], -u[0], 0.]
+            self.q = [0., 1., 0., 0.] if norm(q) < 1e-8 else [x/norm(q) for x in q]
+            self.velocity = [0., 0., 0.]
+            self.previous_acc = [0., 0., 0.]
+            self.started = clock_ms
+            self.elapsed = 0.
+            self.status = 'estimating'
+            self.samples.clear()
+            return self.snapshot()
+        self.elapsed = (clock_ms-self.started)/1000
+        if self.elapsed >= 5.:
+            self.status = 'expired'
+            return self.snapshot()
+        omega = [(x-b)*math.pi/180 for x, b in zip(gyro, self.bias)]
+        angle = norm(omega)*dt
+        delta = ([math.cos(angle/2), *[x*math.sin(angle/2)/norm(omega) for x in omega]]
+                 if angle > 1e-12 else [1., 0., 0., 0.])
+        q = multiply(self.q, delta)
+        self.q = [x/norm(q) for x in q]
+        world = rotate(self.q, acc)
+        linear = [world[0]*G, world[1]*G, (world[2]-self.gravity)*G]
+        self.velocity = [v+(a+b)*dt/2 for v, a, b in zip(self.velocity, self.previous_acc, linear)]
+        self.previous_acc = linear
+        return self.snapshot()
