@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import signal
 import socket
 import subprocess
 import sys
@@ -85,12 +86,49 @@ def legacy(no_open=False):
     raise RuntimeError('旧版后台未就绪，请查看 runtime/legacy.log')
 
 
+def stop_services():
+    import urllib.error
+    stopped = []
+    for name,marker in (('server.json',None),('legacy.json','WT901BLE')):
+        state = RUNTIME/name
+        if not state.is_file():
+            continue
+        try:
+            info = json.loads(state.read_text(encoding='utf-8'))
+            port = int(info['port']); pid = int(info['pid'])
+        except (OSError,ValueError,KeyError):
+            state.unlink(missing_ok=True)
+            continue
+        alive = False
+        try:
+            if marker is None:
+                alive = probe(port)
+            else:
+                with urllib.request.urlopen('http://127.0.0.1:%d/' % port,timeout=1.5) as response:
+                    alive = marker in response.read(40000).decode('utf-8',errors='replace')
+        except (OSError,ValueError,urllib.error.URLError):
+            alive = False
+        if alive and pid != os.getpid():
+            try:
+                os.kill(pid,signal.SIGTERM)
+                stopped.append(pid)
+            except OSError:
+                pass
+        state.unlink(missing_ok=True)
+    print('已停止：' + (', '.join(map(str,stopped)) if stopped else '没有正在运行的采集服务'))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--legacy',action='store_true')
     parser.add_argument('--no-open',action='store_true')
+    parser.add_argument('--debug',action='store_true')
+    parser.add_argument('--stop',action='store_true')
     args = parser.parse_args()
     RUNTIME.mkdir(exist_ok=True)
+    if args.stop:
+        stop_services()
+        return
     if args.legacy:
         legacy(args.no_open)
         return
@@ -129,7 +167,7 @@ def main():
                 raise RuntimeError('没有可用本地端口')
         if port is not None and not probe(port):
             log = (RUNTIME/'server.log').open('ab')
-            process = subprocess.Popen([interpreter(),'-m','backend.app','--port',str(port)],cwd=ROOT,
+            process = subprocess.Popen([interpreter(),'-m','backend.app','--port',str(port)]+['--debug']*args.debug,cwd=ROOT,
                                        stdin=subprocess.DEVNULL,stdout=log,stderr=log,
                                        creationflags=0x08000000 if os.name == 'nt' else 0)
             log.close()
