@@ -1,6 +1,25 @@
 import collections
 import math
 
+import numpy as np
+
+
+def skew(v):
+    x, y, z = v
+    return np.array([[0., -z, y], [z, 0., -x], [-y, x, 0.]])
+
+
+def rotation(q):
+    w, x, y, z = q
+    return np.array([[1-2*(y*y+z*z), 2*(x*y-z*w), 2*(x*z+y*w)],
+                     [2*(x*y+z*w), 1-2*(x*x+z*z), 2*(y*z-x*w)],
+                     [2*(x*z-y*w), 2*(y*z+x*w), 1-2*(x*x+y*y)]])
+
+
+def increment(vector):
+    angle = norm(vector)
+    return [math.cos(angle/2), *[x*math.sin(angle/2)/angle for x in vector]] if angle > 1e-12 else [1., 0., 0., 0.]
+
 
 G = 9.80665
 
@@ -46,6 +65,14 @@ class VelocityEstimator:
         self.progress = 0.
         self.elapsed = 0.
         self.time_basis = None
+        self.acc_bias = np.zeros(3)
+        self.covariance = np.diag([.02**2]*3 + [math.radians(1.)**2]*3 + [.2**2]*3)
+        self.stationary_anchor = False
+        self.anchor_reference = None
+        self.constraint_updates = 0
+        self.observation_clock = None
+        self.residual_acc = [0., 0., 0.]
+        self.anchor_history = collections.deque()
 
     def arm(self):
         self.reset('calibrating')
@@ -59,7 +86,41 @@ class VelocityEstimator:
                     elapsed_s=self.elapsed, calibration_progress=self.progress,
                     time_basis=self.time_basis, frame='initial_level_z_up',
                     bias_source='online' if self.external_bias else 'initial',
-                    bias_ready=self.bias_ready, gyro_bias_dps=list(self.bias) if self.bias_ready else None)
+                    bias_ready=self.bias_ready, gyro_bias_dps=list(self.bias) if self.bias_ready else None,
+                    method='constrained_error_state_v1',
+                    constraint='confirmed_ground_rest' if self.stationary_anchor else 'none',
+                    constraint_updates=self.constraint_updates,
+                    velocity_std_mps=np.sqrt(np.maximum(0., np.diag(self.covariance)[:3])).tolist() if valid else None,
+                    linear_acc_mps2=list(self.residual_acc) if valid else None,
+                    acc_residual_mps2=self.acc_bias.tolist(),
+                    quality='ground_rest_assumed' if self.stationary_anchor else 'unconstrained_drift')
+
+    def _observe(self, residual, h, variance):
+        p = self.covariance
+        noise = np.diag(variance)
+        gain = np.linalg.solve(h @ p @ h.T + noise, h @ p).T
+        correction = gain @ residual
+        self.velocity = (np.array(self.velocity)+correction[:3]).tolist()
+        q = multiply(increment(correction[3:6]), self.q)
+        self.q = [x/norm(q) for x in q]
+        self.acc_bias += correction[6:9]
+        j = np.eye(9)-gain @ h
+        p = j @ p @ j.T + gain @ noise @ gain.T
+        reset = np.eye(9)
+        reset[3:6, 3:6] += .5*skew(correction[3:6])
+        self.covariance = reset @ p @ reset.T
+        self.covariance = (self.covariance+self.covariance.T)/2
+
+    def _ground_observation(self, acc):
+        h = np.zeros((3, 9))
+        h[:, :3] = np.eye(3)
+        self._observe(-np.array(self.velocity), h, [.005**2]*3)
+        world = rotation(self.q) @ (np.array(acc)*G-self.acc_bias)
+        h = np.zeros((3, 9))
+        h[:, 3:6] = -skew(world)
+        h[:, 6:9] = -rotation(self.q)
+        self._observe(np.array([0., 0., self.gravity*G])-world, h, [.03**2]*3)
+        self.constraint_updates += 1
 
     def fail(self, reason):
         self.reset(reason)
@@ -142,19 +203,45 @@ class VelocityEstimator:
             self.started = clock_ms
             self.elapsed = 0.
             self.status = 'estimating'
+            self.anchor_reference = np.array(a)
+            self.stationary_anchor = True
+            self.observation_clock = clock_ms
             self.samples.clear()
             return self.snapshot()
         self.elapsed = (clock_ms-self.started)/1000
+        # 用户确认只延续当前静止段；检测到运动后不从平稳六轴重新获得零速。
+        if self.stationary_anchor:
+            difference = np.array(acc)-self.anchor_reference
+            self.anchor_history.append((clock_ms, difference, corrected))
+            while self.anchor_history and clock_ms-self.anchor_history[0][0] > 250:
+                self.anchor_history.popleft()
+            immediate = norm(difference) > .012 or norm(corrected) > 1.
+            window = (len(self.anchor_history) >= 5 and clock_ms-self.anchor_history[0][0] >= 180)
+            changed = window and (norm(np.mean([x[1] for x in self.anchor_history], axis=0)) > .004
+                                  or norm(np.mean([x[2] for x in self.anchor_history], axis=0)) > .25)
+            if immediate or changed:
+                self.stationary_anchor = False
+                self.anchor_history.clear()
         omega = [x*math.pi/180 for x in corrected]
-        angle = norm(omega)*dt
-        delta = ([math.cos(angle/2), *[x*math.sin(angle/2)/norm(omega) for x in omega]]
-                 if angle > 1e-12 else [1., 0., 0., 0.])
-        q = multiply(self.q, delta)
+        q = multiply(self.q, increment([x*dt for x in omega]))
         self.q = [x/norm(q) for x in q]
-        world = rotate(self.q, acc)
-        linear = [world[0]*G, world[1]*G, (world[2]-self.gravity)*G]
+        r = rotation(self.q)
+        world = r @ (np.array(acc)*G-self.acc_bias)
+        linear = world-np.array([0., 0., self.gravity*G])
         self.velocity = [v+(a+b)*dt/2 for v, a, b in zip(self.velocity, self.previous_acc, linear)]
-        self.previous_acc = linear
+        f = np.eye(9)
+        f[:3, 3:6] = -skew(world)*dt
+        f[:3, 6:9] = -r*dt
+        noise = np.array([.04**2]*3 + [math.radians(.12)**2]*3 + [.001**2]*3)*dt
+        self.covariance = f @ self.covariance @ f.T + np.diag(noise)
+        if (self.stationary_anchor and norm(difference) <= .004
+                and clock_ms-self.observation_clock >= 100):
+            self._ground_observation(np.mean([self.anchor_reference+x[1] for x in self.anchor_history], axis=0))
+            self.observation_clock = clock_ms
+            world = rotation(self.q) @ (np.array(acc)*G-self.acc_bias)
+            linear = world-np.array([0., 0., self.gravity*G])
+        self.previous_acc = linear.tolist()
+        self.residual_acc = linear.tolist()
         if not all(math.isfinite(x) for x in self.velocity):
             return self.fail('invalid_sample')
         return self.snapshot()

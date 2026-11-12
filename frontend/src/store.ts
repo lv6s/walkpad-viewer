@@ -5,6 +5,8 @@ export interface VelocityState {
   elapsed_s: number; calibration_progress: number; frame: string
   time_basis: string | null; bias_source: 'online' | 'initial'; bias_ready: boolean
   gyro_bias_dps: number[] | null
+  constraint?: string; constraint_updates?: number; quality?: string
+  velocity_std_mps?: number[] | null; linear_acc_mps2?: number[] | null
 }
 export interface Frame {
   cursor: number

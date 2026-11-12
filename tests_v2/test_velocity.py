@@ -4,6 +4,7 @@ import math
 import struct
 import time
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
@@ -252,6 +253,69 @@ def test_wt_batched_notifications_rejected(tmp_path):
         finally:
             await c.close()
     asyncio.run(run())
+
+
+def test_ground_constraint_repairs_drift_without_display_clamp():
+    tracker = external_initialized()
+    for i in range(261, 3261):
+        state = tracker.push([0., 0., 1., .32, -.19, .1], i*20., 'a', 'device', i,
+                             bias_state={'ready':True, 'gyro_bias_dps':[.3, -.2, .1]})
+    assert state['constraint'] == 'confirmed_ground_rest'
+    assert state['constraint_updates'] > 500
+    assert state['speed_mps'] < .01
+    assert abs(tracker.q[1]) < .002
+    assert min(np.linalg.eigvalsh(tracker.covariance)) > -1e-10
+    assert all(x > 0 for x in state['velocity_std_mps'])
+
+
+def test_sustained_acceleration_and_coasting_do_not_reacquire_ground_constraint():
+    tracker = initialized(gyro=(0., 0., 0.))
+    initial_updates = tracker.constraint_updates
+    for i in range(261, 361):
+        state = tracker.push([.5/G, 0., 1., 0., 0., 0.], i*20., 'a', 'device', i)
+    for i in range(361, 861):
+        state = tracker.push([0., 0., 1., 0., 0., 0.], i*20., 'a', 'device', i)
+    assert state['constraint'] == 'none'
+    assert state['velocity_mps'][0] == pytest.approx(1., abs=.001)
+    assert state['constraint_updates'] == initial_updates
+
+
+def test_small_persistent_acceleration_exits_anchor():
+    tracker = initialized(gyro=(0., 0., 0.))
+    for i in range(261, 361):
+        state = tracker.push([.08/G, 0., 1., 0., 0., 0.], i*20., 'a', 'device', i)
+    assert state['constraint'] == 'none'
+    assert state['velocity_mps'][0] > .12
+
+
+def test_gravity_observation_corrects_tilt_and_serializes():
+    tracker = external_initialized()
+    tracker.q = [math.cos(.01/2), math.sin(.01/2), 0., 0.]
+    before = abs(tracker.q[1])
+    for i in range(261, 761):
+        state = tracker.push([0., 0., 1., .3, -.2, .1], i*20., 'a', 'device', i,
+                             bias_state={'ready':True, 'gyro_bias_dps':[.3, -.2, .1]})
+    assert abs(tracker.q[1]) < before/2
+    assert state['speed_mps'] < .002
+    json.dumps(state, allow_nan=False)
+
+
+def test_noise_static_and_rotation_exits_anchor_without_reentry():
+    rng = np.random.default_rng(48)
+    tracker = external_initialized()
+    for i in range(261, 761):
+        acc = np.array([0., 0., 1.])+rng.normal(0., .0015, 3)
+        state = tracker.push([*acc, .3, -.2, .1], i*20., 'a', 'device', i,
+                             bias_state={'ready':True, 'gyro_bias_dps':[.3, -.2, .1]})
+    assert state['constraint'] == 'confirmed_ground_rest'
+    assert state['speed_mps'] < .01
+    state = tracker.push([0., 0., 1., 5.3, -.2, .1], 15220., 'a', 'device', 761,
+                         bias_state={'ready':True, 'gyro_bias_dps':[.3, -.2, .1]})
+    assert state['constraint'] == 'none'
+    for i in range(762, 862):
+        state = tracker.push([0., 0., 1., .3, -.2, .1], i*20., 'a', 'device', i,
+                             bias_state={'ready':True, 'gyro_bias_dps':[.3, -.2, .1]})
+    assert state['constraint'] == 'none'
 
 
 def test_velocity_api_validation(tmp_path):
