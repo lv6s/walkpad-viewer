@@ -4,6 +4,7 @@ export interface Frame {
   cursor: number
   device_id: string
   foot: string | null
+  bias_key?: string
   profile: 'wt' | 'insole'
   receipt_ms: number
   epoch_ms: number
@@ -17,7 +18,7 @@ export interface Frame {
   bias_used?: number[]
 }
 export interface Device {
-  id: string; name: string; address?: string; profile: 'wt' | 'insole'; foot: string | null; placement: string | null; placement_label: string | null; source: string
+  id: string; name: string; address?: string; profile: 'wt' | 'insole'; foot: string | null; bias_key: string; placement: string | null; placement_label: string | null; source: string
   connected: boolean; reconnecting: boolean; frames: number; bad: number; rate: number
   last: Frame | null; topology: string; format: number | null; format_status: string; command_status: string
 }
@@ -72,7 +73,7 @@ export async function connect() {
       const algorithm = update.state?.algorithm
       for (const frame of update.frames as Frame[]) {
         // 零偏按帧到达时快照，历史帧不随后续零偏变化重算
-        const bias = frame.profile === 'insole' && algorithm?.profile === 'insole' ? algorithm.bias?.[frame.foot || ''] : undefined
+        const bias = frame.profile === 'insole' && algorithm?.profile === 'insole' ? algorithm.bias?.[frame.bias_key ?? frame.foot ?? ''] : undefined
         if (frame.values && bias?.ready && Array.isArray(bias.gyro_bias_dps)) frame.bias_used = (bias.gyro_bias_dps as unknown[]).slice(0, 3).map(Number)
         const array = buffers.get(frame.device_id) || []
         if (!array.length || frame.cursor > array[array.length - 1]!.cursor) array.push(frame)

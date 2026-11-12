@@ -38,6 +38,7 @@ class Command(BaseModel):
     link: str = 'v2'
     topology: str | None = None
     bias_action: str | None = None
+    bias_key: str | None = None
     speed: float = 1.
 
 
@@ -188,13 +189,15 @@ def create_app(root=ROOT,demo=False,phone_port=8766,debug=False,idle_exit=8):
                     raise ValueError('invalid algorithm configuration')
                 return await asyncio.wrap_future(c.algorithm.control('configure',profile=body.profile,enabled=body.enabled))
             if action == 'bias':
-                if body.foot not in ('l','r') or body.bias_action not in ('manual','dynamic','reset_bias','start_calibration','cancel_calibration'):
+                key = body.bias_key or body.foot
+                device = next((d for d in c.devices.values() if d['bias_key'] == key and d['profile'] == 'insole'), None)
+                if device is None or body.bias_action not in ('manual', 'dynamic', 'reset_bias', 'start_calibration', 'cancel_calibration'):
                     raise ValueError('invalid bias action')
                 if c.source == 'phone' and app.state.phone.last_phone is not None:
                     clock = app.state.phone.last_phone
                 else:
                     clock = time.monotonic()*1000
-                return await asyncio.wrap_future(c.algorithm.control('bias',foot=body.foot,action=body.bias_action,clock_ms=clock))
+                return await asyncio.wrap_future(c.algorithm.control('bias', bias_key=key, foot=device['foot'], action=body.bias_action, clock_ms=clock))
             if action == 'topology':
                 if body.topology not in ('v1','v2') or c.recorder.accepting:
                     raise ValueError('拓扑只能在未记录时切换')

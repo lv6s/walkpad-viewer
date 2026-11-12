@@ -72,12 +72,14 @@ class Capture:
         placement = placement or FOOT_PLACEMENT.get(foot)
         if not label:
             label = PLACEMENTS[placement][0] if placement in PLACEMENTS else placement
+        # 零偏按设备记账：脚背位置用 l/r（步态引擎按脚别取用），其余位置用设备键
+        bias_key = foot or 'd:'+key
         if key in self.devices:
             d = self.devices[key]
-            d.update(name=name,profile=profile,foot=foot,address=address,source=source,placement=placement,placement_label=label)
+            d.update(name=name,profile=profile,foot=foot,address=address,source=source,placement=placement,placement_label=label,bias_key=bias_key)
             return d
         d = dict(id=key,name=name,profile=profile,foot=foot,address=address,source=source,
-                 placement=placement,placement_label=label,
+                 placement=placement,placement_label=label,bias_key=bias_key,
                  connected=False,reconnecting=False,connection='',client=None,decoder=Decoder(profile),
                  frames=0,bad=0,last=None,samples=collections.deque(maxlen=4000),recent=collections.deque(maxlen=1000),
                  manual=False,topology='v2',format=None,format_status='未回读，单位未知',command_seq=0,
@@ -197,7 +199,7 @@ class Capture:
             return
         d['connected'] = False
         self.emit(d,'disconnect',{})
-        self.algorithm.offer(dict(control='boundary',foot=d['foot'],clock_ms=time.monotonic()*1000,reason='device_boundary'))
+        self.algorithm.offer(dict(control='boundary',foot=d['foot'],bias_key=d['bias_key'],clock_ms=time.monotonic()*1000,reason='device_boundary'))
         d['decoder'] = Decoder(d['profile'])
         self.log('设备断开：'+d['name'],'warning')
         if d['manual'] or not self.running or d['source'] != 'direct':
@@ -261,7 +263,7 @@ class Capture:
         except asyncio.QueueFull:
             self.error = '蓝牙接收队列已满，当前记录完整性不可保证'
             self.log(self.error,'error')
-            self.algorithm.offer(dict(control='boundary',foot=self.devices[key]['foot'],clock_ms=receipt,reason='ingress_overflow'))
+            self.algorithm.offer(dict(control='boundary',foot=self.devices[key]['foot'],bias_key=self.devices[key]['bias_key'],clock_ms=receipt,reason='ingress_overflow'))
             self.recorder.error = self.error
             self.recorder.accepting = False
 
@@ -291,7 +293,7 @@ class Capture:
         algo_frames = []
         for index, frame in enumerate(frames):
             d['frames'] += 1; d['recent'].append(receipt)
-            frame = dict(frame,device_id=key,foot=d['foot'],profile=d['profile'],connection=d['connection'],
+            frame = dict(frame,device_id=key,foot=d['foot'],bias_key=d['bias_key'],profile=d['profile'],connection=d['connection'],
                          placement=d['placement'],placement_label=d['placement_label'],
                          source=d['source'],receipt_ms=receipt,epoch_ms=epoch)
             self.cursor += 1
@@ -317,7 +319,7 @@ class Capture:
             if d['profile'] == 'insole' or frame.get('inference_eligible'):
                 algo_frames.append(frame)
         if algo_frames:
-            self.algorithm.offer(dict(profile=d['profile'],foot=d['foot'],connection=d['connection'],frames=algo_frames,
+            self.algorithm.offer(dict(profile=d['profile'],foot=d['foot'],bias_key=d['bias_key'],connection=d['connection'],frames=algo_frames,
                 clock_ms=e['source_receipt_ms'],source_receipt_ms=e['source_receipt_ms'],source_time_domain=e['source_time_domain']))
 
     def _control_reply(self,d,data):
@@ -537,7 +539,7 @@ class Capture:
         recent = d['recent']
         while recent and recent[0] < now-1000:
             recent.popleft()
-        return {k:d[k] for k in ('id','name','profile','foot','address','placement','placement_label','source','connected','reconnecting','connection','frames','bad','last','topology','format','format_status','command_status')} | {'rate':len(recent)}
+        return {k:d[k] for k in ('id','name','profile','foot','bias_key','address','placement','placement_label','source','connected','reconnecting','connection','frames','bad','last','topology','format','format_status','command_status')} | {'rate':len(recent)}
 
     def snapshot(self):
         return dict(version='2.0.0',source=self.source,devices=[self.public(d) for d in self.devices.values()],

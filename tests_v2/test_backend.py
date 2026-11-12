@@ -221,6 +221,43 @@ def test_algorithm_and_bias_controls(tmp_path):
     asyncio.run(run())
 
 
+def test_bias_control_takes_device_key(tmp_path):
+    with TestClient(create_app(tmp_path,demo=True)) as client:
+        h = {'X-Walkpad-Token':client.get('/api/config').json()['control_token']}
+        client.post('/api/control',json={'action':'demo','profile':'insole'},headers=h)
+        time.sleep(1.5)
+        keys = [(d['placement_label'],d['bias_key']) for d in client.get('/api/status').json()['devices']]
+        assert keys == [('左脚背','l'),('右脚背','r')],keys
+        response = client.post('/api/control',json={'action':'bias','bias_key':'l','bias_action':'manual'},headers=h)
+        assert response.status_code == 200,response.text
+        assert response.json()['bias']['l']['mode'] == 'manual'
+        assert client.post('/api/control',json={'action':'bias','bias_key':'nope','bias_action':'manual'},headers=h).status_code == 400
+
+
+def test_insole_bias_runs_at_non_foot_placement(tmp_path):
+    async def run():
+        c = Capture(tmp_path,demo=True)
+        await c.start()
+        await asyncio.wrap_future(c.algorithm.control('configure',profile='insole',enabled=False))
+        d = c._device('wrist','腕','insole',None,'addr',placement='leftWrist',label='左手腕')
+        d['connected'] = True; d['connection'] = 'conn1'; d['decoder'] = Decoder('insole')
+        assert c.public(d)['bias_key'] == 'd:wrist'
+        base = time.monotonic()*1000; wall = time.time()*1000
+        for seq in range(1,120):
+            c.submit('wrist',demo_packet('insole',seq,None,wall+seq*20),base+seq*20,wall+seq*20)
+        await c.ingress.join()
+        for _ in range(50):
+            if c.algorithm.snapshot()['bias'].get('d:wrist'):
+                break
+            await asyncio.sleep(.1)
+        state = c.algorithm.snapshot()['bias'].get('d:wrist')
+        assert state and state['foot'] is None,state
+        result = await asyncio.wrap_future(c.algorithm.control('bias',bias_key='d:wrist',foot=None,action='manual',clock_ms=base+120*20))
+        assert result['bias']['d:wrist']['mode'] == 'manual'
+        await c.close()
+    asyncio.run(run())
+
+
 def test_phone_native_http_and_pause(tmp_path):
     import socket
     import httpx

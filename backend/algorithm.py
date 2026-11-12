@@ -53,6 +53,7 @@ class Algorithm:
         bias = None
         engines = {}
         active = {}
+        stamp = {}
         profile = 'insole'
         enabled = False
         pending = []
@@ -104,6 +105,7 @@ class Algorithm:
                         reset('algorithm_queue_overflow')
                         prepare(reset=True)
                         active.clear()
+                        stamp.clear()
                         self.overflow = False
                     control = item.get('control')
                     if control:
@@ -111,7 +113,7 @@ class Algorithm:
                             profile = item.get('profile',profile)
                             enabled = item.get('enabled',enabled)
                             last_clock = None
-                            prepare(reset=True); active.clear(); reset('warming_up' if enabled else 'not_started')
+                            prepare(reset=True); active.clear(); stamp.clear(); reset('warming_up' if enabled else 'not_started')
                             if enabled:
                                 info = engine().info()
                                 with self.lock:
@@ -119,49 +121,64 @@ class Algorithm:
                             with self.lock:
                                 self.state.update(profile=profile,enabled=enabled,bias={},error=None)
                         elif control == 'boundary':
-                            if item.get('foot') in ('l','r'):
-                                foot = item['foot']
-                                prepare([{'foot':foot,'processing_ms':item['clock_ms'],'action':'reset_bias'}])
-                                active.pop(foot,None)
+                            key = item.get('bias_key') or item.get('foot')
+                            if key:
+                                # 控制时钟取该设备已处理到的时刻：用本机时间会超过随后到达的帧时钟
+                                clock = stamp.get(key, item['clock_ms'])
+                                prepare([{'key':key,'foot':item.get('foot'),'processing_ms':clock,'action':'reset_bias'}])
+                                active.pop(key,None)
                                 with self.lock:
-                                    self.state['bias'].pop(foot,None)
+                                    self.state['bias'].pop(key,None)
                             reset(item.get('reason','device_boundary'))
                         elif control == 'bias':
-                            record = {'foot':item['foot'],'processing_ms':item['clock_ms'],'action':item['action']}
+                            key = item.get('bias_key') or item.get('foot')
+                            clock = stamp.get(key, item['clock_ms'])
+                            record = {'key':key,'foot':item.get('foot'),'processing_ms':clock,'action':item['action']}
                             output = prepare([record])
                             with self.lock:
-                                self.state['bias'][item['foot']] = output['states'][-1]
+                                self.state['bias'][key] = output['states'][-1]
                             reset('bias_boundary')
                         if future:
                             future.set_result(self.snapshot())
                         continue
-                    if item['profile'] != profile or item.get('foot') not in ('l','r'):
+                    if item['profile'] != profile:
                         continue
-                    foot = item['foot']; clock = item['clock_ms']; frames = item['frames']
-                    if last_clock is not None and clock < last_clock:
-                        reset('clock_domain_boundary'); prepare(reset=True); active.clear()
-                    last_clock = clock
-                    if active.get(foot) != item['connection']:
-                        prepare([{'foot':foot,'processing_ms':clock,'action':'reset_bias'}])
-                        active[foot] = item['connection']
-                        reset('device_boundary')
+                    foot = item.get('foot'); is_foot = foot in ('l','r')
+                    key = item.get('bias_key') or foot
+                    if not key or (profile != 'insole' and not is_foot):
+                        continue
+                    clock = item['clock_ms']; frames = item['frames']
+                    if is_foot:
+                        if last_clock is not None and clock < last_clock:
+                            reset('clock_domain_boundary'); prepare(reset=True); active.clear(); stamp.clear()
+                        last_clock = clock
+                    stamp[key] = clock
+                    if active.get(key) != item['connection']:
+                        prepare([{'key':key,'foot':foot,'processing_ms':clock,'action':'reset_bias'}])
+                        active[key] = item['connection']
+                        if is_foot:
+                            reset('device_boundary')
                     if profile == 'insole':
-                        records = [dict(foot=foot,connection=item['connection'],processing_ms=clock,
+                        records = [dict(key=key,foot=foot,connection=item['connection'],processing_ms=clock,
                                         receipt_ms=item['source_receipt_ms'],device_ms=f['device_ms'],seq=f['seq'],raw6=f['raw6'])
                                    for f in frames if f.get('device_ms') is not None and not f.get('clock_coarse')]
                         if len(records) != len(frames):
-                            reset('device_clock_unusable')
+                            if is_foot:
+                                reset('device_clock_unusable')
                             continue
                         output = prepare(records)
                         for state in output['states']:
                             with self.lock:
-                                self.state['bias'][foot] = state
-                            if state.get('discontinuity'):
+                                self.state['bias'][key] = state
+                            if state.get('discontinuity') and is_foot:
                                 reset('bias_boundary')
-                        events = output['events']
+                        # 非脚背位置的鞋垫照常补偿零偏，只是不进步态引擎
+                        events = [e for e in output['events'] if e.get('foot') in ('l','r')]
                     else:
                         values = [f['values'] for f in frames if f.get('inference_eligible')]
                         events = [dict(foot=foot,receipt_ms=item['source_receipt_ms'],segment=item['connection'],values=values)] if values else []
+                    if not is_foot:
+                        continue
                     if not enabled:
                         continue
                     if pending and clock-pending[0]['available'] > 1000:

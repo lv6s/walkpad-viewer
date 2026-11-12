@@ -6,14 +6,24 @@ const gate = process.env.WALKPAD_BIAS_GATE || 'confirmed';
 if (!['legacy', 'bounded', 'confirmed'].includes(gate)) throw new Error('unknown WALKPAD_BIAS_GATE');
 let feet;
 function reset() {
-  feet = Object.fromEntries(['l', 'r'].map(f => [f, { tracker: createBiasTracker({ adaptive: gate !== 'legacy', recovery: gate === 'confirmed' }), connection: null, retired: new Set(), generation: 0, previous: null, clock: null }]));
+  feet = new Map();
+}
+// 零偏按设备键记账：脚背设备键为 l/r，其余位置为 d:<设备id>，位置不影响零偏本身
+function track(key) {
+  let f = feet.get(key);
+  if (!f) {
+    f = { tracker: createBiasTracker({ adaptive: gate !== 'legacy', recovery: gate === 'confirmed' }), connection: null, retired: new Set(), generation: 0, previous: null, clock: null };
+    feet.set(key, f);
+  }
+  return f;
 }
 reset();
 function prepare(records) {
   const events = [], states = [], trace = [];
   for (const r of records) {
-    const f = feet[r.foot];
-    if (!f || !Number.isFinite(r.processing_ms)) throw new Error('invalid record');
+    const key = r.key ?? r.foot;
+    if (!key || !Number.isFinite(r.processing_ms)) throw new Error('invalid record');
+    const f = track(key);
     if (r.action) {
       f.tracker.advance(r.processing_ms);
       if (r.action === 'reset_bias') { f.tracker.reset(); f.previous = null; f.generation++; }
@@ -22,7 +32,7 @@ function prepare(records) {
       else if (r.action === 'start_calibration') f.tracker.startCalibration();
       else if (r.action === 'cancel_calibration') f.tracker.cancelCalibration();
       else throw new Error('unknown action');
-      states.push({ foot: r.foot, processing_ms: r.processing_ms, action: r.action, ...f.tracker.snapshot(), discontinuity: r.action === 'reset_bias' });
+      states.push({ key, foot: r.foot ?? null, processing_ms: r.processing_ms, action: r.action, ...f.tracker.snapshot(), discontinuity: r.action === 'reset_bias' });
       continue;
     }
     if (f.retired.has(r.connection)) continue;
@@ -39,10 +49,10 @@ function prepare(records) {
       if (f.previous && Math.hypot(...b.gyro_bias_dps.map((x,i)=>x-f.previous[i]))>3) { f.generation++; discontinuity=true; }
       if (f.clock && (r.device_ms-f.clock.device_ms)-(r.receipt_ms-f.clock.receipt_ms)>2000) { f.generation++; discontinuity=true; }
       f.previous=[...b.gyro_bias_dps]; f.clock={device_ms:r.device_ms,receipt_ms:r.receipt_ms};
-      events.push({foot:r.foot,device_ms:r.device_ms,receipt_ms:r.receipt_ms,available_ms:r.processing_ms,seq:r.seq,segment:r.connection+':'+f.generation,values:v.map((x,i)=>i<3?x:x-b.gyro_bias_dps[i-3]),raw:[...raw]});
+      events.push({key,foot:r.foot ?? null,device_ms:r.device_ms,receipt_ms:r.receipt_ms,available_ms:r.processing_ms,seq:r.seq,segment:r.connection+':'+f.generation,values:v.map((x,i)=>i<3?x:x-b.gyro_bias_dps[i-3]),raw:[...raw]});
     } else if (f.previous) { f.previous=null;f.generation++;discontinuity=true; }
-    states.push({foot:r.foot,processing_ms:r.processing_ms,...b,discontinuity});
-    trace.push({foot:r.foot,processing_ms:r.processing_ms,own_before_bias:v,...b,emitted:b.ready,discontinuity});
+    states.push({key,foot:r.foot ?? null,processing_ms:r.processing_ms,...b,discontinuity});
+    trace.push({key,foot:r.foot ?? null,processing_ms:r.processing_ms,own_before_bias:v,...b,emitted:b.ready,discontinuity});
   }
   return {events,states,trace};
 }
