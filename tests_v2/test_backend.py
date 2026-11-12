@@ -414,15 +414,20 @@ def test_placement_assigns_foot_and_allocates_custom(tmp_path):
     asyncio.run(run())
 
 
-def test_placement_is_unique_and_insole_needs_instep(tmp_path):
+def test_placement_is_unique_and_profile_free(tmp_path, monkeypatch):
+    # 协议与位置解耦：位置只决定 foot，不限制协议；鞋垫标在非脚背位置按仅采集处理
     async def run():
+        import backend.capture as capture_module
+        async def missing(*args, **kwargs):
+            return None
+        monkeypatch.setattr(capture_module.BleakScanner, 'find_device_by_address', missing)
         c = Capture(tmp_path)
         d = c._device('a','a','wt',None,'addr',placement='leftWrist',label='左手腕')
         d['connected'] = True
         with pytest.raises(ValueError,match='该位置已有设备连接'):
             await c.connect('addr2','wt','leftWrist')
-        with pytest.raises(ValueError,match='只能标为左脚背或右脚背'):
-            await c.connect('addr3','insole','leftWrist')
+        with pytest.raises(ValueError,match='未扫描到设备'):
+            await c.connect('addr3','insole','rightWrist')
         await c.close()
     asyncio.run(run())
 

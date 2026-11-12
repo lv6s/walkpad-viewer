@@ -138,8 +138,6 @@ class Capture:
         if profile not in ('wt','insole'):
             raise ValueError('invalid profile')
         placement, text, foot = self.resolve_placement(placement, label)
-        if profile == 'insole' and foot is None:
-            raise ValueError('自研鞋垫只能标为左脚背或右脚背')
         for other in self.devices.values():
             if other['connected'] and other['source'] == 'direct' and other['address'] == address:
                 if other['profile'] != profile or other['placement'] != placement:
