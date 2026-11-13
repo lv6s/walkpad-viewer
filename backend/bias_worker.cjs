@@ -12,7 +12,8 @@ function reset() {
 function track(key) {
   let f = feet.get(key);
   if (!f) {
-    f = { tracker: createBiasTracker({ adaptive: gate !== 'legacy', recovery: gate === 'confirmed' }), connection: null, retired: new Set(), generation: 0, previous: null, clock: null };
+    // legacy 关闭大偏移复核，其余模式都按“6 秒静止确认”恢复。
+    f = { tracker: createBiasTracker({ recovery: gate !== 'legacy' }), connection: null, retired: new Set(), generation: 0, previous: null, clock: null };
     feet.set(key, f);
   }
   return f;

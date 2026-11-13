@@ -1,42 +1,37 @@
 'use strict';
-function createBiasRecovery() {
-  const limits = Object.freeze({ innovation: 0.8, trigger: 0.12, agree: 0.08, gravity: 0.015,
-    settled: 0.04, fastTau: 2.5, slowTau: 10 });
-  let pending = null, fastReference = null, recheck = false, phase = 'initializing', confirmed = 0;
-  const distance = (a, b) => Math.hypot(...a.map((x, k) => x - b[k]));
-  function invalidate() {
-    pending = null; fastReference = null; recheck = true; phase = 'holding';
-  }
-  function reset() {
-    pending = null; fastReference = null; recheck = false; phase = 'initializing'; confirmed = 0;
-  }
-  function assess({ bias, gyro, accel, start, end }) {
-    const innovation = distance(gyro, bias);
-    if (innovation > limits.innovation) {
+/* 大偏移恢复：只有“静止持续时间够长、且窗内没有缓变”才允许快速跟踪。
+   恒速转动在这些判据下仍与零偏不可区分，这是六轴的物理局限，不是门限漏洞。 */
+function createBiasRecovery(overrides = {}) {
+  const limits = Object.freeze({ innovation: 0.8, confirm: 6000, drift: 0.35, gravity: 0.02,
+    max: 8, settled: 0.1, fastTau: 2.5, slowTau: 10, ...overrides });
+  let phase = 'initializing', fast = false, confirmed = 0;
+  function invalidate() { fast = false; phase = 'holding'; }
+  function reset() { fast = false; phase = 'initializing'; confirmed = 0; }
+  /* drift / gravity 是候选静止跨度内首尾均值差，由调用方按同一批帧算出。 */
+  function assess({ bias, gyro, drift, gravity, runMs }) {
+    const innovation = Math.hypot(...gyro.map((x, k) => x - bias[k]));
+    if (innovation > limits.max) {
       invalidate(); phase = 'change_too_large';
-      return { hold: true, reason: '候选偏移过大，保留补偿；需静止校准或外部确认' };
+      return { hold: true, reason: '候选偏移超出恢复上限，保留补偿' };
     }
-    if (fastReference && (distance(gyro, fastReference.gyro) > limits.agree
-      || distance(accel, fastReference.accel) > limits.gravity)) invalidate();
-    if (pending || recheck || (!fastReference && innovation > limits.trigger)) {
-      if (!pending || start <= pending.end || distance(gyro, pending.gyro) > limits.agree
-        || distance(accel, pending.accel) > limits.gravity) {
-        pending = { gyro: [...gyro], accel: [...accel], end, duration: end - start };
+    if (innovation > limits.innovation) {
+      fast = false;
+      if (!(runMs >= limits.confirm)) {
         phase = 'confirming';
-        return { hold: true, reason: '候选静止窗已取得，等待独立窗确认' };
+        return { hold: true, reason: '候选偏移 ' + innovation.toFixed(2) + ' °/s，等待 6 秒静止复核' };
       }
-      // 两个不重叠窗只用于确认；更新增益只计本次窗时长。
-      const dt = end - start, total = dt + pending.duration;
-      gyro = gyro.map((x, k) => (x * dt + pending.gyro[k] * pending.duration) / total);
-      pending = null; recheck = false; confirmed++;
-      fastReference = innovation > limits.trigger ? { gyro: [...gyro], accel: [...accel] } : null;
+      if (!(drift <= limits.drift) || !(gravity <= limits.gravity)) {
+        phase = 'confirming';
+        return { hold: true, reason: '候选静止跨度内仍在变化，保留补偿' };
+      }
+      fast = true; confirmed++; phase = 'fast_tracking';
+      return { hold: false, tau: limits.fastTau };
     }
-    if (fastReference && distance(gyro, bias) <= limits.settled) fastReference = null;
-    phase = fastReference ? 'fast_tracking' : 'slow_tracking';
-    return { hold: false, gyro, tau: fastReference ? limits.fastTau : limits.slowTau };
+    if (fast && innovation <= limits.settled) fast = false;
+    phase = fast ? 'fast_tracking' : 'slow_tracking';
+    return { hold: false, tau: fast ? limits.fastTau : limits.slowTau };
   }
-  return { assess, invalidate, reset, initialized() { pending = null; fastReference = null; recheck = false; phase = 'slow_tracking'; },
-    snapshot: () => ({ phase, confirmed_changes: confirmed,
-    pending: pending !== null, limits: { ...limits } }) };
+  return { assess, invalidate, reset, initialized() { fast = false; phase = 'slow_tracking'; },
+    snapshot: () => ({ phase, confirmed_changes: confirmed, fast, limits: { ...limits } }) };
 }
 module.exports = { createBiasRecovery };

@@ -1,9 +1,8 @@
 'use strict';
 function createBiasTracker(options = {}) {
   const recovery = options.recovery === true ? require('../bias_recovery.cjs').createBiasRecovery() : null;
-  const adaptive = options.adaptive === true || recovery !== null;
-  const assessNoise = adaptive ? require('../noise_gate.cjs').assessNoise : null;
-  let lastReject = null, diagnostics = null, acceptedWindows = 0, rejectedWindows = 0, bootstrap = null;
+  const assessNoise = require('../noise_gate.cjs').assessNoise;
+  let lastReject = null, diagnostics = null, acceptedWindows = 0, rejectedWindows = 0;
   let now = 0, nextId = 0;
   const timers = new Map();
   const performance = { now: () => now };
@@ -15,12 +14,15 @@ const IR_BIAS_MS = 3000, IR_BIAS_TIMEOUT = 12000, IR_BIAS_MIN = 30, IR_BIAS_GAP 
 const IR_BIAS_GSTD = 1.5, IR_BIAS_GRANGE = 6, IR_BIAS_DRIFT = 0.5;
 const IR_BIAS_ASTD = 0.02, IR_BIAS_ARANGE = 0.06, IR_BIAS_AERR = 0.12, IR_BIAS_MAX = 40;
 
-const IR_DYN_INIT_MS = 5000, IR_DYN_MS = 3000, IR_DYN_INIT_MIN = 50, IR_DYN_MIN = 30;
-const IR_DYN_ROWS = 16384, IR_DYN_RAW_MAX = 40;
-const IR_DYN_GSTD = 0.12, IR_DYN_GRANGE = 0.56, IR_DYN_DRIFT = 0.14;
-const IR_DYN_ASTD = 0.01, IR_DYN_ARANGE = 0.04, IR_DYN_AERR = 0.08, IR_DYN_ADIR = 0.02;
-const IR_DYN_TAU = 10, IR_DYN_RATE = 0.5;
-const IR_DYN_NOTE = '稳定匀速转动也可能误判为静止并被补偿';
+/* 自动模式把“这一小段有没有在动”和“这一段跨度够不够稳”分开判：
+   穿戴时单帧微动很常见，整窗一票否决会让初始化迟迟不成功。 */
+const IR_DYN_INIT_MS = 5000, IR_DYN_INIT_SPAN = 10000, IR_DYN_INIT_RATIO = 0.5;
+const IR_DYN_KEEP_MS = 10000, IR_DYN_SHORT_MS = 500, IR_DYN_MIN_FRAMES = 8;
+const IR_DYN_TRACK_RUN = 1500;
+const IR_DYN_ROWS = 4096, IR_DYN_RAW_MAX = 40;
+const IR_DYN_GSTD = 0.35, IR_DYN_GRANGE = 2.0, IR_DYN_ASTD = 0.01, IR_DYN_ARANGE = 0.04;
+const IR_DYN_AERR = 0.08, IR_DYN_INIT_DRIFT = 0.5, IR_DYN_SEG = 0.4, IR_DYN_GRAV = 0.02;
+const IR_DYN_NRATE = 0.5, IR_DYN_SLOW_TAU = 10;
 
 function irBiasNew() {
   return { g: [0, 0, 0], ready: false, still: 0, collect: null,
@@ -41,11 +43,12 @@ function irBiasSetMode(st, mode) {
 }
 
 function irBiasDynamicClear(st, reason) {
-  lastReject = reason; rejectedWindows++; bootstrap = null;
+  lastReject = reason; rejectedWindows++;
   if (recovery) recovery.invalidate();
-  if (st.bias.dynamic) st.bias.dynamic.rows = [];
-  st.bias.still = 0;
-  st.bias.status = '等待下一段静止：' + reason + (st.bias.ready ? ' · 保留补偿' : ' · 未就绪');
+  const b = st.bias;
+  if (b.dynamic) { b.dynamic.rows = []; b.dynamic.runStart = null; b.dynamic.learning = false; }
+  b.still = 0;
+  b.status = '等待下一段静止：' + reason + (b.ready ? ' · 保留补偿' : ' · 未就绪');
   irBiasText(st);
 }
 
@@ -67,6 +70,74 @@ function irBiasDynamicStats(rows, start, end) {
   return { mu, std: square.map((v, k) => Math.sqrt(Math.max(0, v - mu[k] ** 2))) };
 }
 
+/* 只累计“本帧通过短窗检查”的时间段，被拒绝的帧不进入均值，避免把运动平均进零偏。 */
+function irBiasWeighted(rows, start, end) {
+  const sum = Array(6).fill(0);
+  let weight = 0;
+  for (let i = 1; i < rows.length; i++) {
+    const p = rows[i - 1], q = rows[i];
+    if (!q[8]) continue;
+    const lo = Math.max(start, p[6]), hi = Math.min(end, q[6]);
+    const width = q[6] - p[6];
+    if (!(width > 0) || hi <= lo) continue;
+    for (let k = 0; k < 6; k++) {
+      const a = p[k] + (q[k] - p[k]) * (lo - p[6]) / width;
+      const z = p[k] + (q[k] - p[k]) * (hi - p[6]) / width;
+      sum[k] += (a + z) * 0.5 * (hi - lo);
+    }
+    weight += hi - lo;
+  }
+  return { mu: weight > 0 ? sum.map(v => v / weight) : null, weight };
+}
+
+function irBiasDrift(rows, start, end) {
+  const third = (end - start) / 3;
+  const first = irBiasWeighted(rows, start, start + third), last = irBiasWeighted(rows, end - third, end);
+  if (!first.mu || !last.mu) return { gyro: Infinity, gravity: Infinity };
+  return {
+    gyro: Math.hypot(...first.mu.slice(0, 3).map((v, k) => v - last.mu[k])),
+    gravity: Math.hypot(...first.mu.slice(3).map((v, k) => v - last.mu[k + 3]))
+  };
+}
+
+function irBiasSegments(rows, start, end) {
+  // 逐轴取分段均值的极差，跨轴取最大：轴间本来就不同量级。
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (let j = 0; j < 5; j++) {
+    const part = irBiasWeighted(rows, start + (end - start) * j / 5, start + (end - start) * (j + 1) / 5);
+    if (!part.mu) continue;
+    for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], part.mu[k]); hi[k] = Math.max(hi[k], part.mu[k]); }
+  }
+  return Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+}
+
+/* 短窗检查：只看“这段时间动没动”，长期稳定性交给跨度检查。 */
+function irBiasShortCheck(rows, start, end) {
+  const stats = irBiasDynamicStats(rows, start, end);
+  diagnostics = assessNoise(rows, start, end);
+  if (diagnostics.reject) return { ok: false, reason: diagnostics.reject, stats };
+  const lo = Array(6).fill(Infinity), hi = Array(6).fill(-Infinity);
+  let normErr = 0, frames = 0;
+  for (const r of rows) {
+    if (r[6] < start) continue;
+    frames++;
+    for (let k = 0; k < 6; k++) { lo[k] = Math.min(lo[k], r[k]); hi[k] = Math.max(hi[k], r[k]); }
+    normErr = Math.max(normErr, Math.abs(Math.hypot(r[3], r[4], r[5]) - 1));
+  }
+  const eps = 1e-12;
+  if (frames < IR_DYN_MIN_FRAMES) return { ok: false, reason: null, stats };
+  if (normErr > IR_DYN_AERR + eps) return { ok: false, reason: '加速度模长超出静止范围', stats };
+  for (let k = 0; k < 3; k++) {
+    if (stats.std[k] > IR_DYN_GSTD + eps || hi[k] - lo[k] > IR_DYN_GRANGE + eps)
+      return { ok: false, reason: '检测到转动，重新等待', stats };
+  }
+  for (let k = 3; k < 6; k++) {
+    if (stats.std[k] > IR_DYN_ASTD + eps || hi[k] - lo[k] > IR_DYN_ARANGE + eps)
+      return { ok: false, reason: '加速度变化超限，重新等待', stats };
+  }
+  return { ok: true, reason: null, stats };
+}
+
 function irBiasDynamic(st, s) {
   const b = st.bias;
   if (!s) return;
@@ -75,7 +146,8 @@ function irBiasDynamic(st, s) {
     irBiasDynamicClear(st, '时间或帧序号无效'); return;
   }
   let c = b.dynamic;
-  if (!c) c = b.dynamic = { rows: [], lastSeq: null, lastHost: null, lastEpoch: null, coarse: false };
+  if (!c) c = b.dynamic = { rows: [], lastSeq: null, lastHost: null, lastEpoch: null,
+    coarse: false, runStart: null, learning: false };
   if (s.seq === c.lastSeq) return;
   const epoch = s.clk && Number.isFinite(s.clk.epoch) ? s.clk.epoch : null;
   const hostDelta = c.lastHost === null ? null : now - c.lastHost;
@@ -91,8 +163,7 @@ function irBiasDynamic(st, s) {
   if (!q.every(Number.isFinite) || (s.raw6 && s.raw6.some((v) => !Number.isFinite(v) || Math.abs(v) >= 32767))) {
     irBiasDynamicClear(st, '数据无效或传感器满量程'); return;
   }
-  /* 每轴 40 °/s 只是数值保护（与手动校准同上限）；是否运动由窗内变化判，
-     不用“离偏置 0 多远”推断。 */
+  /* 每轴 40 °/s 只是数值保护；是否运动由窗内变化判，不用“离偏置 0 多远”推断。 */
   if (Math.abs(s.gx0) > IR_DYN_RAW_MAX + eps || Math.abs(s.gy0) > IR_DYN_RAW_MAX + eps
     || Math.abs(s.gz0) > IR_DYN_RAW_MAX + eps) {
     irBiasDynamicClear(st, '角速度超出数值保护范围'); return;
@@ -102,80 +173,92 @@ function irBiasDynamic(st, s) {
     irBiasDynamicClear(st, '加速度模长超出静止范围'); return;
   }
   if (hostDelta === 0) return;
-  q.push(now, epoch); c.rows.push(q); b.still = c.rows.length;
+  q.push(now, epoch, false);
+  c.rows.push(q);
   if (c.rows.length > IR_DYN_ROWS) { irBiasDynamicClear(st, '候选窗口超长'); return; }
-  const rows = c.rows, span = now - rows[0][6], ms = b.ready ? IR_DYN_MS : IR_DYN_INIT_MS;
-  const devSpan = !c.coarse && epoch !== null && rows[0][7] !== null ? epoch - rows[0][7] : null;
-  const acceptedSpan = devSpan === null ? span : Math.min(span, devSpan);
-  b.status = (b.ready ? '采样中 ' : '未就绪 · 等待静止 ')
-    + Math.min(acceptedSpan / 1000, ms / 1000).toFixed(1) + '/' + (ms / 1000).toFixed(1) + ' 秒';
-  if (acceptedSpan < ms || rows.length < (b.ready ? IR_DYN_MIN : IR_DYN_INIT_MIN)) { irBiasText(st); return; }
-  const stats = irBiasDynamicStats(rows, rows[0][6], now), mu = stats.mu;
-  if (adaptive) {
-    diagnostics = assessNoise(rows, stats, irBiasDynamicStats);
-    if (diagnostics.reject) {
-      lastReject = diagnostics.reject; rejectedWindows++; bootstrap = null;
-      if (recovery) recovery.invalidate();
-      c.rows = rows.filter(q => q[6] >= rows[0][6] + 500);
-      b.still = c.rows.length;
-      b.status = '等待下一段静止：' + diagnostics.reject + (b.ready ? ' · 保留补偿' : ' · 未就绪');
-      return;
-    }
+  const keep = now - IR_DYN_KEEP_MS;
+  while (c.rows.length > 1 && c.rows[0][6] < keep) c.rows.shift();
+  const rows = c.rows;
+  b.still = rows.length;
+
+  const start = Math.max(rows[0][6], now - IR_DYN_SHORT_MS);
+  if (now - start < IR_DYN_SHORT_MS - 1e-9) {
+    b.status = (b.ready ? '在线跟踪 · 采样中 ' : '未就绪 · 等待静止 ')
+      + Math.min((now - rows[0][6]) / 1000, IR_DYN_SHORT_MS / 1000).toFixed(1)
+      + '/' + (IR_DYN_SHORT_MS / 1000).toFixed(1) + ' 秒';
+    irBiasText(st); return;
   }
-  for (let k = adaptive ? 3 : 0; k < 6; k++) {
-    let lo = Infinity, hi = -Infinity;
-    for (const row of rows) { lo = Math.min(lo, row[k]); hi = Math.max(hi, row[k]); }
-    if (stats.std[k] > (k < 3 ? IR_DYN_GSTD : IR_DYN_ASTD) + eps
-      || hi - lo > (k < 3 ? IR_DYN_GRANGE : IR_DYN_ARANGE) + eps) {
-      irBiasDynamicClear(st, '窗口变化超限'); return;
-    }
+  const short = irBiasShortCheck(rows, start, now);
+  rows[rows.length - 1][8] = short.ok;
+  if (!short.ok) {
+    c.runStart = null; c.learning = false;
+    if (recovery) recovery.invalidate();
+    b.status = '等待下一段静止：' + short.reason + (b.ready ? ' · 保留补偿' : ' · 未就绪');
+    irBiasText(st); return;
   }
-  const first = irBiasDynamicStats(rows, rows[0][6], rows[0][6] + span / 3).mu;
-  const last = irBiasDynamicStats(rows, rows[0][6] + span * 2 / 3, now).mu;
-  const drift = last.map((v, k) => v - first[k]);
-  if (Math.hypot(...drift.slice(0, 3)) > IR_DYN_DRIFT + eps || Math.hypot(...drift.slice(3)) > IR_DYN_ADIR + eps) {
-    irBiasDynamicClear(st, '首尾角速度或重力方向变化'); return;
-  }
-  if (Math.abs(Math.hypot(...mu.slice(3)) - 1) > IR_DYN_AERR + eps) {
-    irBiasDynamicClear(st, '窗口重力模长超限'); return;
-  }
-  const obs = mu.slice(0, 3);
-  const needsConfirmation = adaptive && !b.ready && (bootstrap !== null || [0, 1, 2].some(k =>
-    stats.std[k] > IR_DYN_GSTD || Math.max(...rows.map(q => q[k])) - Math.min(...rows.map(q => q[k])) > IR_DYN_GRANGE));
-  if (needsConfirmation) {
-    if (!bootstrap || Math.hypot(...obs.map((v, k) => v - bootstrap[k])) > 0.08) {
-      bootstrap = obs;
-      c.rows = []; b.still = 0;
-      b.status = '候选零偏已取得 · 等待独立静置窗复核';
-      return;
-    }
-    for (let k = 0; k < 3; k++) obs[k] = (obs[k] + bootstrap[k]) / 2;
-    bootstrap = null;
-  }
-  let tau = IR_DYN_TAU, target = obs;
-  if (recovery && b.ready) {
-    const decision = recovery.assess({ bias: b.g, gyro: obs, accel: mu.slice(3), start: rows[0][6], end: now });
-    if (decision.hold) {
-      c.rows = []; b.still = 0; lastReject = decision.reason;
-      b.status = decision.reason + ' · 保留补偿';
-      return;
-    }
-    target = decision.gyro; tau = decision.tau;
-  }
-  acceptedWindows++; lastReject = null;
+  if (c.runStart === null) c.runStart = now;
+  const runMs = now - c.runStart;
+
   if (!b.ready) {
-    b.g = obs; b.ready = true;
+    let acc = 0, firstOk = -1;
+    for (let i = 1; i < rows.length; i++) {
+      if (!rows[i][8]) continue;
+      if (firstOk < 0) firstOk = i;
+      acc += rows[i][6] - rows[i - 1][6];
+    }
+    b.status = '未就绪 · 合格 ' + (Math.min(acc, IR_DYN_INIT_MS) / 1000).toFixed(1)
+      + '/' + (IR_DYN_INIT_MS / 1000).toFixed(1) + ' 秒';
+    // 跨度与均值都只算合格段：被拒绝的帧不能既充时长又拉均值。
+    const qStart = firstOk < 0 ? now : rows[firstOk][6];
+    const span = now - qStart;
+    if (acc < IR_DYN_INIT_MS || span > IR_DYN_INIT_SPAN || acc < span * IR_DYN_INIT_RATIO) {
+      irBiasText(st); return;
+    }
+    const whole = irBiasWeighted(rows, qStart, now);
+    const drift = irBiasDrift(rows, qStart, now), seg = irBiasSegments(rows, qStart, now);
+    if (!whole.mu || drift.gyro > IR_DYN_INIT_DRIFT || drift.gravity > IR_DYN_GRAV || seg > IR_DYN_SEG) {
+      c.rows = rows.slice(Math.floor(rows.length / 2)); c.runStart = null;
+      b.still = c.rows.length;
+      b.status = '候选跨度内仍在变化，重新积累';
+      irBiasText(st); return;
+    }
+    b.g = whole.mu.slice(0, 3); b.ready = true;
     if (recovery) recovery.initialized();
-    b.status = '已初始化 · 等待下一段静止';
-  } else {
-    const dt = acceptedSpan / 1000, alpha = -Math.expm1(-dt / tau);
-    const delta = target.map((v, k) => v - b.g[k]).map((v) => v * alpha), norm = Math.hypot(...delta);
-    const scale = norm > IR_DYN_RATE * dt ? IR_DYN_RATE * dt / norm : 1;
-    b.g = b.g.map((v, k) => v + delta[k] * scale);
-    b.status = recovery && recovery.snapshot().phase === 'fast_tracking'
-      ? '静止复核通过 · 快速重定位' : '已更新 · 等待下一段静止';
+    acceptedWindows++; lastReject = null; c.learning = true;
+    b.status = '已初始化 · 在线跟踪中';
+    irBiasText(st); return;
   }
-  c.rows = []; b.still = 0;
+
+  if (runMs < IR_DYN_TRACK_RUN) {
+    b.status = '在线跟踪 · 连续静止 ' + (runMs / 1000).toFixed(1) + '/' + (IR_DYN_TRACK_RUN / 1000).toFixed(1) + ' 秒';
+    irBiasText(st); return;
+  }
+  const obs = short.stats.mu.slice(0, 3);
+  let tau = IR_DYN_SLOW_TAU;
+  if (recovery) {
+    const drift = irBiasDrift(rows, c.runStart, now);
+    const decision = recovery.assess({ bias: b.g, gyro: obs, drift: drift.gyro, gravity: drift.gravity, runMs });
+    if (decision.hold) {
+      c.learning = false; lastReject = decision.reason;
+      b.status = decision.reason;
+      irBiasText(st); return;
+    }
+    tau = decision.tau;
+  } else if (Math.hypot(...obs.map((v, k) => v - b.g[k])) > 0.8) {
+    c.learning = false;
+    b.status = '候选偏移过大，保留补偿；需静止校准或重新佩戴确认';
+    irBiasText(st); return;
+  }
+  const dt = Math.min(Math.max(now - rows[rows.length - 2][6], 0), 250) / 1000;
+  const alpha = -Math.expm1(-dt / tau);
+  const delta = obs.map((v, k) => (v - b.g[k]) * alpha);
+  const norm = Math.hypot(...delta);
+  const scale = norm > IR_DYN_NRATE * dt ? IR_DYN_NRATE * dt / norm : 1;
+  b.g = b.g.map((v, k) => v + delta[k] * scale);
+  if (!c.learning) { c.learning = true; acceptedWindows++; }
+  lastReject = null;
+  b.status = recovery && recovery.snapshot().phase === 'fast_tracking'
+    ? '静止复核通过 · 快速重定位' : '在线跟踪 · 已更新';
   irBiasText(st);
 }
 
@@ -284,6 +367,7 @@ function irBiasTrack(st, s) {
   clearTimeout(c.timer);
   b.g = mu.slice(0, 3); b.anchor = b.g.slice(); b.boundary = false;
   b.ready = true; b.collect = null; b.dynamic = null;
+  if (recovery) recovery.initialized();
   b.status = b.mode === 'dynamic' ? '手动校准成功 · 自动模式继续' : '校准成功，补偿已锁定';
   irBiasText(st);
 }
@@ -309,18 +393,19 @@ function irBiasReset(st, silent) {
   function snapshot() {
     const b = st.bias;
     return { ready: b.ready, gyro_bias_dps: [...b.g], mode: b.mode, status: b.status, candidate_frames: b.still,
-      ...(adaptive ? { gate_version: recovery ? 'confirmed-rest-v2' : 'bounded-noise-v1', last_reject: lastReject, accepted_windows: acceptedWindows, rejected_windows: rejectedWindows, diagnostics } : {}),
+      gate_version: recovery ? 'confirmed-rest-v3' : 'bounded-noise-v2', last_reject: lastReject,
+      accepted_windows: acceptedWindows, rejected_windows: rejectedWindows, diagnostics,
       ...(recovery ? { recovery: recovery.snapshot() } : {}) };
   }
   return {
     advance, snapshot,
-    reset() { irBiasReset(st, true); lastReject = null; diagnostics = null; acceptedWindows = 0; rejectedWindows = 0; bootstrap = null; if (recovery) recovery.reset(); },
+    reset() { irBiasReset(st, true); lastReject = null; diagnostics = null; acceptedWindows = 0; rejectedWindows = 0; if (recovery) recovery.reset(); },
     setMode(mode) {
-      if (mode !== st.bias.mode && (mode === 'manual' || mode === 'dynamic')) { bootstrap = null; if (recovery) recovery.invalidate(); }
+      if (mode !== st.bias.mode && (mode === 'manual' || mode === 'dynamic')) { if (recovery) recovery.invalidate(); }
       irBiasSetMode(st, mode);
     },
-    startCalibration() { bootstrap = null; if (recovery) recovery.invalidate(); irBiasStart(st); },
-    cancelCalibration() { bootstrap = null; if (recovery) recovery.invalidate(); irBiasCancel(st, 'cancelled'); },
+    startCalibration() { if (recovery) recovery.invalidate(); irBiasStart(st); },
+    cancelCalibration() { if (recovery) recovery.invalidate(); irBiasCancel(st, 'cancelled'); },
     push(sample, processingMs) {
       advance(processingMs);
       irBiasTrack(st, sample);
