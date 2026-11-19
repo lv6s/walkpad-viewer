@@ -1,80 +1,39 @@
-# Walkpad 鞋垫数据查看器
+# Walkpad 工具集
 
-在浏览器里离线查看鞋垫压力与 IMU 录制的波形，并给出活动识别和走跑步态统计。所有解析与计算都在本机完成，不上传任何数据。
+Walkpad 鞋垫与 IMU 的两套本地工具，数据全部留在本机，不上传。
 
-## 直接使用
+| 目录 | 应用 | 用途 | 入口 |
+| --- | --- | --- | --- |
+| [`viewer/`](viewer/README.md) | 数据查看器 | 打开已录制的 zip / parquet / 维特 TXT，看压力与 IMU 波形、活动分段、走跑步态报告 | 双击 `viewer/index.html`，不需要安装 |
+| [`collector/`](collector/README.md) | 数据采集工作台 | 电脑直连蓝牙采集鞋垫、独立 IMU、维特设备，含零偏补偿、速度估计、导出 | `python collector/launch_workbench.py` |
 
-克隆或下载本仓库后，双击 `index.html` 即可，不需要安装 Node.js，也不需要起服务器。页面以 `file://` 打开，调用的是仓库里预构建好的 `dist/app.js`。
+## 数据查看器 `viewer/`
 
-支持拖入或选择的文件：
-
-- 测量包导出的 `.zip`
-- `.parquet` 导出
-- 维特上位机（WT901 / JY901 等）导出的 `.txt` / `.csv`
-
-## 从源码构建
-
-改代码才需要这一步，需要 Node.js 20 以上。
+纯前端，`file://` 直接打开，加载仓库里预构建的 `viewer/dist/app.js`。改代码才需要 Node.js 20 以上：
 
 ```bash
+cd viewer
 npm install
-npm run build      # 产物写到 dist/app.js，页面直接加载它
-npm run dev        # 开发时用 vite 起热更新服务
-npm run typecheck  # 类型检查
+npm run build       # 产物写到 dist/app.js
+npm run typecheck
+npm test
 ```
 
-`dist/app.js` 是单个 IIFE bundle，不压缩，便于现场排查；页面用经典脚本加载它，因此 `file://` 下也能跑。
+三个页面：`index.html`（主查看器）、`axis.html`（IMU 轴向推断）、`imu.html`（维特单设备波形）。模型权重以 JSON 内联进 bundle，运行时不联网。指标口径见 [`viewer/README.md`](viewer/README.md)。
 
-## 页面
+## 数据采集工作台 `collector/`
 
-| 文件 | 用途 |
-| --- | --- |
-| `index.html` | 主查看器：压力波形、IMU、丢包与时间轴、活动分段、走跑步态报告 |
-| `axis.html` | IMU 轴向推断：安装方向与重力参考的独立页 |
-| `imu.html` | 维特 IMU 波形查看器：单设备六轴录制的独立工具 |
-
-## 模型权重
-
-权重以 JSON 形式放在 `src/`，构建时内联进 bundle，运行时不联网、不额外下载。
-
-| 文件 | 用途 |
-| --- | --- |
-| `src/b1q-model.json` | 四类活动识别（静止 / 步行 / 跑步 / 其他）的默认模型 |
-| `src/b1-model.json` | 同族早期版本，测试对照用 |
-| `src/o1-model.json` | 早期候选模型，测试对拍用 |
-| `src/moticon-tas-model.json` | 多域时序活动模型，页面上可切换试用，非默认 |
-| `src/frozen_model.json` | GaitWindow 边界细化模型，页面可切换对照 |
-
-`src/activity.ts` 加载默认的 B1Q；另外两个活动模型由页面开关决定是否启用。
-
-## 目录
-
-```
-src/         TypeScript 源码（解析、波形、活动识别、IC/TO 与步态指标）
-src/gait/    走跑步态：事件配对、设备俯仰、三轴加速度合量峰值、报告汇总
-src/icto/    IC / TO 检测与校核
-css/         样式
-dist/        预构建产物，页面直接加载
-tests/       单元测试与真实权重对拍
-vendor/      parquet 解码器
-```
-
-## 测试
+Python 后台 + Vue 前端，在浏览器里操作。Windows 双击 `collector/open_workbench.cmd`，或：
 
 ```bash
-npm run typecheck
-npm test                      # 交互与合成 IMU
-node tests/gait.mjs           # 走跑指标与边界用例
-node tests/activity.mjs       # 活动识别：解码、缺口、权重对拍
-node tests/b1.mjs             # B1Q 权重对拍（b1.mjs b1q 为同名脚本）
+pip install -r collector/requirements-workbench.txt
+python collector/launch_workbench.py          # 起服务并打开页面
+python collector/launch_workbench.py --stop   # 关掉后台
 ```
 
-真实录制固件（`tests/.activity-fixtures/`）不入库，涉及它的用例会自动 SKIP，其余用例可在空环境下直接跑。
+支持三类设备：自研鞋垫（D56，带压力）、自研独立 IMU（同协议、无压力通道）、维特 WT901 系列。零偏补偿对自研两类设备都生效，维特走原始值。录到的帧按 app 同构的列名导出 parquet。设备与协议细节见 [`collector/README.md`](collector/README.md)。
 
-## 指标口径
+## 约定
 
-- **步频**＝计入的步数 ÷ 双脚共同可计步时长，不是整段时长；缺口部分不计入。
-- **接地时间**＝同一步的 `TO − IC`，左右差取右减左；缺 TO 的步仍计步，但不参与接地统计。
-- **报告俯仰**取同脚 IC / TO 原始事件帧的 App 导出 `pitchDeg`，单位为度，不使用邻帧或估计值补空。分段均值按脚统计有效设备俯仰；它不是足部对地角。
-- **逐步表**默认显示设备俯仰，可单独查看设备侧倾 `sideTiltDeg` 或足部俯仰估计。无设备角的旧包仍可看足部俯仰估计，但不计入设备俯仰汇总。
-- **三轴加速度合量峰值**：在同脚 `[IC, IC+100 ms)` 内取 `hypot(ax, ay, az)` 的最大原始采样及其录制时刻；并列取首个。单位为 g，包含重力，不是垂向加速度或地面反作用力。断流、窗口不完整或疑似削顶时峰值和峰时均留空。
+- 采集数据、导出的 parquet、`collector/runtime/` 与 `collector/records/` 不入库；解包的 APK（`apk_labpad/`）只在本地做协议参考，也不入库。
+- 两个应用的构建产物（`viewer/dist`、`collector/frontend/dist`）与模型权重（查看器的 JSON、采集器的 ONNX）都入库，克隆下来即可离线用。

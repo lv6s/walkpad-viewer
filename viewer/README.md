@@ -1,0 +1,83 @@
+# Walkpad 鞋垫数据查看器
+
+在浏览器里离线查看鞋垫压力与 IMU 录制的波形，并给出活动识别和走跑步态统计。所有解析与计算都在本机完成，不上传任何数据。
+
+本目录是仓库里的查看器应用；采集工具在同仓的 [`collector/`](../collector/)。
+
+## 直接使用
+
+克隆或下载本仓库后，双击 `viewer/index.html` 即可，不需要安装 Node.js，也不需要起服务器。页面以 `file://` 打开，调用的是本目录里预构建好的 `dist/app.js`。
+
+支持拖入或选择的文件：
+
+- 测量包导出的 `.zip`
+- `.parquet` 导出
+- 维特上位机（WT901 / JY901 等）导出的 `.txt` / `.csv`
+
+## 从源码构建
+
+改代码才需要这一步，需要 Node.js 20 以上。
+
+```bash
+cd viewer
+npm install
+npm run build      # 产物写到 dist/app.js，页面直接加载它
+npm run dev        # 开发时用 vite 起热更新服务
+npm run typecheck  # 类型检查
+```
+
+`dist/app.js` 是单个 IIFE bundle，不压缩，便于现场排查；页面用经典脚本加载它，因此 `file://` 下也能跑。
+
+## 页面
+
+| 文件 | 用途 |
+| --- | --- |
+| `index.html` | 主查看器：压力波形、IMU、丢包与时间轴、活动分段、走跑步态报告 |
+| `axis.html` | IMU 轴向推断：安装方向与重力参考的独立页 |
+| `imu.html` | 维特 IMU 波形查看器：单设备六轴录制的独立工具 |
+
+## 模型权重
+
+权重以 JSON 形式放在 `src/`，构建时内联进 bundle，运行时不联网、不额外下载。
+
+| 文件 | 用途 |
+| --- | --- |
+| `src/b1q-model.json` | 四类活动识别（静止 / 步行 / 跑步 / 其他）的默认模型 |
+| `src/b1-model.json` | 同族早期版本，测试对照用 |
+| `src/o1-model.json` | 早期候选模型，测试对拍用 |
+| `src/moticon-tas-model.json` | 多域时序活动模型，页面上可切换试用，非默认 |
+| `src/frozen_model.json` | GaitWindow 边界细化模型，页面可切换对照 |
+
+`src/activity.ts` 加载默认的 B1Q；另外两个活动模型由页面开关决定是否启用。
+
+## 目录
+
+```
+src/         TypeScript 源码（解析、波形、活动识别、IC/TO 与步态指标）
+src/gait/    走跑步态：事件配对、设备俯仰、三轴加速度合量峰值、报告汇总
+src/icto/    IC / TO 检测与校核
+css/         样式
+dist/        预构建产物，页面直接加载
+tests/       单元测试与真实权重对拍
+vendor/      parquet 解码器
+```
+
+## 测试
+
+```bash
+npm run typecheck
+npm test                      # 交互与合成 IMU
+node tests/gait.mjs           # 走跑指标与边界用例
+node tests/activity.mjs       # 活动识别：解码、缺口、权重对拍
+node tests/b1.mjs             # B1Q 权重对拍（b1.mjs b1q 为同名脚本）
+```
+
+真实录制固件（`tests/.activity-fixtures/`）不入库，涉及它的用例会自动 SKIP，其余用例可在空环境下直接跑。
+
+## 指标口径
+
+- **步频**＝计入的步数 ÷ 双脚共同可计步时长，不是整段时长；缺口部分不计入。
+- **接地时间**＝同一步的 `TO − IC`，左右差取右减左；缺 TO 的步仍计步，但不参与接地统计。
+- **报告俯仰**取同脚 IC / TO 原始事件帧的 App 导出 `pitchDeg`，单位为度，不使用邻帧或估计值补空。分段均值按脚统计有效设备俯仰；它不是足部对地角。
+- **逐步表**默认显示设备俯仰，可单独查看设备侧倾 `sideTiltDeg` 或足部俯仰估计。无设备角的旧包仍可看足部俯仰估计，但不计入设备俯仰汇总。
+- **三轴加速度合量峰值**：在同脚 `[IC, IC+100 ms)` 内取 `hypot(ax, ay, az)` 的最大原始采样及其录制时刻；并列取首个。单位为 g，包含重力，不是垂向加速度或地面反作用力。断流、窗口不完整或疑似削顶时峰值和峰时均留空。

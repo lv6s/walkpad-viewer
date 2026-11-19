@@ -1,3 +1,9 @@
 * text=auto eol=lf
 *.png binary
+*.jpg binary
 *.zip binary
+*.onnx binary
+*.npz binary
+*.parquet binary
+*.cmd text eol=crlf
+*.bat text eol=crlf

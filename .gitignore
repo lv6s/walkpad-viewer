@@ -2,3 +2,12 @@ node_modules/
 *.tsbuildinfo
 tests/.activity-fixtures/
 .release-check/
+
+# 采集工作台的本地记录与运行态产物
+collector/records/
+collector/runtime/
+collector/backups/
+collector/apk_labpad/
+collector/**/__pycache__/
+collector/**/*.pyc
+collector/**/.pytest_cache/
