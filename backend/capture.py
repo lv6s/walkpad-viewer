@@ -94,8 +94,9 @@ class Capture:
         placement = placement or FOOT_PLACEMENT.get(foot)
         if not label:
             label = PLACEMENTS[placement][0] if placement in PLACEMENTS else placement
-        # 独立 IMU 与鞋垫共用同一套测量协议，区别只在没有压力通道
-        kind = kind or ('wt' if profile == 'wt' else 'insole')
+        # 独立 IMU 与鞋垫共用同一套测量协议，区别只在没有压力通道；
+        # 已登记的设备沿用原类型，避免重连时丢成默认鞋垫
+        kind = kind or (self.devices[key]['kind'] if key in self.devices else None) or ('wt' if profile == 'wt' else 'insole')
         has_pressure = kind == 'insole'
         # 零偏按设备记账：脚背位置用 l/r（步态引擎按脚别取用），其余位置用设备键
         bias_key = foot or 'd:'+key
@@ -259,7 +260,7 @@ class Capture:
             if d['manual'] or not self.running or d['generation'] != generation or self.source != 'direct':
                 break
             try:
-                await self.connect(d['address'],d['profile'],d['placement'],d['id'],d['placement_label'])
+                await self.connect(d['address'],d['profile'],d['placement'],d['id'],d['placement_label'],kind=d['kind'])
                 return
             except Exception as exc:
                 self.log('重连未成功：'+str(exc),'warning')

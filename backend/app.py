@@ -164,7 +164,7 @@ def create_app(root=ROOT,demo=False,phone_port=8766,debug=False,idle_exit=8):
                 for d in list(c.devices.values()):
                     if d['source'] == 'direct' and not d['connected']:
                         try:
-                            result.append(await c.connect(d['address'],d['profile'],d['placement'],d['id'],d['placement_label']))
+                            result.append(await c.connect(d['address'],d['profile'],d['placement'],d['id'],d['placement_label'],kind=d['kind']))
                         except Exception as exc:
                             c.log(str(exc),'warning')
                 return {'devices':result}
