@@ -167,11 +167,11 @@ try {
     assert.match(await page.locator('#gaitTitle').textContent(), /步行/);
     const metricText = await page.locator('#gaitMetricRows').textContent();
     assert.match(metricText, /接地均值[（(]ms[）)]/);
-    assert.match(metricText, /平均垂向冲击峰值[（(]g[）)]/);
+    assert.match(metricText, /平均垂向加速度峰值[（(]g[）)]/);
     const contact = await page.locator('#gaitMetricRows tr').filter({hasText: /接地均值/}).locator('td, th').allTextContents();
     assert.ok(contact.slice(1).some(v => /\d/.test(v)), `接地均值缺少数值：${contact}`);
     assert.ok(contact.slice(1).every(v => /\d/.test(v) || /—|未提供/.test(v)), `接地均值列应为数值或未提供：${contact}`);
-    const impact = await page.locator('#gaitMetricRows tr').filter({hasText: /平均垂向冲击峰值/}).locator('.gait-sample').allTextContents();
+    const impact = await page.locator('#gaitMetricRows tr').filter({hasText: /平均垂向加速度峰值/}).locator('.gait-sample').allTextContents();
     assert.ok(impact.some(v => /^[1-9]\d* \/ \d+ 步$/.test(v)), `实际步行应有可报告的均值：${impact}`);
     await page.locator('#gaitCoverage summary').click();
     assert.ok(await page.locator('#gaitCountable').isVisible());
@@ -182,7 +182,7 @@ try {
     assert.equal(stepHeads.length, 9);
     assert.equal(await page.locator('#gaitSteps [data-gait-device]:visible').count(), 0);
     assert.match(stepHeads[0], /序号|步次/);
-    for (const token of ['脚', 'IC', 'TO', '接地', '触地俯仰', '离地俯仰', '垂向冲击', '峰值时刻']) assert.ok(stepHeads.join('|').includes(token), `逐步明细缺少「${token}」列：${stepHeads}`);
+    for (const token of ['脚', 'IC', 'TO', '接地', '触地俯仰', '离地俯仰', '垂向加速度', '峰值时刻']) assert.ok(stepHeads.join('|').includes(token), `逐步明细缺少「${token}」列：${stepHeads}`);
     assert.doesNotMatch(stepHeads.join('|'), /COP/);
     const steps = page.locator('#gaitStepRows tr');
     await steps.first().waitFor({state: 'visible'});
@@ -231,7 +231,7 @@ try {
     const peakMs = Number(await peakButton.textContent());
     await peakButton.click();
     assert.ok(await page.locator('#viewImu').isVisible());
-    assert.match(await page.locator('#gaitWaveNote').textContent(), /垂向冲击峰值/);
+    assert.match(await page.locator('#gaitWaveNote').textContent(), /垂向加速度峰值/);
     assert.ok(Math.abs(Number(await page.locator('#tA').inputValue()) - (peakMs / 1000 - .45)) < .12);
     await page.locator('#gaitWaveClear').click(); await page.locator('[data-tab="activity"]').click();
     const before = {
@@ -294,7 +294,7 @@ try {
     assert.ok(await page.locator('#gaitMetrics').isVisible());
     assert.match(await page.locator('#gaitNote').textContent(), /原版 IC\/TO/);
     const metrics = page.locator('#gaitMetricRows');
-    for (const label of ['接地均值', '触地俯仰', '离地俯仰', '垂向冲击', '峰值延迟']) assert.ok((await metrics.innerText()).includes(label));
+    for (const label of ['接地均值', '触地俯仰', '离地俯仰', '垂向加速度', '峰值延迟']) assert.ok((await metrics.innerText()).includes(label));
     const legacyStats = await metrics.innerText();
     await page.locator('#gaitSteps summary').click();
     const runSteps = page.locator('#gaitStepRows tr');
@@ -437,6 +437,65 @@ try {
       assert.ok(count(candidate, 1) <= count(old, 1), name);
       console.log(`Temporal walking control ${name}: run ${(count(old, 1) / 10).toFixed(1)}→${(count(candidate, 1) / 10).toFixed(1)} s`);
     }
+  }
+  for (const [file, cls, count] of [[process.env.APP_WALK_ZIP, '步行', 83], [process.env.APP_RUN_ZIP, '跑步', 144]]) {
+    if (!file) continue;
+    await page.selectOption('#activityModel', 'B1Q 实测候选');
+    await page.selectOption('#activityIctoVersion', 'legacy');
+    await importFile({name: 'app-gait.zip', mimeType: 'application/zip', buffer: fs.readFileSync(file)});
+    await analyze();
+    const segment = page.locator('#activityRows tr').filter({has: page.getByRole('cell', {name: cls, exact: true})})
+      .filter({has: page.locator(`td:nth-child(8):text-is("${count}")`)});
+    await segment.click();
+    await page.locator('#gaitSteps summary').click();
+    const source = page.locator('#gaitStepAngleSource');
+    const heads = () => page.locator('#gaitSteps thead tr:last-child th').allTextContents();
+    const snapshot = () => page.locator('#gaitStepRows tr').evaluateAll(rs => rs.map(r => [...r.cells].map(c => c.textContent.trim())));
+    await page.locator('#gaitStepRows tr').first().waitFor({state: 'visible'});
+    assert.ok(await source.isVisible());
+    assert.equal(await source.inputValue(), 'device');
+    assert.equal((await heads()).length, 9);
+    assert.match((await heads())[5], /触地设备角/);
+    assert.match((await heads())[6], /离地设备角/);
+    const device = await snapshot();
+    assert.ok(device.length && device.every(r => r.length === 9 && [5, 6].every(i => /^-?\d+\.\d \/ -?\d+\.\d$/.test(r[i]))));
+    const metrics = await page.locator('#gaitMetricRows').textContent();
+    const status = await page.locator('#activityStatus').textContent();
+    await source.selectOption('foot');
+    const foot = await snapshot();
+    assert.match((await heads())[5], /触地俯仰/);
+    assert.match((await heads())[6], /离地俯仰/);
+    assert.ok(foot.every(r => [5, 6].every(i => /^-?\d+\.\d$|^—/.test(r[i]))));
+    const nonAngles = rows => rows.map(r => [...r.slice(0, 5), ...r.slice(7)]);
+    assert.deepEqual(nonAngles(foot), nonAngles(device));
+    assert.equal(await page.locator('#gaitMetricRows').textContent(), metrics);
+    assert.equal(await page.locator('#activityStatus').textContent(), status);
+    await source.selectOption('device');
+    assert.deepEqual(await snapshot(), device);
+    if (cls === '跑步') {
+      await page.selectOption('#activityIctoVersion', 'running');
+      await page.waitForFunction(() => /跑步实验版 IC\/TO/.test(document.getElementById('gaitNote').textContent));
+      let incomplete = 0;
+      const next = page.locator('#gaitStepNext');
+      for (;;) {
+        const rows = await snapshot();
+        for (const r of rows.filter(r => r[3] === '—')) { assert.equal(r[6], '—'); incomplete++; }
+        if (await next.isDisabled()) break;
+        await next.click();
+      }
+      assert.equal(incomplete, 5);
+    }
+    await source.selectOption('foot');
+    console.log(`PASS App ${cls}: ${count} steps, device angle default, separate estimate, unchanged metrics and peak timing`);
+  }
+  if ((process.env.APP_WALK_ZIP || process.env.APP_RUN_ZIP) && fs.existsSync(walk)) {
+    await importFile(wtWalkZip(JSON.parse(fs.readFileSync(walk))['64步.zip'])); await analyze();
+    await page.locator('#gaitSteps summary').click();
+    await page.locator('#gaitStepRows tr').first().waitFor({state: 'visible'});
+    assert.ok(await page.locator('#gaitStepAngleSource').isHidden());
+    assert.match(await page.locator('#gaitStepIcAngle').textContent(), /触地俯仰/);
+    assert.equal(await page.locator('#gaitStepRows tr').first().locator('td').count(), 9);
+    console.log('PASS switching from an App package to a legacy recording leaves no device angle columns');
   }
   assert.deepEqual(errors, []); assert.deepEqual(requests, []); console.log('PASS zero page errors, zero network requests');
 } finally { await browser.close(); }

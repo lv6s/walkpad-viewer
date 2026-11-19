@@ -355,7 +355,7 @@
 .gait-segments :is(th,td):nth-child(5),.gait-segments :is(th,td):last-child{text-align:left}
 .gait-step-table :is(th,td):nth-child(2){text-align:left}
 .gait-step-table .gait-groups th{text-align:left;color:var(--accent);border-right:1px solid var(--line);background:var(--accent-soft)}
-.gait-step-table tbody td:is(:nth-child(3),:nth-child(6),:nth-child(8),:nth-child(10)){border-left:1px solid var(--line)}
+.gait-step-table tbody td:is(:nth-child(3),:nth-child(6),:nth-child(8)){border-left:1px solid var(--line)}
 .gait-state,.gait-foot{display:inline-block;padding:2px 7px;border:1px solid var(--line);border-radius:20px;font-weight:600;font-size:12px}
 .gait-state.walk,.gait-foot.left{background:var(--accent-soft);color:var(--accent)}
 .gait-state.run,.gait-foot.right{color:var(--warn)}

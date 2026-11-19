@@ -77,8 +77,14 @@ function renderSteps() {
   const list = (report?.steps || []).filter(s => side === 'both' || s.side === side);
   stepPage = pagination('gaitStep', stepPage, list.length, '步');
   const body = $('gaitStepRows'); body.replaceChildren();
-  const showDevice = report?.steps.some(s => s.deviceAngles !== undefined) ?? false;
-  details('gaitSteps').querySelectorAll<HTMLElement>('[data-gait-device]').forEach(el => { el.hidden = !showDevice; });
+  const hasDevice = report?.steps.some(s => s.deviceAngles?.ic || s.deviceAngles?.to) ?? false;
+  details('gaitSteps').querySelector<HTMLElement>('[data-gait-device]').hidden = !hasDevice;
+  const useDevice = hasDevice && ($('gaitStepAngleSource') as HTMLSelectElement).value === 'device';
+  $('gaitStepAngleGroup').textContent = useDevice ? 'App 导出设备角 · 俯仰 / 侧倾' : '足部俯仰估计';
+  $('gaitStepIcAngle').textContent = useDevice ? '触地设备角（°）' : '触地俯仰（°）';
+  $('gaitStepToAngle').textContent = useDevice ? '离地设备角（°）' : '离地俯仰（°）';
+  $('gaitStepAngleNote').textContent = useDevice ? '取同脚事件帧的设备体轴角，按「俯仰 / 侧倾」显示；不插值、不替代足部俯仰。'
+    : '足部俯仰以低运动参考姿态为零、足尖抬起为正。缺少可靠参考时不填值。';
   const formatDevice = (a: {pitch: number; sideTilt: number} | null | undefined) =>
     a ? `${gaitFormat(a.pitch, 1)} / ${gaitFormat(a.sideTilt, 1)}` : '—';
   for (const s of list.slice(stepPage * PAGE_SIZE, (stepPage + 1) * PAGE_SIZE)) {
@@ -87,9 +93,10 @@ function renderSteps() {
         to: s.to_ms === null ? NaN : s.to_ms / 1000, peak: s.impact_peak_ms === null ? undefined : s.impact_peak_ms / 1000,
         at: ms / 1000, note: `${SEG_CN[report.cls]}第 ${s.step_index} 步 · ${name} ${ms} ms${s.to_ms === null ? ' · 无可用 TO' : ''}`}));
     row(body, [String(s.step_index), text('span', SIDE_CN[s.side], `gait-foot ${s.side}`), evt('触地 IC', s.ic_ms), evt('离地 TO', s.to_ms),
-      s.to_ms === null ? '—' : String(s.to_ms - s.ic_ms), measured(s.ic_pitch_deg, 1, s.icIssue), measured(s.to_pitch_deg, 1, s.toIssue),
-      measured(s.impact_peak_g, 2, s.impactIssue), evt('垂向冲击峰值', s.impact_peak_ms),
-      ...(showDevice ? [formatDevice(s.deviceAngles?.ic), formatDevice(s.deviceAngles?.to)] : [])]);
+      s.to_ms === null ? '—' : String(s.to_ms - s.ic_ms),
+      useDevice ? formatDevice(s.deviceAngles?.ic) : measured(s.ic_pitch_deg, 1, s.icIssue),
+      useDevice ? formatDevice(s.deviceAngles?.to) : measured(s.to_pitch_deg, 1, s.toIssue),
+      measured(s.impact_peak_g, 2, s.impactIssue), evt('垂向加速度峰值', s.impact_peak_ms)]);
   }
 }
 export function initGaitDetail(onLocate: typeof locate) {
@@ -102,7 +109,8 @@ export function initGaitDetail(onLocate: typeof locate) {
   $('gaitStepPrev').onclick = () => { stepPage = Math.max(0, stepPage - 1); renderSteps(); };
   $('gaitStepNext').onclick = () => { stepPage++; renderSteps(); };
   $('gaitStepSide').onchange = () => { stepPage = 0; renderSteps(); };
-  $('gaitRules').textContent = '步行和跑步共用统计口径，按状态分别汇总。有效计步区间取双脚有内部 IC 候选支持的观察窗口交集，按状态段裁切，不跨断流，不含首尾补点。每个有效 IC 计一步；平均步频＝60 × 双脚步数 ÷ 有效计步秒数。接地＝同脚、同一步 TO − IC；缺可信 TO 仍可计步，但不算接地时长和离地角。左右差＝右均值 − 左均值。俯仰以轴向推断的低运动参考为零，足尖抬起为正，不是踝关节角。垂向冲击取 IC 后 100 ms 内原采样点向上的加速度，减去 1 g 后取最大正值；窗口不完整、疑似削顶或姿态不可靠时留空，不额外滤波或插值找峰。峰时为录制时刻，平均峰值延迟为峰时减 IC。IC/TO 和角度都是 IMU 估计，毫秒是单位，不代表精度。';
+  $('gaitStepAngleSource').onchange = renderSteps;
+  $('gaitRules').textContent = '步行和跑步共用统计口径，按状态分别汇总。有效计步区间取双脚有内部 IC 候选支持的观察窗口交集，按状态段裁切，不跨断流，不含首尾补点。每个有效 IC 计一步；平均步频＝60 × 双脚步数 ÷ 有效计步秒数。接地＝同脚、同一步 TO − IC；缺可信 TO 仍可计步，但不算接地时长和离地角。左右差＝右均值 − 左均值。有 App 导出角时，逐步表默认显示同脚事件帧的设备角；不与足部俯仰混合统计。足部俯仰以轴向推断的低运动参考为零，足尖抬起为正，不是踝关节角。垂向加速度峰值取 IC 后 100 ms 内原采样点沿重力反方向的加速度，减去 1 g 后取最大正值。它不是鞋底法向加速度，也不是地面反作用力。窗口不完整、疑似削顶或姿态不可靠时留空，不额外滤波或插值找峰。峰时为录制时刻，平均峰值延迟为峰时减 IC。IC/TO 为 IMU 估计，毫秒是单位，不代表精度。';
 }
 
 export function renderGaitDetail(g: GaitSegment, w: GaitReportSegment, s: ActivitySegment, index: number, experimental = false) {
@@ -121,7 +129,7 @@ export function renderGaitDetail(g: GaitSegment, w: GaitReportSegment, s: Activi
   }
   if (report !== w) stepPage = 0;
   report = w;
-  if (!s) return;
+  if (!s) { ($('gaitStepAngleSource') as HTMLSelectElement).value = 'device'; return; }
   const modelStill = s.cls === ACTIVITY_STILL && s.confidence != null, gait = s.cls === 0 || s.cls === 1;
   $('gaitTitle').textContent = `第 ${index + 1} 段 · ${modelStill ? '静止' : SEG_CN[s.cls]} · ${gaitFormat(s.a, 2)}–${gaitFormat(s.b, 2)} s`;
   $('gaitMetrics').hidden = $('gaitSamples').hidden = !gait;
@@ -131,7 +139,7 @@ export function renderGaitDetail(g: GaitSegment, w: GaitReportSegment, s: Activi
   const note = s.cls === ACTIVITY_STILL ? (modelStill ? '模型判为静止。该段不计算步态指标。' : '双脚 IMU 局部低运动，支持静止。该段不计算步态指标。')
     : s.cls === 3 ? '该段未判定，不计算步态指标。'
     : !gait ? '该段不计算步态指标。「其他」不等同于静止。'
-    : `${s.cls === 1 && experimental ? '跑步实验版' : '原版'} IC/TO · ${w?.countable_intervals.length ? '俯仰与垂向冲击为脚背 IMU 估计，未报告的原因见逐步明细。' : '本段无双脚可计步覆盖，不将缺失指标当作 0。'}`;
+    : `${s.cls === 1 && experimental ? '跑步实验版' : '原版'} IC/TO · ${w?.countable_intervals.length ? '汇总中的足部俯仰和垂向加速度峰值由脚背 IMU 估计，逐步表可查看角度来源和缺测原因。' : '本段无双脚可计步覆盖，不将缺失指标当作 0。'}`;
   $('gaitNote').textContent = note;
   const kpis = $('gaitCompare'), body = $('gaitMetricRows'); kpis.replaceChildren(); body.replaceChildren();
   if (!gait) return;
@@ -142,8 +150,8 @@ export function renderGaitDetail(g: GaitSegment, w: GaitReportSegment, s: Activi
   kpi('有效步数', gaitFormat(m.steps, 0)); kpi('平均步频（步/分）', gaitFormat(m.cadence, 1));
   kpi('有效计步 / 识别（s）', `${gaitFormat(m.countableMs / 1000, 2)} / ${gaitFormat(m.durationMs / 1000, 2)}`, coverageCell(m, false));
   const stats: [FootMetric, string, number][] = [
-    ['contact', '接地均值（ms）', 1], ['ic', '触地俯仰均值（°）', 1], ['to', '离地俯仰均值（°）', 1],
-    ['impact', '平均垂向冲击峰值（g）', 2], ['delay', '平均峰值延迟（ms）', 1]
+    ['contact', '接地均值（ms）', 1], ['ic', '足部触地俯仰均值（°）', 1], ['to', '足部离地俯仰均值（°）', 1],
+    ['impact', '平均垂向加速度峰值（g）', 2], ['delay', '平均峰值延迟（ms）', 1]
   ];
   for (const [key, label, digits] of stats) {
     const foot = (side: 'left' | 'right') => {
