@@ -1,0 +1,51 @@
+/* 独立轴向推断页（axis.html）专用：文件清单、汇总表、卡片网格。
+   通用样式（卡片 / 轴表 / 判据表 / 段表）在 app.css。 */
+
+.axfiles{display:flex; flex-direction:column; gap:8px; margin-top:14px}
+/* 有文件之后拖放区收窄：结果才是主角，但随时还能再拖 */
+.dropzone.compact{padding:16px 20px; text-align:left}
+.dropzone.compact .big{font-size:13px; margin:0}
+.dropzone.compact .hint{display:none}
+.dropzone.compact .pick{margin:8px 0 0; padding:6px 12px; font-size:12px}
+.axfrow{
+  display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  padding:9px 13px; background:var(--card); border:1px solid var(--line); border-radius:10px;
+}
+.axfrow .nm{
+  flex:1 1 260px; min-width:0; font-weight:600; font-size:13px;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+button.badge{font:inherit; cursor:pointer}
+button.badge.hi:hover{filter:brightness(.96)}
+.chip.warn{color:var(--warn); border-color:var(--warn)}
+
+#axSummary:not(:empty){
+  margin-top:14px; padding:10px 14px; background:var(--card);
+  border:1px solid var(--line); border-radius:12px; overflow-x:auto;
+}
+.axsumtbl{margin:0}
+.axsumtbl td.ax{white-space:nowrap; max-width:280px; overflow:hidden; text-overflow:ellipsis}
+/* 自动挑出来的那一段：一眼看出「一键」给的是哪条结论 */
+.axseg tr.pick td{background:var(--accent-soft)}
+.axseg tr.pick td:first-child{color:var(--accent)}
+
+.axcards{
+  display:grid; grid-template-columns:repeat(auto-fit, minmax(520px, 1fr));
+  gap:14px; align-items:start; margin-top:14px;
+}
+.axcards .side{margin-top:0; min-width:0}
+@media (max-width:560px){
+  .axcards{grid-template-columns:1fr}
+}
+
+/* 主查看器右上角的入口：轴向推断现在有独立页，一眼能看到 */
+header{position:relative}
+header .entry{
+  position:absolute; top:20px; right:24px;
+  font-size:12px; padding:5px 12px; border-radius:8px; text-decoration:none;
+  color:var(--accent); background:var(--accent-soft); border:1px solid var(--line);
+}
+header .entry:hover{border-color:var(--accent)}
+@media (max-width:720px){
+  header .entry{position:static; display:inline-block; margin-top:8px}
+}

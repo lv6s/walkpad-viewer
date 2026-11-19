@@ -1,0 +1,81 @@
+# Walkpad 鞋垫数据查看器
+
+在浏览器里离线查看鞋垫压力与 IMU 录制的波形，并给出活动识别和走跑步态统计。所有解析与计算都在本机完成，不上传任何数据。
+
+## 直接使用
+
+克隆或下载本仓库后，双击 `index.html` 即可，不需要安装 Node.js，也不需要起服务器。页面以 `file://` 打开，调用的是仓库里预构建好的 `dist/app.js`。
+
+支持拖入或选择的文件：
+
+- 测量包导出的 `.zip`
+- `.parquet` 导出
+- 维特上位机（WT901 / JY901 等）导出的 `.txt` / `.csv`
+
+## 从源码构建
+
+改代码才需要这一步，需要 Node.js 20 以上。
+
+```bash
+npm install
+npm run build      # 产物写到 dist/app.js，页面直接加载它
+npm run dev        # 开发时用 vite 起热更新服务
+npm run typecheck  # 类型检查
+```
+
+`dist/app.js` 是单个 IIFE bundle，不压缩，便于现场排查；页面用经典脚本加载它，因此 `file://` 下也能跑。
+
+## 页面
+
+| 文件 | 用途 |
+| --- | --- |
+| `index.html` | 主查看器：压力波形、IMU、丢包与时间轴、活动分段、走跑步态报告 |
+| `axis.html` | IMU 轴向推断：安装方向与重力参考的独立页 |
+| `imu.html` | 维特 IMU 波形查看器：单设备六轴录制的独立工具 |
+
+## 模型权重
+
+权重以 JSON 形式放在 `src/`，构建时内联进 bundle，运行时不联网、不额外下载。
+
+| 文件 | 用途 |
+| --- | --- |
+| `src/b1q-model.json` | 四类活动识别（静止 / 步行 / 跑步 / 其他）的默认模型 |
+| `src/b1-model.json` | 同族早期版本，测试对照用 |
+| `src/o1-model.json` | 早期候选模型，测试对拍用 |
+| `src/moticon-tas-model.json` | 多域时序活动模型，页面上可切换试用，非默认 |
+| `src/frozen_model.json` | GaitWindow 边界细化模型，页面可切换对照 |
+
+`src/activity.ts` 加载默认的 B1Q；另外两个活动模型由页面开关决定是否启用。
+
+## 目录
+
+```
+src/         TypeScript 源码（解析、波形、活动识别、IC/TO 与步态指标）
+src/gait/    走跑步态：事件配对、脚部俯仰、垂向冲击、报告汇总
+src/icto/    IC / TO 检测与校核
+css/         样式
+dist/        预构建产物，页面直接加载
+tests/       单元测试与真实权重对拍
+vendor/      parquet 解码器
+```
+
+## 测试
+
+```bash
+npm run typecheck
+npm test                      # 交互与合成 IMU
+node tests/gait.mjs           # 走跑指标与边界用例
+node tests/activity.mjs       # 活动识别：解码、缺口、权重对拍
+node tests/b1.mjs             # B1Q 权重对拍（b1.mjs b1q 为同名脚本）
+```
+
+真实录制固件（`tests/.activity-fixtures/`）不入库，涉及它的用例会自动 SKIP，其余用例可在空环境下直接跑。
+
+## 指标口径
+
+- **步频**＝计入的步数 ÷ 双脚共同可计步时长，不是整段时长；缺口部分不计入。
+- **接地时间**＝同一步的 `TO − IC`，左右差取右减左；缺 TO 的步仍计步，但不参与接地统计。
+- **脚部俯仰**由三轴加速度的重力参考加陀螺积分估计，低运动支撑姿态为零、足尖抬起为正，是鞋垫随脚转动的角度，不是踝关节角。
+- **垂向冲击**取 IC 后 100 ms 内原始采样的最大向上动态加速度，即 `dot(acc, up) − 1`，不是固定 Z 轴读数，也不是地面反作用力。
+
+导出文件里没有独立的 pitch / roll 列，页面不依赖这两个字段。参考不足、断流或疑似削顶时对应指标留空，不按 0 计。

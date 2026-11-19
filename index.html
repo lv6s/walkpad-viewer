@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>鞋垫数据查看器</title>
+<link rel="stylesheet" href="css/app.css?v=3.13.0">
+<link rel="stylesheet" href="css/axis.css?v=3.3.1">
+</head>
+<body data-page="viewer">
+<header>
+  <h1>鞋垫数据查看器<span class="ver" id="ver"></span></h1>
+  <a class="entry" href="axis.html">只做 IMU 轴向推断 →</a>
+  <p class="sub">拖入整包导出的 <code>.zip</code>（manifest + frames + evidence），或 <code>standard_measurement_frames</code> parquet，或维特（WT901 / JY901）上位机导出的 TXT：parquet 一页看 56 通道原始波形，一页算 COP 平面轨迹（可拖动 / 播放），一页看每通道零值率，一页看丢包与采样率；两种文件都能看 IMU 六轴，并从 IMU 自身反推三轴语义与正方向 —— 同一次录制的另一台设备可以一起拖进来做时间对齐、按动作分段。脚背 IMU 还能标出 <b>IC / TO</b>（首次触地 / 离地候选），标在 IMU 页与压力波形页的同一条时间轴上。「状态与步态」用本地模型区分步行 / 跑步 / 其他（默认 B1Q），并用脚部 IMU 计算各段步态指标，也支持 WT 本地版 APP 导出的 ZIP。全部在本地解析与推断，不上传。</p>
+</header>
+
+<main>
+  <div class="dropzone" id="drop">
+    <div class="big">把文件拖到这里</div>
+    <div class="hint">测量包 .zip、.parquet（鞋垫压力 + IMU，或只有 IMU）或 .txt / .csv（维特 IMU 导出）</div>
+    <button class="pick" id="pick">选择文件</button>
+    <input type="file" id="file" accept=".zip,.parquet,.txt,.csv" hidden>
+  </div>
+
+  <div class="err" id="err"></div>
+
+  <div class="bar" id="bar" hidden>
+    <span class="name" id="fname"></span>
+    <div class="chips" id="chips"></div>
+    <div class="ctrl"><button id="again">换一个文件</button></div>
+  </div>
+
+  <div class="tabs" id="tabs" role="tablist" aria-label="视图" hidden>
+    <button class="tab on" data-tab="wave" role="tab" aria-selected="true">波形图</button>
+    <button class="tab" data-tab="cop" role="tab" aria-selected="false">COP 平面轨迹</button>
+    <button class="tab" data-tab="zero" role="tab" aria-selected="false">零值率</button>
+    <button class="tab" data-tab="gap" role="tab" aria-selected="false">丢包 / 采样率</button>
+    <button class="tab" data-tab="imu" role="tab" aria-selected="false">IMU</button>
+    <button class="tab" data-tab="axis" role="tab" aria-selected="false">轴向推断</button>
+    <button class="tab" data-tab="activity" role="tab" aria-selected="false">状态与步态</button>
+    <button class="tab" data-tab="action" role="tab" aria-selected="false">动作速度</button>
+  </div>
+
+  <div class="winbar" id="winBar" hidden>
+    <span id="winText" role="status" aria-live="polite"></span>
+    <span class="tgo">
+      <label>起 <input type="number" id="tA" step="0.5" min="0" inputmode="decimal"><span>s</span></label>
+      <label>止 <input type="number" id="tB" step="0.5" min="0" inputmode="decimal"><span>s</span></label>
+      <button id="tGo" title="跳到输入的时间段（只填一个也认：另一头保持当前跨度）">跳转</button>
+    </span>
+    <span class="grow"></span>
+    <button id="winReset">复位全段</button>
+    <label class="rate" title="全段视图每隔多久取一帧。跨度小到屏幕装得下时自动按像素取，不会更粗。">
+      显示采样率
+      <select id="rateSel">
+        <option value="auto" selected>按屏宽</option>
+        <option value="0.1">0.1 Hz</option>
+        <option value="0.5">0.5 Hz</option>
+        <option value="1">1 Hz</option>
+        <option value="5">5 Hz</option>
+        <option value="10">10 Hz</option>
+      </select>
+    </label>
+    <span class="keys" id="winKeys"></span>
+  </div>
+  <div class="scrub" id="scrub" hidden>
+    <canvas id="scrubCv"></canvas>
+    <div class="cap"><span>全程负荷 · 拖动选段 / 移动窗口，拖两端改宽，滚轮缩放，双击复位</span><span class="tip" id="scrubTip"></span></div>
+  </div>
+
+  <div id="viewWave" hidden>
+    <div class="ptools" id="waveTools">
+      <div class="ctrl"><span>纵轴 0–</span>
+        <input type="number" id="ymax" min="1" step="50" title="压力纵轴上界，单位 ADC 计数">
+        <span>ADC</span>
+        <button data-y="auto" class="on">自动</button>
+        <button data-y="200">200</button>
+        <button data-y="400">400</button>
+        <button data-y="1000">1000</button>
+      </div>
+      <span class="sep"></span>
+      <span class="hint">56 格同尺：一把尺横着比才有意义，改纵轴会同时作用于所有通道</span>
+    </div>
+    <div id="panels"></div>
+    <div class="detail" id="detail" hidden>
+      <div class="head">
+        <h2 id="dTitle"></h2>
+        <span class="meta" id="dMeta"></span>
+        <button class="x" id="dClose" title="关闭">×</button>
+      </div>
+      <div class="canvas-wrap"><canvas id="dCanvas"></canvas></div>
+    </div>
+  </div>
+
+  <div id="viewCop" hidden>
+    <div id="copPanels"></div>
+  </div>
+
+  <div id="viewZero" hidden>
+    <div id="zeroPanels"></div>
+  </div>
+
+  <div id="viewGap" hidden>
+    <div id="gapPanels"></div>
+  </div>
+
+  <div id="viewImu" hidden>
+    <div class="ptools" id="imuTools">
+      <div class="ctrl"><span>数据</span>
+        <button data-src="phys" class="on" title="imu_physical_values：采集端已换算，加速度 g、角速度 °/s">物理量 g / °/s</button>
+        <button data-src="raw" title="imu_raw_values：硬件整数计数，未换算，通道序 r1..r6">原始计数 LSB</button>
+      </div>
+      <span class="sep"></span>
+      <div class="ctrl"><span>轴</span>
+        <button data-ax="X" class="on">X</button>
+        <button data-ax="Y" class="on">Y</button>
+        <button data-ax="Z" class="on">Z</button>
+      </div>
+      <span class="sep"></span>
+      <div class="ctrl"><span>绘制</span>
+        <button data-draw="line" class="on" title="按采样顺序把点连起来">连线</button>
+        <button data-draw="dot" title="只画采样点，不连线：点疏的地方就是采样稀疏，点密的地方挤成一片">点</button>
+      </div>
+      <span class="sep"></span>
+      <div class="ctrl"><span id="imuKindLbl">物理量</span>
+        <button data-kind="acc" class="on">加速度 g</button>
+        <button data-kind="gyro" class="on">角速度 °/s</button>
+      </div>
+      <span class="sep"></span>
+      <div class="ctrl"><span>纵轴 ±</span>
+        <input type="number" id="imuYa" min="0.1" step="0.5" placeholder="自动">
+        <span id="imuUa">g</span>
+        <input type="number" id="imuYg" min="1" step="20" placeholder="自动">
+        <span id="imuUg">°/s</span>
+        <button id="imuYfit" title="按当前时间窗内的最大 |值| 定纵轴，缩放后不会削顶">按窗口</button>
+        <button id="imuYauto" class="on">全段</button>
+      </div>
+      <span class="sep"></span>
+      <div class="ctrl"><span>状态底色</span>
+        <button id="imuRun" title="用「状态分段」页当前所选模型分析整段，把步行/跑步/其他铺成波形背后的色带">分析整段</button>
+        <button id="imuSegOn" class="on" title="关掉底色只看原始波形；结果与「状态分段」页共用一份，不重算">显示</button>
+      </div>
+      <span class="chip" id="imuSegNote">未分析</span>
+      <span class="sep"></span>
+      <div class="ctrl"><span>丢帧标记</span>
+        <button id="imuGap" class="on" title="相邻两帧时间差超过阈值的区段铺淡红底，栏顶再加一道红杠 —— 缩到全段时区段只有 1 px 宽，靠那道杠才找得到">显示</button>
+        <span>间隔 &gt;</span>
+        <input type="number" id="imuGapMs" min="1" step="5" value="40" title="相邻两帧时间差阈值（毫秒）。50 Hz 采样时一个标称周期 20 ms，填 40 就是「丢了至少一帧」">
+        <span>ms</span>
+      </div>
+      <span class="chip" id="imuNote"></span>
+    </div>
+    <div class="ptools" id="ictoTools">
+      <div class="ctrl"><span>IC / TO</span>
+        <button id="ictoOn" title="在 IMU 页与压力波形页标出 IC（首次触地候选）/ TO（离地候选）。算法同 instep-imu-ic-to-offline-v4-cycle-20261109，整段离线计算，不是实时口径">标注</button>
+        <button id="ictoList" title="逐周期列出 IC / TO 与分段处理结果；点一行把这个周期放大到 ±0.4 s">事件表</button>
+      </div>
+      <span class="sep"></span>
+      <div class="ctrl"><button id="ictoRe" title="用同一份文件重算一遍">重算</button></div>
+      <span class="sep"></span>
+      <div class="ctrl">
+        <button id="ictoCsvEv" class="mini" title="导出全部 IC / TO 事件">事件 CSV</button>
+        <button id="ictoCsvCy" class="mini" title="导出每个摆动分段的处理结果，含拒绝原因">分段 CSV</button>
+      </div>
+      <span class="sep"></span>
+      <span class="chip" id="ictoNote"></span>
+    </div>
+    <div id="ictoBox" hidden></div>
+    <div class="ptools" id="gaitWaveFocus" hidden><span id="gaitWaveNote" class="hint"></span><button id="gaitWaveClear">清除周期高亮</button></div>
+    <details class="note">
+      <summary>IC / TO 是怎么算的、什么时候不该信</summary>
+      <p>每只脚独立：整段取方差最大的原始陀螺轴，<b>正负两个方向各算一遍</b> —— 对每个方向的门限以上正波瓣取峰作摆动锚
+        （同一个连续正波瓣里被门限劈开的多个峰先并成一个，再按峰高做 200 ms 抑制），再看相邻锚点之间 30%–45% 处的支撑窗，
+        取窗内角速度模长最小样本的中位数 <b>较小的那个方向</b>当脚掌俯仰正向（这就是 V4 换掉「只用三阶矩定符号」的地方；
+        两个方向都没有支撑样本、或分数完全相同时才退回三阶矩）。俯仰角速度代理 p 定下来后，对 p 的正值做两类间方差最大化定摆动门限 T，
+        相邻锚点之间在 30%–45% 处取加速度模长最小的点为中间支撑，往前找第一次正→非正得 <b>IC</b>（首次触地候选），
+        往后找最后一次非正→正得 <b>TO</b>（离地候选），各取该区间内 p 的谷值。</p>
+      <p>除逐段内部搜索外还有三处补充，事件表「来源」列会写清楚：<b>首端 TO</b> / <b>末端 IC</b>（记录最外侧有效片段，
+        借最近一次摆动当参考周期）、<b>弱起步</b>（首强摆动之前若还有一次同时超过前缀 p 与 |ω| 局部 Otsu 门限的弱摆动，
+        能配出完整一对才补，最多补一对）。这三种是独立候选、需视频确认；图上画成淡线 + 顶端空心点，
+        内部分段是实线 + 色块。一次成功分段成对输出，所以 IC 与 TO 数量相等不等于每一步都检到了。</p>
+      <p>边界：轴选择、门限、方向、锚点抑制都吃整段历史，<b>非因果</b>，不给实时时延保证；传感器须固定在脚背，
+        安装旋转或动作类型改变会让「方差最大轴 = 脚掌俯仰」这条假设失效。时间映射缺失、包序号倒退或跳号、时间倒退都会切开可分析片段，
+        被切开的周期连同拒绝原因一起进「分段 CSV」。维特 TXT 没有包序号、时间轴又是上位机写盘批次重建的，
+        IC / TO 只作参考候选，别和 parquet 的结果同等看待。真实落步时刻仍需视频或独立参考标注核对。</p>
+    </details>
+    <details class="note">
+      <summary>数据来源与 raw / physical 的关系</summary>
+      <p>同一帧里 IMU 有两份并列的数：<code>imu_physical_values</code> 是采集端换算后的物理量（前 3 个加速度 g、后 3 个角速度 °/s，
+        <code>axis_order_code = ax_ay_az_gx_gy_gz</code>，<code>accel_unit_code = g</code>、<code>gyro_unit_code = deg_per_s</code>）；
+        <code>imu_raw_values</code> 是同一帧的硬件整数计数（LSB，无量纲）。两者不是简单乘一个系数：加速度的刻度随量程变
+        （本批数据存在 1/4096 与 1/2048 g/LSB 两种），角速度恒 0.07 °/s 每 LSB；而且 raw 的通道序与物理轴相差一次置换与变号，
+        实测 X<sub>phys</sub> = k·r2、Y<sub>phys</sub> = −k·r1、Z<sub>phys</sub> = k·r3（角速度同理：X = 0.07·r5、Y = −0.07·r4、Z = 0.07·r6）。
+        所以 raw 模式按原始通道序标 <b>r1..r6</b>（加速度 r1–r3、角速度 r4–r6），不冒充 X/Y/Z——同一时刻两模式的曲线形状因此可能看起来是「转过的」。
+        <code>imu_raw_bits</code> 在本批文件里整列为空；<code>imu_unit_status</code> 除 confirmed 外还有 partial，
+        这类帧的加速度三轴在 physical 里是空值（页面按缺值断笔）、raw 里仍有数，切到 raw 能连上看。</p>
+      <p><b>温度</b>：同一帧还带一个设备温度，新版导出叫 <code>gyro_temperature_celsius</code>（0.01 ℃ 量化，
+        网页 1.x 导出用的是同一个量、列名 <code>temperature_c</code>，两个名字都认），维特 TXT 取「温度(°C)」列。
+        有就画在六轴下面那条窄带里，纵轴按全段 min–max 定 —— 温度都是正值，按 ±最大值居中会把它压成一条直线，
+        看不出冷却或自热。没有这一列的导出（62 列的老文件）不画这条带，顶栏也不出温度 chip。</p>
+    </details>
+    <div class="ovbar" id="imuOvBar" hidden>
+      <div class="cap">
+        <span>全程总览　<b>拖窗口</b>移段 · <b>拖两端</b>改宽 · <b>点空白</b>跳转 · <b>滚轮</b>缩放 · <b>双击</b>复位</span>
+        <span class="num" id="imuOvLbl"></span>
+      </div>
+      <canvas id="imuOv"></canvas>
+    </div>
+    <div id="imuPanels"></div>
+  </div>
+
+  <div id="viewAxis" hidden>
+    <div class="ptools" id="axisTools">
+      <div class="ctrl"><span>区间</span>
+        <button data-range="all" class="on" title="推断整段数据">全段</button>
+        <button data-range="win" title="只推断当前时间窗内的数据">当前时间窗</button>
+      </div>
+      <span class="sep"></span>
+      <div class="ctrl"><span>静止判据</span>
+        <button data-sens="auto" class="on" title="加速度模长滑窗标准差 < 0.04 g 且模长偏离 1 g < 0.08">自动</button>
+        <button data-sens="loose" title="< 0.09 g 且偏离 < 0.16，静止段判定更松">宽松</button>
+        <button data-sens="strict" title="< 0.02 g 且偏离 < 0.05，只认很稳的静止段">严格</button>
+      </div>
+      <span class="sep"></span>
+      <div class="ctrl"><button id="axisRe">重算</button></div>
+      <span class="sep"></span>
+      <div class="ctrl"><span>参考数据</span>
+        <button id="axisRef" title="再选一份同一次录制的 IMU 文件（另一台设备 / 另一只脚）：坐标系不同，轴向结论不能搬，但落地冲击时刻与「贴地时加速度完全静止」能搬 —— 用它对齐时间戳，再按动作分段逐段推断">选择文件</button>
+        <input type="file" id="axisRefFile" accept=".zip,.parquet,.txt,.csv" hidden>
+        <span class="chip" id="axisRefName" hidden></span>
+      </div>
+      <span class="chip" id="axisNote"></span>
+    </div>
+    <details class="note">
+      <summary>推断方法与它的边界</summary>
+      <p>三步都只用这份 IMU 自己的数据，不查厂商坐标先验：<b>① 垂直轴</b>——找加速度模长稳定的静止段（站立 / 深蹲时脚不转），把静止时的加速度方向当作重力反方向；
+        <b>② 内外侧轴</b>——扣掉零偏后，在重力系里对行走段角速度做 PCA，第一主成分就是内外侧轴（行走时主要绕它转），符号不定
+        （零偏取「角速度稳」的静止帧逐轴中位数：行走支撑相脚不移动，但踝在滚动，陀螺有 10–30 °/s 的常值电平，整体取中位数会把支撑相电平当成零偏）；
+        <b>③ 前向符号</b>——三项独立判据投票：相邻支撑中点之间的双积分位移（步幅）、支撑末到支撑初的双积分位移（摆动）、以及「若 z 轴是脚背外法线则其水平投影朝脚尖」的几何关系。
+        三项都同向才判「高」。<br>
+        边界：<b>没有行走段就没有前向符号</b>（纯深蹲数据只能给出垂直轴与内外侧轴）；双积分要求采样率够高、零偏够小，采样率低或零偏大时位移会被低估，前向只能到「中」；
+        几何判据要求 z 轴与重力夹角在 15°–75° 之间，z 轴几乎水平或几乎垂直时该项自动失效；倒走会让双积分两项整体反向。<br>
+        本页只认 <code>imu_physical_values</code>：<code>imu_raw_values</code> 的通道序与物理轴相差一次置换与变号，不是解剖轴，推出来的「x/y/z」没有意义。<br>
+        左右脚并排显示，各一张<b>三维轴投影</b>：灰=解剖轴（前 / 左 / 上），彩=传感器 x / y / z。拖动旋转视角（两脚共用同一视角，便于对照）、滚轮缩放、双击复位；PNG 导出的是当前视角。三项判据各自的偏角写在下方「判据明细」里。<br>
+        <b>参考数据</b>（工具栏右侧）：同一次录制里另一台设备、或另一只脚的文件可以一起拖进来（一次拖两个文件，第二个即参考），也可以点「选择文件」单独选。
+        两份数据贴的部位不同、坐标系不同，<b>轴向结论不能互相搬</b>；能搬的只有两件事 —— <b>落地冲击的时刻</b>和<b>贴地时加速度完全静止</b>。
+        前者是瞬时事件，两边撞在同一时刻几乎不可能，所以用各自最强的那次冲击配对来对齐时间戳（录一段标定动作时<b>故意跳一次</b>最省事）；
+        后者用来切出动作段，再逐段单独推断。这一步是必要的：全段一次做 PCA，只要掺进一段转身，绕垂直轴的能量就会压倒前后摆动，内外侧轴直接定不出来 —— 分段之后每段各自干净。
+        表格里点任意一行，就把那一段的结果换成上面的详情；点「✕」清除参考数据。</p>
+    </details>
+    <div id="axisPanels"></div>
+  </div>
+
+  <div id="viewActivity" hidden>
+    <section class="activity-card">
+      <div class="ptools">
+        <label>状态模型 <select id="activityModel"></select></label>
+        <label>IC/TO 算法 <select id="activityIctoVersion" aria-describedby="activityIctoHint"><option value="legacy" selected>原版（默认）</option><option value="running">跑步实验版</option></select></label>
+        <button id="activityRun">分析整段</button><button id="activityCancel" hidden>取消</button><button id="activityCsv" disabled>导出分段 CSV</button><button id="activityImu" disabled>在 IMU 页核对当前段</button>
+      </div>
+      <p id="activityStatus" role="status" aria-live="polite"></p>
+      <p id="activityIctoHint" class="hint" aria-live="polite"></p>
+      <p id="activitySummary"></p>
+      <section id="activityGaitOverview" class="gait-overview" aria-labelledby="gaitOverviewTitle" hidden>
+        <h2 id="gaitOverviewTitle">整次步态概览 <small>步行与跑步分开汇总，使用同一套指标</small></h2>
+        <div class="activity-table gait-table gait-static"><table>
+          <thead><tr><th scope="col">状态</th><th scope="col">识别时长（s）</th><th scope="col">有效计步（s / %）</th><th scope="col">有效步数</th><th scope="col">平均步频（步/分）</th><th scope="col">接地均值 · 左 / 右（ms）</th></tr></thead>
+          <tbody id="gaitOverviewRows"></tbody>
+        </table></div>
+        <p id="gaitOverviewHint" class="hint"></p>
+      </section>
+      <p class="activity-warning">结果用于辅助查看，不是真值；模型概率未经校准。Moticon 多域模型为试用版，尚未完成 WT 跨人和切换边界验证。输入必须是同一次录制的双脚 IMU 物理量和共同会话时间轴。BLE 通知内帧时间为估计值，不代表硬件同步。</p>
+      <div class="activity-legend"><span style="color:#16786f">■ 步行</span><span style="color:#ba5a24">■ 跑步</span><span style="color:#7961a5" title="不等同于静止">■ 其他</span><span id="activityStillLegend" style="color:#356ba3" hidden>■ 静止（IMU 判据）</span><span style="color:#8893a4">■ 无法判断</span></div>
+      <h2>状态时间轴 <small>点击色块定位该段，共用上方时间窗</small></h2>
+      <canvas id="activityTimeline" aria-label="离线活动状态时间轴"></canvas>
+      <details id="activityProbability" class="note"><summary>原始模型概率（不含静止判据或复核）</summary>
+        <canvas id="activityProb" aria-label="模型各状态的逐时概率"></canvas>
+      </details>
+      <details class="note"><summary>模型与数据质量口径</summary><p>整段双脚 IMU 重采样至 50 Hz，分段应用 22.5 Hz 单向低通。缺脚、无效数据、超过 80 ms 的帧间隔或序号回退会切开有效区间，不跨缺口推断。段表标出上下文不足的边缘。<br>
+        <b>Moticon 多域时序模型</b>：基于 HuGaDB 和三套 Moticon 数据训练的双向 TCN，每 0.1 秒给出静止、步行、跑步、其他四类概率，由边界头辅助整段解码。静止是模型输出，不是阈值补判；0.1 秒是输出步长，不是边界精度。<br>
+        <b>B1Q（默认）</b>：给出步行、跑步和其他三类，不单列静止。<br>
+        <b>GaitWindow 优化版</b>：以 2.4 秒窗口分类，另用双脚低运动判据标静止，并局部复核低证据短段；判据或复核的段不报平均模型概率。<br>
+        分段不使用压力或 IC/TO 结果。全部计算在本地浏览器后台完成，不上传、不连接工作站。<br>
+        这份整段结果也是 IMU 页「状态底色」的唯一来源：在 IMU 页点「分析整段」跑的是同一次计算，不会重复跑第二遍；底色可在 IMU 页关掉，只看原始波形。</p></details>
+      <h2>动作段明细 <small>点选一段，查看下方指标并定位时间窗</small></h2>
+      <div class="activity-table gait-table gait-segments"><table><thead><tr><th>段</th><th>开始 s</th><th>结束 s</th><th>时长 s</th><th>状态</th><th>平均模型概率</th><th>平均步频（步/分）</th><th>有效步数</th><th>质量提示</th></tr></thead><tbody id="activityRows"></tbody></table></div>
+      <div class="ptools"><button id="activityPrev">上一页</button><span id="activityPage"></span><button id="activityNext">下一页</button></div>
+      <section id="gaitDetail" class="gait-detail" aria-labelledby="gaitTitle" hidden>
+        <h2 id="gaitTitle"></h2>
+        <p id="gaitNote" class="activity-warning"></p>
+        <div id="gaitCompare" class="gait-kpis" aria-label="本段步态统计"></div>
+        <div id="gaitMetrics" class="activity-table gait-table gait-static" hidden><table>
+          <thead><tr><th scope="col">本段指标</th><th scope="col">左脚</th><th scope="col">右脚</th><th scope="col">右 − 左</th></tr></thead><tbody id="gaitMetricRows"></tbody>
+        </table></div>
+        <p id="gaitSamples" class="hint" hidden>脚别列下方为「有效样本 / 该脚有效步数」。不同指标的样本可能不是同一批步。</p>
+        <details id="gaitCoverage" class="note" hidden>
+          <summary>双脚可计步区间</summary>
+          <p id="gaitCountable"></p>
+        </details>
+        <details id="gaitSteps" class="note" hidden>
+          <summary>逐步明细与波形定位</summary>
+          <div class="ptools"><label>按脚别 <select id="gaitStepSide"><option value="both">双脚</option><option value="left">左脚</option><option value="right">右脚</option></select></label><button id="gaitStepPrev">上一页</button><span id="gaitStepPage" aria-live="polite"></span><button id="gaitStepNext">下一页</button></div>
+          <div class="activity-table gait-table gait-static gait-step-table"><table>
+            <thead><tr class="gait-groups"><th colspan="2" scope="colgroup">步次与脚别</th><th colspan="3" scope="colgroup">事件与接地</th><th colspan="2" scope="colgroup">足部俯仰</th><th colspan="2" scope="colgroup">垂向冲击</th></tr>
+            <tr><th scope="col">步次</th><th scope="col">脚别</th><th scope="col">触地 IC（ms）</th><th scope="col">离地 TO（ms）</th><th scope="col">接地（ms）</th><th scope="col">触地俯仰（°）</th><th scope="col">离地俯仰（°）</th><th scope="col">垂向冲击峰值（g）</th><th scope="col">峰值时刻（ms）</th></tr></thead><tbody id="gaitStepRows"></tbody></table></div>
+        </details>
+        <details id="gaitPeriods" class="note" hidden>
+          <summary>跑步候选事件 · 波形核对</summary>
+          <div class="ptools"><label>侧别 <select id="gaitSide"></select></label><button id="gaitPrev">上一页</button><span id="gaitPage" aria-live="polite"></span><button id="gaitNext">下一页</button></div>
+          <div class="activity-table gait-static"><table><thead><tr><th>IC s</th><th>TO s</th><th>下一 IC s</th><th>事件说明</th><th>定位</th></tr></thead><tbody id="gaitPeriodRows"></tbody></table></div>
+        </details>
+      </section>
+      <details class="note"><summary>步态指标的统计口径</summary><p id="gaitRules"></p></details>
+    </section>
+  </div>
+
+  <div id="viewAction" hidden>
+    <section class="activity-card">
+      <div class="ptools">
+        <label>设备 <select id="actionSide"></select></label>
+        <button id="actionRun">重新分析</button>
+        <button id="actionCsv" disabled>导出 CSV</button>
+        <span class="hint">分析范围 = 上方时间窗；换设备或改时间窗会重算</span>
+      </div>
+      <p id="actionStatus" role="status" aria-live="polite"></p>
+      <p id="actionSummary"></p>
+      <h2>竖直速度 <small>底色是一次动作，深色前半为下蹲；圆点是竖直到最低点的转向时刻</small></h2>
+      <canvas id="actionChart" aria-label="竖直速度曲线与每次动作分段"></canvas>
+      <h2>每次动作</h2>
+      <div class="activity-table"><table>
+        <thead><tr><th>序</th><th>起点 s</th><th>下蹲 s</th><th>起身 s</th><th>深度 m</th><th>下蹲峰速</th><th>起身峰速</th><th>起身均速</th><th>反转 ms</th><th>底部加速度</th><th>一致性</th></tr></thead>
+        <tbody id="actionRows"></tbody>
+      </table></div>
+      <details class="note"><summary>方法与边界</summary><p>
+        只用<b>六轴</b>：陀螺积分跟踪姿态，加速度只在合量接近 1 g 时用来纠正倾角，相减后得到竖直加速度。
+        <b>分段</b>取竖直速度过零处为转向点（顶端、底端），每段在这两点强制速度为零后重新积分，深度即该段位移 —— 除了「转向点竖直速度为零」不再有任何外部参考。<br>
+        <b>可信度分三档</b>：时长与节奏最稳；峰速约 ±0.15 m/s；深度受姿态残差影响，下蹲与起身是两次独立估计，「一致性」列就是两者相对差，超过 35% 的行会压暗，此时不要按精确位移使用。
+        <b>底部加速度</b>不经过积分，是这一页最稳的量，但它是传感器测到的加速度，不是关节冲击力或地面反作用力。<br>
+        采样率约 50 Hz 时只能看缓变的蹲起过程，抓不住很窄的冲击峰；时间轴是上位机写盘重建的时刻，不是硬件采样时刻。
+        本页面向<b>离散动作</b>（深蹲、硬拉、起立）；连续步行会被切成大量「动作」，不要按单次动作解读。设备装在腕上时测的是手腕运动，叉腰或握杠时才可以近似当作身体升降，徒手自由摆臂不成立。
+      </p></details>
+    </section>
+  </div>
+
+  <footer>数值为 parquet 里 <code>pressure_values</code> 的原始读数，即 12 bit ADC 计数（0–4095），未换算成力或称重、未做基线扣除、未平滑。灰色「全 0」表示该通道全段没有任何非零读数。IMU 页可在两份并列数据间切换：<code>imu_physical_values</code>（采集端已换算，加速度 3 轴 g、角速度 3 轴 °/s）与 <code>imu_raw_values</code>（硬件整数计数 LSB，通道序 r1–r6，与物理轴相差一次置换与变号），与压力同帧同序，均未做任何滤波。IMU 页可切「连线 / 点」两种画法；「丢帧标记」把相邻两帧时间差超过阈值的区段铺淡红底、栏顶加一道红杠，阈值默认 40 ms（50 Hz 下一个标称周期 20 ms，超过它就是至少丢了一帧）。维特 TXT 也能用这个标记，阈值默认 100 ms —— 它的时间轴是按写盘批次重建的，逐帧间隔是重建产物，填 40 会把写盘节奏的抖动标满屏；这类文件的真实缺口看「丢包 / 采样率」页。波形图与 IMU 共用同一个时间窗：在任一页框选 / 缩放 / 平移，另一页跟着走；轴向推断页选「当前时间窗」时只吃窗口内的帧。时间窗条显示在波形、IMU 与轴向推断页，起止秒数可直接输入（只填一头时另一头保持当前跨度，回车生效）；波形页的缩略条画全段负荷（每 0.5 s 一个桶，取该桶内「56 通道读数之和」的峰值，按全段最大值开方定高），拖两端改跨度、拖中间平移、空白处拖动框选、单击跳到该时刻、滚轮以指针为中心缩放。帧数超过 3 万的录制只把当前窗口读进内存，缩略条与零值率等全段统计由后台顺序扫描补齐，扫描完成前缩略条右侧压一层淡底并标「统计中」，越界部分不要当成真的没有数据。各页 PNG 导出的是当前视图，CSV 只导出当前时间窗内的帧。文件带温度列（<code>gyro_temperature_celsius</code> / <code>temperature_c</code> / 维特「温度(°C)」）时，IMU 页在六轴下面多一条温度带，纵轴按全段 min–max 定，悬停读数与 IMU CSV 导出也一并带上温度；没有温度列就不画。<br>维特 TXT（WT901 / JY901 上位机导出）只有 IMU：压力三页不可用，IMU、丢包与轴向推断三页照常。纯 IMU 的 parquet（<code>pressure_status = not_applicable</code>，每帧 <code>pressure_values</code> 是空列表）同理：压力三页禁用、默认落在 IMU 页，时间戳仍是设备硬件时刻，丢帧阈值照用 40 ms；少数没映射到会话时间轴的帧会被丢掉并在顶栏标出数量。这类文件按<code>设备名称</code>分列，侧别取 MAC 尾两段；时间戳只到毫秒、同一毫秒里常压着多帧，所以时间轴是把同一时间戳的帧均匀摊开、再按平均间隔定采样率。这类文件的时间戳是上位机写盘时刻而不是采样时刻（实测 40 帧挤在 16 ms 内写完），逐帧间隔不能当丢包，丢包页因此改按累计帧数估：局部帧率取 ±3 s 窗的回归斜率，整段缺口按名义 50 Hz 折算，分辨率约 0.2%。</footer>
+</main>
+
+<div class="tip" id="tip"></div>
+<div class="busy" id="busy" hidden>解析中…</div>
+
+<script src="dist/app.js?v=3.13.0"></script>
+
+
+</body>
+</html>
