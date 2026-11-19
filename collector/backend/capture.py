@@ -392,7 +392,7 @@ class Capture:
             if d['has_pressure']:
                 mapping = slot_map(d['foot'],d['topology'])
                 frame['pressure'] = [frame['pressure_sparse'][slot] for slot in mapping]
-            self.recorder.put('frame',dict(schema_version='capture_frames.v2',session_id=self.recorder.session_id,
+            self.recorder.put('frame',dict(schema_version='capture_frames.v3',session_id=self.recorder.session_id,
                 device_id=key,profile=d['profile'],device_kind=d['kind'],foot=d['foot'],placement=d['placement'],placement_label=d['placement_label'],
                 connection=d['connection'],source=d['source'],
                 event_id=e['id'],frame_index=index,receipt_monotonic_ms=receipt,receipt_epoch_ms=epoch,

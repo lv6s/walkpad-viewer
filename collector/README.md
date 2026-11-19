@@ -27,12 +27,15 @@ python launch_workbench.py --legacy # 旧版维特多设备页面
 
 ## 零偏
 
-按设备记账，鞋垫与独立 IMU 都走同一条链路（静止检测 → 陀螺零偏估计 → 逐帧扣除），四种操作：自动跟踪、手动锁定、静止校准、重置。维特设备不参与。速度估计在自研设备上引用这份零偏做误差状态约束。
+按设备记账，鞋垫与独立 IMU 都走同一条链路（静止检测 → 陀螺零偏估计 → 逐帧扣除），四种操作：自动跟踪、手动锁定、静止校准、重置。维特设备不参与。速度估计在自研设备上引用这份零偏做误差状态约束。逐帧偏置与就绪状态落盘，导出时写成 `imuCalibration` 的补偿列，原始角速度不被改写。
 
 ## 采集与导出
 
-- 落盘：`records/<session>/frames.parquet`，`schema_version=capture_frames.v2`，含原始帧十六进制、六轴原值与物理量、设备日历、`bias_used`、`device_kind`。
-- 导出：列名与 app 的 `standard_measurement_frames` 同构，末尾多 5 个自定义列（`placement_code`、`gyro_temperature_celsius`、`device_date`、`device_time`、`dropped_frames_before`），在 parquet 的 kvMetadata 里登记。
+- 落盘：`records/<session>/frames_*.parquet`，`schema_version=capture_frames.v3`，含原始帧十六进制、六轴原值与物理量、设备日历、`device_kind`，以及逐帧零偏四列（`imu_bias_dps`、`imu_bias_ready`、`imu_bias_revision`、`imu_bias_gate`）。
+- 标准导出（`format=standard`）：列名与 app 的 `standard_measurement_frames` 同构，末尾多 5 个自定义列（`placement_code`、`gyro_temperature_celsius`、`device_date`、`device_time`、`dropped_frames_before`），在 parquet 的 kvMetadata 里登记。
+- 测量包导出（`format=package`）：与 labpad 的 `lab_measurement_package.v2.3` 同构的 zip。成员为 `manifest.json`（`physicalSchemas` 写完整列定义）、`frames/<设备目录>/frame-00001.parquet`、`timeline/footer.parquet`（sections `periods`/`segments`/`eventOrder`/`mappings`/`videos`）与 `设备目录对照.txt`；设备目录名取 `<deviceFamily>_<蓝牙名>_<MAC首2位>-<MAC末4位>`，帧表 26 列，ZSTD 压缩、行组 8192。鞋垫写 `frameType=insole` 与 56 通道压力，独立 IMU 写 `inertial` 且压力三项为 null。
+- 零偏列：该帧有扣偏结果时写 `imuCalibration.status='ready'`、`gyroBiasDps`、`angularVelocityCompensatedDps`（＝原值 − 偏置，与 `angularVelocityDps` 同属 (y,−x,z) 输出坐标）与 `biasRevision`；未就绪写 `uncalibrated`、`biasRevision=0`、补偿与偏置列 null。`angularVelocityDps` 始终是原始换算值，不被覆盖。
+- 与 app 的两处差异：本工作台没有手机—设备对时，`sourceZeroUs` 取该设备首帧设备日历、`offsetBasis=legacy_zero_fallback`；不保存静置原件，故 `calibrationOriginals=[]`、`initializationId` 写成 `<sourceId>-bias-<revision>`，包内 `设备目录对照.txt` 有同样说明。
 - 独立 IMU 导出 `pressure_status='absent'`、压力数组留空，不写 70 个 0 冒充实测零压。
 - CSV 转 parquet：`python csv2parquet.py <in.csv> [out.parquet]`。
 

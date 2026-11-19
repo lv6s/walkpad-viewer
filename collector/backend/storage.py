@@ -172,7 +172,7 @@ class Recorder:
             return
         target = self.current/('frames_%06d.parquet' % self.chunks)
         temp = target.with_suffix('.pending')
-        schema = FRAME_SCHEMA.with_metadata({b'walkpad.schema':b'capture_frames.v2',b'walkpad.time_sync':b'not_hardware_synchronized'})
+        schema = FRAME_SCHEMA.with_metadata({b'walkpad.schema':b'capture_frames.v3',b'walkpad.time_sync':b'not_hardware_synchronized'})
         table = pa.Table.from_pylist(rows,schema=schema)
         pq.write_table(table,temp,compression='zstd')
         with temp.open('r+b') as f:
