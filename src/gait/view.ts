@@ -77,6 +77,10 @@ function renderSteps() {
   const list = (report?.steps || []).filter(s => side === 'both' || s.side === side);
   stepPage = pagination('gaitStep', stepPage, list.length, '步');
   const body = $('gaitStepRows'); body.replaceChildren();
+  const showDevice = report?.steps.some(s => s.deviceAngles !== undefined) ?? false;
+  details('gaitSteps').querySelectorAll<HTMLElement>('[data-gait-device]').forEach(el => { el.hidden = !showDevice; });
+  const formatDevice = (a: {pitch: number; sideTilt: number} | null | undefined) =>
+    a ? `${gaitFormat(a.pitch, 1)} / ${gaitFormat(a.sideTilt, 1)}` : '—';
   for (const s of list.slice(stepPage * PAGE_SIZE, (stepPage + 1) * PAGE_SIZE)) {
     const evt = (name: string, ms: number | null) => ms === null ? '—' : button(String(ms),
       `定位第 ${s.step_index} 步${SIDE_CN[s.side]}${name} ${ms} 毫秒`, () => locate({side: s.side, ic: s.ic_ms / 1000,
@@ -84,7 +88,8 @@ function renderSteps() {
         at: ms / 1000, note: `${SEG_CN[report.cls]}第 ${s.step_index} 步 · ${name} ${ms} ms${s.to_ms === null ? ' · 无可用 TO' : ''}`}));
     row(body, [String(s.step_index), text('span', SIDE_CN[s.side], `gait-foot ${s.side}`), evt('触地 IC', s.ic_ms), evt('离地 TO', s.to_ms),
       s.to_ms === null ? '—' : String(s.to_ms - s.ic_ms), measured(s.ic_pitch_deg, 1, s.icIssue), measured(s.to_pitch_deg, 1, s.toIssue),
-      measured(s.impact_peak_g, 2, s.impactIssue), evt('垂向冲击峰值', s.impact_peak_ms)]);
+      measured(s.impact_peak_g, 2, s.impactIssue), evt('垂向冲击峰值', s.impact_peak_ms),
+      ...(showDevice ? [formatDevice(s.deviceAngles?.ic), formatDevice(s.deviceAngles?.to)] : [])]);
   }
 }
 export function initGaitDetail(onLocate: typeof locate) {

@@ -45,7 +45,7 @@ self.onmessage = async ({data: {contract, inputs, duration}}) => {
         const side = i === 0 ? 'left' : 'right';
         try {
           const inp = gaitIctoInput(s);
-          return {side, t0: 0, inp, accAtRail: s.accAtRail, rec: ictoDetectRows(inp, side, 'activity')};
+          return {side, t0: 0, inp, accAtRail: s.accAtRail, deviceAngles: s.deviceAngles, rec: ictoDetectRows(inp, side, 'activity')};
         } catch { failed.push(side); return {side, t0: 0, inp: null, rec: null}; }
       });
       try { report = gaitReport(segments, sides); } catch { reportError = true; }

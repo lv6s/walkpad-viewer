@@ -135,6 +135,24 @@ assert.equal(paired.countableMs, 2090); assert.equal(paired.steps, 4); assert.eq
 assert.equal(metricMean(paired, 'right', 'contact') - metricMean(paired, 'left', 'contact'), 10);
 assert.equal(paired.durationMs, 3990);
 assert.equal(example[2].steps[0].toIssue, 'no_to'); assert.equal(example[2].steps[1].toIssue, 'to_outside');
+const angleFeet = labFeet.map((s, i) => {
+  const pitch = new Float64Array(n).fill(NaN), sideTilt = new Float64Array(n).fill(NaN);
+  for (const e of s.rec.events) {
+    pitch[e.rowIdx] = e.rowIdx + 100 * i;
+    sideTilt[e.rowIdx] = -pitch[e.rowIdx];
+  }
+  pitch[51] = 0; sideTilt[51] = NaN;
+  return {...s, deviceAngles: {pitch, sideTilt}};
+});
+const anglesReport = gaitReport([seg(1, 2.2), seg(2.2, 3, 1), seg(3, 3.99), seg(4, 5)], angleFeet);
+assert.deepEqual(anglesReport[0].steps.map(s => s.deviceAngles), [
+  {ic: {pitch: 0, sideTilt: NaN}, to: {pitch: 82, sideTilt: -82}},
+  {ic: {pitch: 178, sideTilt: -178}, to: {pitch: 210, sideTilt: -210}}
+]);
+assert.deepEqual(anglesReport[2].steps.map(s => s.deviceAngles?.to), [null, null]);
+assert.ok(example[0].steps.every(s => s.deviceAngles === undefined));
+assert.deepEqual(reportSummary(anglesReport), reportSummary(example));
+console.log('PASS device angles use native same-foot IC/TO rows, preserve missing values and leave metrics unchanged');
 assert.ok(Number.isNaN(reportSummary([example[3]]).cadence));
 assert.ok(Number.isNaN(reportSummary(gaitReport([seg(1, 2.2)], [labFeet[0]])).steps));
 const center = gaitReport([seg(1, 1.56), seg(1.56, 2.2)], labFeet);

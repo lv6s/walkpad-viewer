@@ -97,9 +97,12 @@ async function run() {
       renderActivity();
     };
     // Transfer copies only: the waveform's original typed arrays remain usable.
-    const copies = inputs.map(s => ({t: s.t.slice(), seq: s.seq.slice(), ok: s.ok.slice(), accAtRail: s.accAtRail?.slice(), axes: s.axes.map(a => a.slice())}));
+    const copies = inputs.map(s => ({t: s.t.slice(), seq: s.seq.slice(), ok: s.ok.slice(), accAtRail: s.accAtRail?.slice(),
+      deviceAngles: s.deviceAngles && {pitch: s.deviceAngles.pitch.slice(), sideTilt: s.deviceAngles.sideTilt.slice()},
+      axes: s.axes.map(a => a.slice())}));
     worker.postMessage({contract, inputs: copies, duration}, copies.flatMap(s => [s.t.buffer, s.seq.buffer, s.ok.buffer,
-      ...(s.accAtRail ? [s.accAtRail.buffer] : []), ...s.axes.map(a => a.buffer)]));
+      ...(s.accAtRail ? [s.accAtRail.buffer] : []), ...(s.deviceAngles ? [s.deviceAngles.pitch.buffer, s.deviceAngles.sideTilt.buffer] : []),
+      ...s.axes.map(a => a.buffer)]));
   } catch (e) { if (!alive()) return; running = false; status = '分析失败：' + (e?.message || e); finish(); renderActivity(); }
 }
 function choose(i) {

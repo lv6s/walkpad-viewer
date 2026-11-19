@@ -178,8 +178,9 @@ try {
     assert.match((await page.locator('#gaitCountable').textContent()).trim(), /^可计步区间/);
     await page.locator('#gaitSteps summary').click();
     assert.ok(await page.locator('#gaitSteps').evaluate(el => el.open));
-    const stepHeads = await page.locator('#gaitSteps thead tr:last-child th').allTextContents();
+    const stepHeads = await page.locator('#gaitSteps thead tr:last-child th:visible').allTextContents();
     assert.equal(stepHeads.length, 9);
+    assert.equal(await page.locator('#gaitSteps [data-gait-device]:visible').count(), 0);
     assert.match(stepHeads[0], /序号|步次/);
     for (const token of ['脚', 'IC', 'TO', '接地', '触地俯仰', '离地俯仰', '垂向冲击', '峰值时刻']) assert.ok(stepHeads.join('|').includes(token), `逐步明细缺少「${token}」列：${stepHeads}`);
     assert.doesNotMatch(stepHeads.join('|'), /COP/);

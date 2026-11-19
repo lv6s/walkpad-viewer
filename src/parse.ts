@@ -269,6 +269,7 @@ function expandSides(groups) {
       if (!nBad) ictoIn = inp;
     }
     const activityIn = {t: Float64Array.from(spreadNotified(g.eff), (v: number) => (v - t0) / 1e6),
+      deviceAngles: deviceAngleArrays(g.deviceAngles),
       seq: Float64Array.from(g.ns.map((v, i) => Number.isFinite(v) ? v : g.fno[i])),
       ok: Uint8Array.from(g.eff, (v, i) => Number.isFinite(v) && (!g.st[i] || g.st[i] === 'mapped') && g.ist[i] === 'confirmed' ? 1 : 0),
       axes: Array.from({length: 6}, (_, j) => Float32Array.from(g.iph, ph => numOrNaN(ph?.[j])))};
@@ -312,8 +313,19 @@ function rebaseCommon(sides) {
 // 帧表换成 camelCase、IMU 拆成 struct、侧别只写在 manifest 里，
 // 所以先按 sourceId 找到各自的帧文件，把新列映射成 expandSides 认的那套字段再走同一条展开。
 // 56 格布局与旧包同源（d56-14x5-56-side-mirrored-candidate-v3），core.js 的 GRID 直接可用。
+const DEVICE_ANGLE_COLS = ['pitchDeg', 'sideTiltDeg'];
 const PKG_COLS = ['effectiveElapsedUs', 'timeUs', 'validity', 'frameType', 'pressureAdc', 'accelerationG',
-  'angularVelocityDps', 'accelerationRaw', 'angularVelocityRaw', 'deviceSequence', 'temperatureCelsius'];
+  'angularVelocityDps', 'accelerationRaw', 'angularVelocityRaw', 'deviceSequence', 'temperatureCelsius', ...DEVICE_ANGLE_COLS];
+const hasDeviceAngles = files => files.some(f => DEVICE_ANGLE_COLS.some(c => f.cols.includes(c)));
+const collectAngles = files => hasDeviceAngles(files) ? {pitch: [], sideTilt: []} : undefined;
+function appendDeviceAngles(angles, r) {
+  if (!angles) return;
+  angles.pitch.push(numOrNaN(r.pitchDeg));
+  angles.sideTilt.push(numOrNaN(r.sideTiltDeg));
+}
+function deviceAngleArrays(angles) {
+  return angles && {pitch: Float64Array.from(angles.pitch), sideTilt: Float64Array.from(angles.sideTilt)};
+}
 const IMU_COLS = ['accelerationG', 'angularVelocityDps', 'accelerationRaw', 'angularVelocityRaw'];
 
 // 一次导出里除 inertial / insole 外还夹着 magnetic 与 deviceQuaternion 帧：它们既没有压力也没有六轴，
@@ -407,6 +419,7 @@ function pushPkgRow(g, r, i) {
   g.iph.push(ph);
   g.irw.push(rw);
   g.ist.push(ph ? 'confirmed' : null);
+  appendDeviceAngles(g.deviceAngles, r);
   return true;
 }
 
@@ -517,7 +530,7 @@ const LAZY_PAD = 5;    // 窗口前后各多读的余量 s，平移时不必每�
 
 // 短片段：整段读进对象数组再交给共用展开
 async function readAllRows(job) {
-  const g = {eff: [], obs: [], v: [], iph: [], irw: [], ist: [], fno: [], tmp: [], st: [], ns: [], al: [], sfo: []};
+  const g = {eff: [], obs: [], v: [], iph: [], irw: [], ist: [], fno: [], tmp: [], st: [], ns: [], al: [], sfo: [], deviceAngles: collectAngles(job.files)};
   let rows = 0;
   for (const f of job.files) {
     const part = await ParquetHQ.parquetReadObjects({file: f.ab, compressors: ParquetHQ.compressors, columns: f.cols});
@@ -1092,9 +1105,10 @@ export async function activityInput(s, alive = () => true) {
   if (s.activityIn) return s.activityIn;
   if (!s.lazy) throw new Error('没有可信的物理量与会话时间；不使用重建时间轴或原始计数推断');
   const raw = [], seq = [], ok = [], rails = [], axes = Array.from({length: 6}, () => []);
+  const angles = collectAngles(s.files);
   for (const f of s.files) for (const [r0, r1] of f.rgs) {
     if (!alive()) throw new Error('已取消');
-    const cols = ['effectiveElapsedUs', 'timeUs', 'validity', 'frameType', 'accelerationG', 'angularVelocityDps', 'accelerationRaw', 'deviceSequence'].filter(c => f.cols.includes(c));
+    const cols = ['effectiveElapsedUs', 'timeUs', 'validity', 'frameType', 'accelerationG', 'angularVelocityDps', 'accelerationRaw', 'deviceSequence', ...DEVICE_ANGLE_COLS].filter(c => f.cols.includes(c));
     const rows = await ParquetHQ.parquetReadObjects({file: f.ab, compressors: ParquetHQ.compressors, columns: cols, rowStart: r0, rowEnd: r1});
     for (const r of rows) {
       if (!isSignalType(r.frameType)) continue;
@@ -1105,11 +1119,13 @@ export async function activityInput(s, alive = () => true) {
       const a = r.accelerationRaw;
       rails.push(a && [a.x, a.y, a.z].some(v => Math.abs(numOrNaN(v)) >= 32760) ? 1 : 0);
       for (let j = 0; j < 6; j++) axes[j].push(ph?.[j] ?? NaN);
+      appendDeviceAngles(angles, r);
     }
     await new Promise(r => setTimeout(r, 0));
   }
   const t = Float64Array.from(spreadNotified(raw), v => (v - s.t0) / 1e6);
-  return {t, seq: Float64Array.from(seq), ok: Uint8Array.from(ok), accAtRail: Uint8Array.from(rails), axes: axes.map(a => Float32Array.from(a))};
+  return {t, seq: Float64Array.from(seq), ok: Uint8Array.from(ok), accAtRail: Uint8Array.from(rails),
+    deviceAngles: deviceAngleArrays(angles), axes: axes.map(a => Float32Array.from(a))};
 }
 
 export {ensureWin, gridDims, LAZY_WIN as lazyWin, parse};

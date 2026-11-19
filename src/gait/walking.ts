@@ -1,5 +1,5 @@
 import {groupsOf} from './core.ts';
-import type {ActivitySegment, Candidate, GaitSideInput} from './core';
+import type {ActivitySegment, Candidate, DeviceAngleArrays, GaitSideInput} from './core';
 import {gaitImu} from './walking-imu.ts';
 import type {GaitMeasures} from './walking-imu.ts';
 
@@ -10,6 +10,13 @@ export interface GaitStep extends GaitMeasures {
   side: Side;
   ic_ms: number;
   to_ms: number | null;
+  deviceAngles?: {ic: DeviceAngle | null; to: DeviceAngle | null};
+}
+interface DeviceAngle {pitch: number; sideTilt: number}
+function deviceAngle(angles: DeviceAngleArrays, row: number | null): DeviceAngle | null {
+  if (row === null) return null;
+  const pitch = angles.pitch[row], sideTilt = angles.sideTilt[row];
+  return Number.isFinite(pitch) || Number.isFinite(sideTilt) ? {pitch, sideTilt} : null;
 }
 export interface GaitReportSegment {
   index: number;
@@ -90,7 +97,8 @@ function prepare(s: GaitSideInput, side: Side, segments: ActivitySegment[]) {
 }
 
 export function gaitReport(segments: ActivitySegment[], sides: GaitSideInput[], onlyRuns = false): GaitReportSegment[] {
-  const left = prepare(sides.find(s => s.side === 'left'), 'left', segments), right = prepare(sides.find(s => s.side === 'right'), 'right', segments);
+  const bySide = {left: sides.find(s => s.side === 'left'), right: sides.find(s => s.side === 'right')};
+  const left = prepare(bySide.left, 'left', segments), right = prepare(bySide.right, 'right', segments);
   const imu = {left: left.imu, right: right.imu};
   const coverage = intersect(left.support, right.support);
   const events = [...left.steps, ...right.steps].sort((a, b) => a.ic_ms - b.ic_ms);
@@ -104,10 +112,11 @@ export function gaitReport(segments: ActivitySegment[], sides: GaitSideInput[], 
       countable_intervals.push({start_ms: start, end_ms: end});
       for (let j = firstAfter(events, start, (e, t) => e.ic_ms < t); j < events.length && events[j].ic_ms < end; j++) {
         const {side, ic_ms, icRow, toRow, to_ms} = events[j], usableTo = to_ms !== null && to_ms < end_ms;
-        const measures = imu[side](icRow, toRow, b);
+        const measures = imu[side](icRow, toRow, b), angles = bySide[side]?.deviceAngles;
         steps.push({side, ic_ms, step_index: steps.length + 1, to_ms: usableTo ? to_ms : null,
           ...measures, to_pitch_deg: usableTo ? measures.to_pitch_deg : null,
-          toIssue: to_ms !== null && !usableTo ? 'to_outside' : measures.toIssue});
+          toIssue: to_ms !== null && !usableTo ? 'to_outside' : measures.toIssue,
+          ...(angles && {deviceAngles: {ic: deviceAngle(angles, icRow), to: deviceAngle(angles, usableTo ? toRow : null)}})});
       }
     }
     return {index, cls, durationMs: end_ms - start_ms, countable_intervals, steps};

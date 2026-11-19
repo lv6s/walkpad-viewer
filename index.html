@@ -300,9 +300,10 @@
         <details id="gaitSteps" class="note" hidden>
           <summary>逐步明细与波形定位</summary>
           <div class="ptools"><label>按脚别 <select id="gaitStepSide"><option value="both">双脚</option><option value="left">左脚</option><option value="right">右脚</option></select></label><button id="gaitStepPrev">上一页</button><span id="gaitStepPage" aria-live="polite"></span><button id="gaitStepNext">下一页</button></div>
+          <p class="hint" data-gait-device hidden>设备角为同脚事件帧的导出值，按「俯仰 / 侧倾」显示，单位 °。不插值，也不替代足部俯仰。</p>
           <div class="activity-table gait-table gait-static gait-step-table"><table>
-            <thead><tr class="gait-groups"><th colspan="2" scope="colgroup">步次与脚别</th><th colspan="3" scope="colgroup">事件与接地</th><th colspan="2" scope="colgroup">足部俯仰</th><th colspan="2" scope="colgroup">垂向冲击</th></tr>
-            <tr><th scope="col">步次</th><th scope="col">脚别</th><th scope="col">触地 IC（ms）</th><th scope="col">离地 TO（ms）</th><th scope="col">接地（ms）</th><th scope="col">触地俯仰（°）</th><th scope="col">离地俯仰（°）</th><th scope="col">垂向冲击峰值（g）</th><th scope="col">峰值时刻（ms）</th></tr></thead><tbody id="gaitStepRows"></tbody></table></div>
+            <thead><tr class="gait-groups"><th colspan="2" scope="colgroup">步次与脚别</th><th colspan="3" scope="colgroup">事件与接地</th><th colspan="2" scope="colgroup">足部俯仰</th><th colspan="2" scope="colgroup">垂向冲击</th><th colspan="2" scope="colgroup" data-gait-device hidden>导出设备角 · 俯仰 / 侧倾（°）</th></tr>
+            <tr><th scope="col">步次</th><th scope="col">脚别</th><th scope="col">触地 IC（ms）</th><th scope="col">离地 TO（ms）</th><th scope="col">接地（ms）</th><th scope="col">触地俯仰（°）</th><th scope="col">离地俯仰（°）</th><th scope="col">垂向冲击峰值（g）</th><th scope="col">峰值时刻（ms）</th><th scope="col" data-gait-device hidden>触地设备角（°）</th><th scope="col" data-gait-device hidden>离地设备角（°）</th></tr></thead><tbody id="gaitStepRows"></tbody></table></div>
         </details>
         <details id="gaitPeriods" class="note" hidden>
           <summary>跑步候选事件 · 波形核对</summary>

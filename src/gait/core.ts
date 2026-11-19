@@ -6,7 +6,8 @@ export const GAIT_MIN_SEG = 3;
 const STRIDE_MIN = .25, STRIDE_MAX = 2;
 
 export interface ActivitySegment {a: number; b: number; cls: number; confidence?: number; edge?: boolean; reviewed?: boolean}
-export interface GaitSource {t: Float64Array; seq: Float64Array; ok: Uint8Array; axes: Float32Array[]; accAtRail?: Uint8Array}
+export interface DeviceAngleArrays {pitch: Float64Array; sideTilt: Float64Array}
+export interface GaitSource {t: Float64Array; seq: Float64Array; ok: Uint8Array; axes: Float32Array[]; accAtRail?: Uint8Array; deviceAngles?: DeviceAngleArrays}
 export interface Candidate {
   event: string; cycle: number; detection_path: string; imu_packet_time_s: number; rowIdx?: number;
   uncertain?: boolean; eventNote?: string;
@@ -16,6 +17,7 @@ export interface GaitSideInput {
   t0: number;
   inp: IctoInput | null;
   accAtRail?: Uint8Array;
+  deviceAngles?: DeviceAngleArrays;
   rec: {events: Candidate[]; cycles?: {cycle: number; swing_start_s: number; swing_end_s: number; status?: string}[];
     diagnostics?: {gyro_axis?: string; sign?: number}} | null;
 }
