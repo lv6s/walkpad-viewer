@@ -1,0 +1,112 @@
+{
+  "format": "walkpad-activity-onnx-v1",
+  "created_utc": "2026-11-05T11:27:40.845199+00:00",
+  "source_student_sha256": "d140e7e1199bdfc3b689b72a7bd48e36ad9f4b2840967884ad42fb4152f9551c",
+  "onnx_sha256": "f0839bc90e6e47e3d5cf2650477d22b85b76a5059563cdbd829a1b157534a8e0",
+  "onnx_bytes": 4232585,
+  "export_via": "trace",
+  "opset": 18,
+  "torch": "2.9.1+cu128",
+  "onnx": "1.23.2",
+  "onnxruntime": "1.31.1",
+  "class_map": {
+    "0": "walk",
+    "1": "run",
+    "2": "other"
+  },
+  "input": {
+    "name": "x",
+    "shape": [
+      1,
+      12,
+      100
+    ],
+    "dtype": "float32",
+    "units": {
+      "acc": "g",
+      "gyro": "dps"
+    },
+    "channel_order": [
+      "Lacc_x",
+      "Lacc_y",
+      "Lacc_z",
+      "Lgyro_x",
+      "Lgyro_y",
+      "Lgyro_z",
+      "Racc_x",
+      "Racc_y",
+      "Racc_z",
+      "Rgyro_x",
+      "Rgyro_y",
+      "Rgyro_z"
+    ],
+    "normalization": "inside graph: clip((x-median)/scale, -8, 8)"
+  },
+  "output": {
+    "name": "logits",
+    "shape": [
+      1,
+      3
+    ],
+    "apply": "softmax"
+  },
+  "median": [
+    -0.19805260002613068,
+    0.07149489223957062,
+    0.995750904083252,
+    -1.2880432605743408,
+    3.609544277191162,
+    -1.240710973739624,
+    -0.20955830812454224,
+    0.050898075103759766,
+    0.9898190498352051,
+    -2.0762574672698975,
+    -3.0545663833618164,
+    1.1198359727859497
+  ],
+  "scale": [
+    0.23198653757572174,
+    0.11140578985214233,
+    0.1289295256137848,
+    12.774447441101074,
+    25.135988235473633,
+    6.049978733062744,
+    0.23433001339435577,
+    0.10521087795495987,
+    0.12461495399475098,
+    12.67280101776123,
+    25.558908462524414,
+    6.142683506011963
+  ],
+  "axis_own_to_train": [
+    [
+      0.0,
+      1.0,
+      0.0
+    ],
+    [
+      -1.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "preprocess": {
+    "fs_out": 50.0,
+    "max_gap_s": 0.06,
+    "window_samples": 100,
+    "decision_step_ms": 200,
+    "fill": "forward hold from <= grid time",
+    "filter": "one-sided butterworth order 2, cutoff min(22.5, 0.45*fs_in)",
+    "cutoff_at_50hz": 22.5
+  },
+  "golden": {
+    "file": "act_imu_v1_golden.npz",
+    "n": 12,
+    "max_abs_logit_diff_ort_vs_torch": 2.384185791015625e-06
+  }
+}

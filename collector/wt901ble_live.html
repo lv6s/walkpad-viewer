@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WT901BLE 多设备实时采集</title>
+<!-- 空 favicon：不写死这条浏览器会去要 /favicon.ico，本地服务回 404 会在控制台留错误 -->
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <h1>多设备实时采集<span>WT901BLE · Web Bluetooth</span></h1>
+    <div class="pill"><span class="dot" id="dot"></span><span id="status">未连接</span></div>
+    <div class="pill" id="camPill" hidden title="摄像头状态：任何视图都可见"><span class="dot" id="camDot"></span><span id="camPillTxt">摄像头</span></div>
+    <div class="spacer"></div>
+    <button class="primary" id="btnAdd">添加设备</button>
+    <button id="btnReconn">全部重连</button>
+    <button id="btnDropAll" disabled>全部断开</button>
+    <button id="btnClear" disabled title="清空实时缓冲、波形与零偏估计（记录过程中不可用）">清空数据</button>
+    <button class="rec" id="btnRec" disabled>● 开始记录</button>
+    <button id="btnCamDlTop" hidden title="本次采集的录像；停止记录时已自动存到下载目录，这里可重复下载">⬇ 录像</button>
+    <button id="btnTxt" disabled title="官方 WitMotion 导出格式（制表符 23 列 .txt）">导出 TXT</button>
+  </header>
+
+  <div class="card" style="margin:12px 0;padding:12px">
+    <div class="toolbar" style="margin:0">
+      <span class="lbl">采集来源</span>
+      <select id="captureSource"><option value="direct">电脑蓝牙直连</option><option value="phone">手机采集（局域网）</option></select>
+      <span id="phoneStatus" class="dm">手机 App 保持原版</span>
+    </div>
+    <div id="phonePanel" hidden>
+      <div class="toolbar" style="margin:8px 0">
+        <span id="phoneAddress"></span><span>配对码 <b id="phoneToken">—</b></span>
+        <button id="phoneRelease">释放手机会话</button><button id="phoneExport">保存手机接收记录</button>
+      </div>
+      <div id="phoneTiming" style="line-height:1.7">等待手机数据</div>
+      <div class="dm" style="white-space:normal;max-width:none">设备→电脑真实单程延迟：未校时，不可测。表观差含时钟偏差；网络额外滞后相对最近600批最低观测路径，不包含未知固定延迟，也可能受长期时钟漂移影响；帧内时间戳尚不能证明就是射频发送时刻。手机模式的零偏与分类以后台为准。</div>
+    </div>
+  </div>
+
+  <div class="toolbar">
+    <span class="lbl">视图</span>
+    <div class="seg" id="segMode" title="可多选：同时开几个面板就并排看几个">
+      <button data-m="grid" class="on">分设备</button>
+      <button data-m="compare">对比叠加</button>
+      <button data-m="cam">摄像头</button>
+      <button data-m="imur">自研鞋垫</button>
+      <button data-m="act">状态推断</button>
+    </div>
+    <span class="lbl">时间窗</span>
+    <div class="seg" id="segWin">
+      <button data-w="5">5 s</button>
+      <button data-w="10" class="on">10 s</button>
+      <button data-w="30">30 s</button>
+    </div>
+    <div class="seg" id="segMetric" style="display:none">
+      <button data-k="acc" class="on">加速度</button>
+      <button data-k="gyr">角速度</button>
+      <button data-k="ang">角度</button>
+    </div>
+    <div class="seg" id="segAxis" style="display:none">
+      <button data-a="0" class="on">X</button>
+      <button data-a="1">Y</button>
+      <button data-a="2">Z</button>
+      <button data-a="m">模</button>
+    </div>
+    <div class="spacer"></div>
+    <span class="dm" id="recStat">未记录</span>
+  </div>
+
+  <div id="stage">
+  <div id="devGrid"></div>
+
+  <div class="card cmp" id="cmpCard">
+    <div class="toolbar" style="margin:0 0 6px">
+      <span class="lbl">多台叠加</span>
+      <div class="spacer"></div>
+      <span class="dm" id="ftypes">—</span>
+    </div>
+    <canvas id="cmpChart"></canvas>
+    <div class="legend" id="legend"></div>
+  </div>
+
+  <div class="card" id="camCard">
+    <div class="toolbar" style="margin:0 0 8px">
+      <span class="lbl">摄像头</span>
+      <select id="camDev"><option value="">默认摄像头</option></select>
+      <select id="camRes">
+        <option value="">分辨率自动</option>
+        <option value="3840x2160">3840×2160</option>
+        <option value="2560x1440">2560×1440</option>
+        <option value="1920x1080">1920×1080</option>
+        <option value="1280x720">1280×720</option>
+        <option value="960x540">960×540</option>
+        <option value="640x480">640×480</option>
+      </select>
+      <select id="camFps">
+        <option value="0">帧率自动</option>
+        <option value="60">60 fps</option>
+        <option value="30">30 fps</option>
+        <option value="15">15 fps</option>
+      </select>
+      <button class="primary" id="btnCamOn">开启</button>
+      <button id="btnCamOff" disabled>关闭</button>
+      <button id="btnCamPip" disabled title="把人像浮在屏幕最上层：切到别的程序、全屏做动作也看得见">画中画</button>
+      <div class="spacer"></div>
+      <button class="rec" id="btnCamRec" disabled>● 开始录像</button>
+      <button id="btnCamShot" disabled>拍照</button>
+      <button id="btnCamDl" disabled>下载录像</button>
+    </div>
+    <div class="camwrap">
+      <video id="camVideo" playsinline autoplay muted></video>
+      <canvas id="camCanvas"></canvas>
+      <div class="camhint" id="camHint">点「开启」授权并预览摄像头<br>首次会弹权限框；页面需用 http://127.0.0.1:8765 打开（file:// 下浏览器不给摄像头）</div>
+    </div>
+    <div class="toolbar" style="margin:8px 0 0">
+      <span class="dm" id="camStat">未开启</span>
+      <span class="dm" id="camFile"></span>
+      <div class="spacer"></div>
+      <button id="btnCamProbe">测能力</button>
+      <button id="btnCamRot">旋转 0°</button>
+      <label class="chk"><input type="checkbox" id="camLink" checked> 录像跟随「● 开始记录」一起开、一起停</label>
+    </div>
+  </div>
+
+  <div class="card" id="imurCard">
+    <div class="toolbar" style="margin:0 0 8px">
+      <span class="lbl">自研鞋垫</span>
+      <button class="primary" id="btnIrOn">连接鞋垫</button>
+      <span class="dm">左 <b id="irDotL">·</b></span>
+      <span class="dm">右 <b id="irDotR">·</b></span>
+      <span class="dm" id="irTip" style="max-width:none;white-space:normal;line-height:1.5">（自研鞋垫，广播名 IMU-R / W01-L / W01-R / D56-*：帧头 5A 00 09、46+2N 字节、末两字节 CCITT-FALSE，与 WT901 协议不同。左右各连一只，按广播名自动认脚别：名字带 -R 算右脚、带 -L 算左脚，认不出就排到空着的那只）</span>
+    </div>
+    <template id="irPanelTpl">
+      <div class="irpanel-hd">
+        <span class="lbl">{FTNAME}</span>
+        <span class="dm" id="irDev-FT">未连接</span>
+        <span class="dm" id="irInfo-FT"></span>
+        <div class="spacer"></div>
+        <button id="btnIrOff-FT" disabled>断开</button>
+        <button id="btnIrParquet-FT" disabled>下载 parquet</button>
+      </div>
+    <div class="irgrid">
+      <div>
+        <canvas id="irChart-FT"></canvas>
+        <div class="legend">
+          <span><i style="background:#e03131"></i>X</span>
+          <span><i style="background:#2f9e44"></i>Y</span>
+          <span><i style="background:#1971c2"></i>Z</span>
+          <span class="dm" id="irStat-FT">—</span>
+        </div>
+      </div>
+      <div>
+        <table class="vals">
+          <thead><tr><th></th><th>X</th><th>Y</th><th>Z</th></tr></thead>
+          <tbody>
+            <tr><td>加速度 g</td><td id="irax-FT">—</td><td id="iray-FT">—</td><td id="iraz-FT">—</td></tr>
+            <tr><td>角速度 °/s</td><td id="irgx-FT">—</td><td id="irgy-FT">—</td><td id="irgz-FT">—</td></tr>
+          </tbody>
+        </table>
+        <div class="sub">
+          <span>帧率 <b id="irRate-FT">0</b> Hz</span>
+          <span>帧数 <b id="irN-FT">0</b></span>
+          <span>坏帧 <b id="irBad-FT">0</b></span>
+        </div>
+        <div class="sub">
+          <span>设备时间戳 <b id="irTs-FT">—</b></span>
+          <span title="电脑收包日历时间减设备日历时间；含未知时钟偏差，不是真实单程延迟">电脑－设备表观差 <b id="irDelay-FT">—</b></span>
+          <span>温度 <b id="irAux-FT">—</b></span>
+          <span>帧长 <b id="irLen-FT">—</b></span>
+        </div>
+        <div class="sub">
+          <span>零偏 <b id="irBias-FT">未校准</b></span>
+          <label>模式 <select id="irBiasMode-FT" title="默认为自动模式：网页六轴无法区分恒速转动与常量偏置，稳定匀速转动也可能误判为静止并被补偿；未就绪时显示原始角速度，静止后自动生效。连上、重置或重连后自动等待静止重新学习；切到手动模式可锁定当前补偿。仅改本页显示与导出，不改设备。"><option value="dynamic" selected>自动模式</option><option value="manual">手动模式</option></select></label>
+          <span>候选采样 <b id="irStill-FT">0</b> 帧</span>
+          <button id="btnBiasCal-FT" title="固定静置至少3秒；仅改本页补偿，不改设备或导出。自动模式会自行学习，此按钮用于立即手动校准；手动模式通过后锁定。">静止校准</button>
+          <button id="btnBiasReset-FT" title="只清空本页的补偿，不改设备或导出；重置后自动等待静止重新学习。">重置</button>
+        </div>
+        <div class="dm" id="irRaw-FT" style="max-width:100%"></div>
+      </div>
+    </div>
+    <div class="prgrid">
+      <div>
+        <canvas id="irPress-FT"></canvas>
+        <div class="prscale"><span>0</span><i id="prScaleBar-FT"></i><span id="prScaleMax-FT">10 000 g</span></div>
+        <div class="dm" id="prHover-FT" hidden style="margin-top:6px"></div>
+        <div class="dm" style="margin-top:6px;white-space:normal;line-height:1.5">颜色越深压力越大；移上去看数值，点一下看波形。</div>
+      </div>
+      <div>
+        <div class="pwhd">
+          <span class="lbl">实时波形</span>
+          <b id="pwName-FT">未选中</b>
+        </div>
+        <canvas id="pwChart-FT"></canvas>
+        <div class="sub" id="pwLive-FT" style="margin-top:6px">
+          <span>当前 <b id="pwCur-FT">—</b></span>
+          <span>窗口内 <b id="pwN-FT">0</b> 点</span>
+        </div>
+
+      </div>
+    </div>
+        <div class="toolbar" style="margin:10px 0 0">
+          <span class="lbl">拓扑</span>
+          <select id="prTopo-FT">
+            <option value="v2">row-mirrored v2（现行固件）</option>
+            <option value="v1">legacy v1</option>
+          </select>
+          <span class="lbl">输出格式</span>
+          <select id="dvFmt-FT">
+            <option value="4">重量 g</option>
+            <option value="0">原始 ADC</option>
+            <option value="1">采样电压</option>
+            <option value="2">可变电压</option>
+            <option value="3">可变阻值</option>
+          </select>
+          <span class="lbl">命令帧</span>
+          <select id="dvLink-FT">
+            <option value="auto">自动（144 B→80 B）</option>
+            <option value="v2">144 B（2026-10-31 固件）</option>
+            <option value="v1">80 B（旧固件）</option>
+          </select>
+          <button id="btnFmtRead-FT">回读</button>
+          <button id="btnFmtSet-FT">写入</button>
+          <span class="dm" id="dvUnit-FT">未回读</span>
+        </div>
+        <div class="dm" id="dvStat-FT" style="margin-top:8px">设备状态未回读：点「回读」发 0x0D 确认当前输出格式</div>
+    </template>
+    <div class="irpanels" id="irPanels"></div>
+
+        <div class="dm" id="prNote">点一个点位看它的实时波形。固件是<b>变化才上报</b>：值稳定时不发，所以「最后上报」会一直变旧，那不是卡住。点号与布局图一致（趾端为第 1 行、行内从右往左）；70 个槽位里 14 个不接传感器。数值单位跟固件输出格式走（0 原始 ADC / 4 重量），写入 0x10、回读 0x0D，本机对这两条都不回执但设置确实生效；命令帧须用 144 B。</div>
+  </div>
+
+  <div class="card" id="actCard">
+    <div class="toolbar" style="margin:0 0 8px">
+      <span class="lbl">状态推断</span>
+      <select id="actSource"><option value="insole">自研鞋垫</option><option value="wt">WT脚背（试用）</option></select>
+      <span id="actWtPick" hidden>左 <select id="actWtL"><option value="">请选择设备</option></select> 右 <select id="actWtR"><option value="">请选择设备</option></select></span>
+      <button class="primary" id="btnActOn">开始推断</button>
+      <button id="btnActOff" disabled>停止</button>
+      <span class="dm" id="actState">未开始</span>
+      <div class="spacer"></div>
+      <span class="dm">声明采样率</span>
+      <input class="tin" id="actFsL" type="number" min="45" max="110" step="0.1" value="51.2" title="左脚设备参考采样率，用于密度与缺口门控；不要填掉帧后的接收Hz">
+      <input class="tin" id="actFsR" type="number" min="45" max="110" step="0.1" value="51.2" title="右脚设备参考采样率，用于密度与缺口门控；不要随掉帧向下调整">
+      <span class="dm" id="actModel">—</span>
+    </div>
+    <div class="actgrid">
+      <div>
+        <div class="actnow"><b id="actLabel">—</b><span id="actWhy">点「开始推断」</span></div>
+        <div class="actbars">
+          <div class="actbar"><span>步行</span><i><em id="actBar0"></em></i><u id="actPct0">—</u></div>
+          <div class="actbar"><span>跑步</span><i><em id="actBar1"></em></i><u id="actPct1">—</u></div>
+          <div class="actbar"><span>其他</span><i><em id="actBar2"></em></i><u id="actPct2">—</u></div>
+        </div>
+        <canvas id="actHist" height="26"></canvas>
+        <div class="dm" style="margin-top:4px">最近 60 次决策，每 200 ms 一次；灰条是本次无效（灰条下红线），无效不输出类别，也不退回成「其他」。</div>
+      </div>
+      <div>
+        <div class="sub" style="border-top:0;padding-top:0;margin-top:0">
+          <span>决策 <b id="actSteps">0</b> 次</span>
+          <span>有效 <b id="actValid">0</b></span>
+          <span>已送事件 <b id="actSent">0</b></span>
+        </div>
+        <div class="sub">
+          <span>单次推理 <b id="actLat">—</b> ms</span>
+          <span>丢弃 <b id="actDrop">0</b> 帧</span>
+          <span>会话 <b id="actUp">0</b> s</span>
+        </div>
+        <div class="sub">
+          <span>左脚 <b id="actFootL">未连接</b></span>
+          <span>右脚 <b id="actFootR">未连接</b></span>
+        </div>
+        <div class="dm" id="actAxis" style="white-space:normal;line-height:1.5;margin-top:6px">—</div>
+      </div>
+    </div>
+  </div>
+  </div>
+
+  <div id="log"></div>
+
+  <footer>
+    所有设备的帧落在<strong>同一条时间轴</strong>上（同页同一个单调时钟），点一次「开始记录」即统一开始，导出按时间合并排序。
+    跨设备没有硬件同步，只能对齐到蓝牙到达时刻（单台抖动约 ±20 ms，多台并发更大）；要更严需硬件同步线或事后按共同动作特征对齐。<br>
+    导出文件的<strong>设备名称列写「原始广播名(MAC)」</strong>（如 WT901BLE67(C2:49:5B:5E:C6:79)），页面上改的名字只用于显示。
+    MAC 由连上后向设备读寄存器 0x66（<code>FF AA 27 66 00</code>）取得，顺带读电量 0x64、固件版本 0x2E，与官方导出一致；浏览器自带的 <code>BluetoothDevice.id</code> 是匿名化标识，不是 MAC，只作兜底。<br>
+    「摄像头」页走 USB UVC，录像直接出 MP4（H.264，浏览器不支持时退回 WebM VP9），只在内存里成片、点「下载录像」才落盘；
+    它与 IMU 记录同一次点击起停，但两者没有共同时钟，要对齐请在开头拍一次手或做一次明显动作做同步点。
+  </footer>
+</div>
+
+<script src="parquet_writer.js"></script>
+<!-- 全局基础设施：元素寻址、日志、格式化、下载、名称记忆。 -->
+<script src="js/core.js"></script>
+<!-- 设备侧图表：折线图、指标对比、姿态 cubes、演示数据。 -->
+<script src="js/chart.js"></script>
+<!-- 摄像头：取流、画中画、录像、能力探针。 -->
+<script src="js/camera.js"></script>
+<!-- 维特 WT901 多设备：广播协议、连接、MAC 识别、文本导出。 -->
+<script src="js/wt901.js"></script>
+<!-- 自研鞋垫协议层：状态、解帧、命令与应答、IMU 校准、零偏估计。 -->
+<script src="js/insole-proto.js"></script>
+<!-- 自研鞋垫界面层：双面板渲染、压力图、点位波形、数值与格式。 -->
+<script src="js/insole-ui.js"></script>
+<!-- 帧导出：把两脚录到的帧写成与 app 同构的 parquet。 -->
+<script src="js/insole-export.js"></script>
+<!-- 状态推断：把 IMU 事件按 200 ms 送本地服务，显示 walk / run / other。 -->
+<script src="js/activity-live.js"></script>
+<!-- 入口：事件绑定、主循环、启动引导、调试出口。 -->
+<script src="js/main.js"></script>
+<script src="js/phone-bridge.js"></script>
+</body>
+</html>

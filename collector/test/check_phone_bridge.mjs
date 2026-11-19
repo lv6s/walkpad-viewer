@@ -1,0 +1,44 @@
+import assert from 'node:assert/strict';
+import {pathToFileURL} from 'node:url';
+const {chromium}=await import(pathToFileURL(process.env.PLAYWRIGHT_CORE_PATH).href);
+const browser=await chromium.launch({channel:'msedge',headless:true});
+try {
+ const page=await browser.newPage(), errors=[];
+ page.on('pageerror',e=>errors.push(e.message));
+ await page.goto(process.argv[2]);
+ await page.locator('#captureSource').selectOption('phone');
+ await page.waitForFunction(()=>document.querySelector('#phoneToken').textContent.length>10);
+ const config=await page.evaluate(async()=>await(await fetch('/phone/api/config')).json());
+ const base=process.argv[3];
+ const ingest=async p=>{
+  const r=await fetch(base+'/api/ingest',{method:'POST',headers:{Authorization:'Bearer '+config.token,'Content-Type':'application/json'},body:JSON.stringify(p)});
+  assert.equal(r.status,200,await r.text());
+ };
+ const notify=(id,foot,phone,bytes,profile='wt')=>({v:1,session:profile+'-browser-session',profile,id,type:'notify',phone_ms:phone,data:{foot,connection:foot+'-test',receipt_ms:phone-3,bytes:Buffer.from(bytes).toString('base64')}});
+ const wt=Buffer.alloc(20);wt[0]=85;wt[1]=97;wt.writeInt16LE(2048,6);
+ await ingest({v:1,session:'wt-browser-session',profile:'wt',phone_now_ms:1000,events:[notify(1,'l',900,wt),notify(2,'r',920,wt)]});
+ await page.waitForFunction(()=>window.__wtDebug.state.order.some(k=>k.startsWith('phone:')));
+ await page.waitForFunction(()=>document.querySelector('#phoneTiming').textContent.includes('WT'));
+ assert.ok((await page.locator('#phoneTiming').textContent()).includes('不可测'));
+ assert.equal(await page.locator('#btnAdd').isDisabled(),true);
+ assert.equal(await page.locator('#btnActOn').isDisabled(),true);
+ await page.evaluate(async()=>fetch('/phone/api/release',{method:'POST',headers:{'X-Walkpad-Control':'1'}}));
+ const ir=Buffer.alloc(48);ir.set([90,0,9]);ir.writeUInt32LE(20261110,11);ir.writeUInt32LE(110800123,7);ir.writeUInt32LE(1,3);ir.writeInt16LE(2048,21);ir[29]=1;ir[30]=1;ir.writeInt16LE(321,44);
+ let crc=65535;for(let i=0;i<138;i++){crc^=(i<46?ir[i]:0)<<8;for(let k=0;k<8;k++)crc=((crc<<1)^((crc&32768)?0x1021:0))&65535;}ir.writeUInt16LE(crc,46);
+ await ingest({v:1,session:'insole-browser-session',profile:'insole',phone_now_ms:2000,events:[notify(1,'l',1900,ir,'insole'),notify(2,'r',1920,ir,'insole')]});
+ await page.waitForFunction(()=>window.__wtDebug.irStates.l.frames>0&&window.__wtDebug.irStates.r.frames>0);
+ await page.waitForFunction(()=>document.querySelector('#irDelay-l').textContent.includes('未校时'));
+ assert.equal(await page.evaluate(()=>window.__wtDebug.irStates.l.slots[65]),321);
+ assert.equal(await page.evaluate(()=>window.__wtDebug.irStates.l.remote),true);
+ assert.equal(await page.locator('#btnBiasCal-l').isDisabled(),true);
+ await page.evaluate(()=>window.__wtDebug.toggleRec());
+ const next=await page.evaluate(()=>performance.now()-window.phoneBridge.offset+10);
+ await ingest({v:1,session:'insole-browser-session',profile:'insole',phone_now_ms:Math.max(2200,next+10),events:[notify(3,'l',Math.max(2100,next),ir,'insole')]});
+ await page.waitForFunction(()=>window.__wtDebug.irStates.l.rec.length>0);
+ await page.evaluate(()=>window.__wtDebug.stopRec());
+ await page.locator('#captureSource').selectOption('direct');
+ assert.equal(await page.locator('#phonePanel').isHidden(),true);
+ assert.equal(await page.evaluate(()=>window.__wtDebug.irStates.l.remote),false);
+ assert.deepEqual(errors,[]);
+ console.log(JSON.stringify({passed:true,checks:['pairing_proxy','wt_stream','unmeasurable_wt_delay','source_controls','insole_pressure','apparent_delay','no_duplicate_bias','unified_recording','direct_switch','no_script_errors']}));
+} finally {await browser.close();}

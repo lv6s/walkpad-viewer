@@ -1,0 +1,20 @@
+# 解包的 apk：301 MB，只作协议参考，不进版本库
+apk_labpad/
+
+# 临时诊断脚本与产物
+tmp_*
+
+# 导出的采集数据
+*.parquet
+
+# 依赖与字节码
+node_modules/
+__pycache__/
+*.pyc
+
+# 本地记录、备份与服务状态
+_port.txt
+backups/
+records/
+runtime/
+.pytest_cache/

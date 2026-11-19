@@ -1,0 +1,1013 @@
+/* 一次性回归：IMU-R 帧解码 + 70→56 压力映射（依据 APK d56-measurement-v3 / d56_pressure_mapping.g.dart） */
+const fs = require('fs');
+
+/* 代码已拆成多个 js，按 HTML 里的 <script src> 顺序拼接，顺序调整不用改这里 */
+const ROOT = __dirname + '/..';
+const html = fs.readFileSync(ROOT + '/wt901ble_live.html', 'utf8');
+const jsFiles = [...html.matchAll(/<script src="(js\/[^"]+)"><\/script>/g)].map((m) => m[1]);
+if (!jsFiles.length) throw new Error('HTML 里没找到 js 引入');
+const src = jsFiles.map((f) => fs.readFileSync(ROOT + '/' + f, 'utf8')).join('\n;\n');
+
+const any = new Proxy(function () {}, {
+  get(t, k) {
+    if (k === Symbol.toPrimitive) return () => '';
+    if (k === Symbol.iterator) return function* () {};
+    if (k === 'then') return undefined;
+    if (k === 'length' || k === 'childElementCount') return 0;
+    if (k === 'dataset') return {};
+    return any;
+  },
+  set() { return true; },
+  apply() { return any; },
+  construct() { return any; }
+});
+
+const mkCv = (w, h) => {
+  const o = {
+    width: 0, height: 0,
+    getBoundingClientRect: () => ({ width: w, height: h, left: 0, top: 0 }),
+    getContext: () => any,
+    addEventListener: (n, f) => { if (n === 'click') o.onclick = f; }
+  };
+  return o;
+};
+const txtEl = (v) => ({
+  value: v, textContent: v, innerHTML: '', disabled: false, hidden: false,
+  classList: { toggle() {}, add() {}, remove() {} }
+});
+const pressCv = mkCv(290, 620), pwCv = mkCv(420, 240);
+
+const sels = {
+  prTopo: { value: 'v2' }, prSide: { value: 'l' }, dvFmt: { value: '4' }, dvLink: { value: 'auto' },
+  dvUnit: txtEl(''), dvStat: txtEl(''),
+  irPress: pressCv, pwChart: pwCv,
+  prScaleMax: txtEl(''), pwName: txtEl(''),
+  pwCur: txtEl(''), pwAge: txtEl(''), pwAgeWrap: { hidden: true }, pwN: txtEl(''),
+  btnIrParquet: txtEl('')
+};
+/* 页面按脚取元素（id 带 -l/-r）；测试只驱动左脚，把同一批假元素挂到 -l */
+for (const k of Object.keys(sels)) sels[k + '-l'] = sels[k];
+const store = new Map();
+global.localStorage = {
+  getItem: (k) => (store.has(k) ? store.get(k) : null),
+  setItem: (k, v) => store.set(k, String(v)),
+  removeItem: (k) => store.delete(k)
+};
+global.document = {
+  getElementById: (id) => (sels[id] || any),
+  querySelector: () => any,
+  querySelectorAll: () => [],
+  createElement: () => any,
+  addEventListener: () => {},
+  visibilityState: 'visible',
+  body: any
+};
+global.window = { addEventListener: () => {}, __wtDebug: null };
+global.navigator = { bluetooth: null, mediaDevices: null };
+global.location = { search: '', origin: 'http://127.0.0.1:8765' };
+global.requestAnimationFrame = () => 0;
+global.cancelAnimationFrame = () => {};
+global.ResizeObserver = class { observe() {} };
+global.URL.createObjectURL = () => 'blob:';
+global.URL.revokeObjectURL = () => {};
+global.setTimeout = setTimeout;
+global.clearTimeout = clearTimeout;
+global.setInterval = setInterval;
+global.clearInterval = clearInterval;
+
+new Function('window', 'document', 'navigator', 'localStorage', 'requestAnimationFrame', 'cancelAnimationFrame',
+  'ResizeObserver', 'location', src)(
+  global.window, global.document, global.navigator, global.localStorage, global.requestAnimationFrame,
+  global.cancelAnimationFrame, global.ResizeObserver, global.location
+);
+
+const W = global.window.__wtDebug;
+const ok = [];
+const chk = (n, c, extra) => ok.push((c ? 'PASS ' : 'FAIL ') + n + (extra === undefined ? '' : '  [' + extra + ']'));
+
+/* app 导出的 standard_measurement_frames 全部列名（顺序照真文件抄，
+   取自 Downloads/0001-standard_measurement_frames-*.parquet）。
+   网页导出必须与它逐列同名同序，只在末尾多 5 个自定义列。 */
+const APP_COLS = `schema_id schema_version dataset_id frame_identity product_code session_id
+processing_input_snapshot_id processing_attempt_id alignment_revision_id capture_stream_id
+assigned_side capture_period_id stream_segment_id connection_epoch source_frame_ordinal
+source_frame_number_raw source_frame_number_unwrapped measurement_contract_id
+raw_envelope_contract_version sensor_topology_id pressure_conversion_id
+alignment_timestamp_definition_id source_time_domain source_time_value source_time_unit_code
+device_time_raw device_time_unit_code observed_session_elapsed_us aligned_session_elapsed_us
+effective_time_status effective_elapsed_us pressure_raw_bits pressure_raw_values pressure_values
+pressure_raw_unit_code pressure_value_unit_code sensor_layout_version conversion_version
+imu_raw_bits imu_raw_values imu_physical_values axis_order_code accel_unit_code gyro_unit_code
+imu_unit_status source_asset_ids source_chunk_indices source_record_indices
+source_native_sequences source_native_monotonic_ns source_session_elapsed_us raw_packet_sha256
+capture_disposition parse_status frame_status pressure_status imu_status
+previous_source_frame_ordinal source_frame_ordinal_delta effective_elapsed_delta_us
+continuity_status quality_flag_codes`.split(/\s+/);
+
+/* ---------- 帧构造：CRC 必须是 CCITT-FALSE，且前 138 字节不足补零 ---------- */
+function crc16(bytes) {
+  let crc = 0xffff;
+  const n = Math.min(bytes.length, 138);
+  for (let i = 0; i < 138; i++) {
+    crc ^= (i < n ? bytes[i] : 0) << 8;
+    for (let k = 0; k < 8; k++) crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) & 0xffff : (crc << 1) & 0xffff;
+  }
+  return crc;
+}
+
+/* pts: [[sourceRow, col, value], ...] 按固件顺序（行升序、列升序）写入 */
+function mkFrame(pts, opt) {
+  const o = opt || {};
+  const n = pts.length;
+  const f = new Uint8Array(46 + 2 * n);
+  f[0] = 0x5a; f[1] = 0x00; f[2] = 0x09;
+  f[29] = n;
+  const dv = new DataView(f.buffer);
+  dv.setUint32(3, o.seq || 1, true);
+  dv.setUint32(7, o.ts || 0, true);
+  dv.setUint32(11, o.date || 0, true);
+  dv.setUint16(15, o.temp === undefined ? 2796 : o.temp, true);
+  (o.imu || [0, 0, 2098, 0, 0, 0]).forEach((v, i) => dv.setInt16(17 + 2 * i, v, true));
+  for (const [row, col, v] of pts) {
+    f[30 + row] |= 1 << col;
+  }
+  pts.forEach(([, , v], i) => dv.setInt16(44 + 2 * i, v, true));
+  const c = crc16(f.subarray(0, f.length - 2));
+  f[f.length - 2] = c & 0xff; f[f.length - 1] = c >> 8;
+  return f;
+}
+
+const feed = (frames, foot) => {
+  const total = frames.reduce((s, f) => s + f.length, 0);
+  const buf = new Uint8Array(total);
+  let o = 0;
+  for (const f of frames) { buf.set(f, o); o += f.length; }
+  W.ir.buf = new Uint8Array(0);
+  W.irFeed(buf, foot);
+};
+
+/* 基础几何：IR_POS 与固件槽位表必须逐行同构 */
+const perRow = {};
+W.IR_POS.forEach((p) => { perRow[p.row] = (perRow[p.row] || 0) + 1; });
+chk('布局 56 点', W.IR_POS.length === 56, W.IR_POS.length);
+chk('每行点数 2/4/5/5/5/5/4/4/4/4/4/4/4/2',
+  Object.values(perRow).join(',') === '2,4,5,5,5,5,4,4,4,4,4,4,4,2', Object.values(perRow).join(','));
+chk('映射表各 56 项', W.IR_RAW_V1.length === 56 && W.IR_RAW_V2.length === 56,
+  W.IR_RAW_V1.length + '/' + W.IR_RAW_V2.length);
+chk('映射表下标都在 0..69', [...W.IR_RAW_V1, ...W.IR_RAW_V2].every((i) => i >= 0 && i < 70), '');
+chk('v1/v2 取同一批槽位', new Set(W.IR_RAW_V1).size === 56 && new Set(W.IR_RAW_V2).size === 56
+  && [...W.IR_RAW_V1].sort((a, b) => a - b).join() === [...W.IR_RAW_V2].sort((a, b) => a - b).join(), '');
+/* 第 1 行 2 点必须落在 canonical 行 13（趾端），列 2/3 */
+chk('点 1 = 槽位 68（canonical 行13 列3）', W.IR_RAW_V2[0] === 68, W.IR_RAW_V2[0]);
+chk('点 2 = 槽位 67（canonical 行13 列2）', W.IR_RAW_V2[1] === 67, W.IR_RAW_V2[1]);
+
+/* ---------- 解码语义 ---------- */
+W.prReset();
+feed([mkFrame([[0, 3, 10000]]), mkFrame([])]);
+chk('sourceRow 0 列 3 → 布局点 1', W.ir.ps[0] === 10000, W.ir.ps[0]);
+chk('该点标记为已知', W.ir.seen[0] === 1, W.ir.seen[0]);
+chk('其它点未上报', W.ir.seen[1] === 0 && W.ir.pSkip === 0, W.ir.seen[1] + '/' + W.ir.pSkip);
+
+/* 值必须按 sourceRow 升序对齐：同一帧两个点，行号大的先出现在字节流里？不——行小的在前 */
+W.prReset();
+feed([mkFrame([[0, 2, 100], [0, 3, 4000]]), mkFrame([])]);
+chk('同帧两点 列2=100 列3=4000', W.ir.ps[1] === 100 && W.ir.ps[0] === 4000, W.ir.ps[1] + '/' + W.ir.ps[0]);
+
+W.prReset();
+feed([mkFrame([[1, 2, 700], [3, 2, 900]]), mkFrame([])]);
+chk('跨行取值按行升序', W.ir.ps[W.IR_RAW_V2.indexOf(62)] === 700 && W.ir.ps[W.IR_RAW_V2.indexOf(52)] === 900,
+  W.IR_RAW_V2.indexOf(62) + '/' + W.IR_RAW_V2.indexOf(52));
+
+/* 未接传感器的槽位（canonical 0/3/4/5...）上报也不写点，只计未映射 */
+W.prReset();
+feed([mkFrame([[12, 1, 555]]), mkFrame([])]);   // canonical 行1 列1 → 槽位 6
+chk('槽位 6 有效', W.ir.ps[W.IR_RAW_V2.indexOf(6)] === 555, W.IR_RAW_V2.indexOf(6));
+W.prReset();
+feed([mkFrame([[13, 0, 555]]), mkFrame([])]);   // canonical 行0 列0 → 槽位 0（未接）
+chk('未接槽位只计未映射', W.ir.pSkip === 1 && W.ir.seen.reduce((a, b) => a + b, 0) === 0, W.ir.pSkip);
+
+/* CRC / 长度 / 帧头重同步 */
+W.prReset();
+const good = mkFrame([[0, 3, 2000]]);
+const bad = good.slice(); bad[bad.length - 1] ^= 0xff;
+feed([bad, good, mkFrame([])]);
+chk('CRC 坏帧被丢弃并重同步', W.ir.ps[0] === 2000 && W.ir.bad === 1, W.ir.ps[0] + '/' + W.ir.bad);
+
+W.prReset();
+W.ir.bad = 0;
+const junk = Uint8Array.from([0x11, 0x5a, 0x00, 0x22, 0x33]);
+feed([junk, mkFrame([[0, 3, 1234]]), mkFrame([])]);
+chk('前导垃圾后仍能对齐', W.ir.ps[0] === 1234, W.ir.ps[0]);
+
+W.prReset();
+const trunc = good.slice(0, 46);          // 声明 1 点却只给 46 字节
+feed([trunc, mkFrame([[0, 3, 4321]]), mkFrame([])]);
+chk('截断帧不误读为压力', W.ir.ps[0] === 4321, W.ir.ps[0]);
+
+/* 分包投递（BLE 20 B 一片） */
+W.prReset();
+const total = [mkFrame([[0, 3, 3333]]), mkFrame([[0, 3, 4444]]), mkFrame([])];
+const flat = new Uint8Array(total.reduce((s, f) => s + f.length, 0));
+let off = 0;
+for (const f of total) { flat.set(f, off); off += f.length; }
+W.ir.buf = new Uint8Array(0);
+for (let i = 0; i < flat.length; i += 20) W.irFeed(flat.subarray(i, i + 20));
+chk('20 B 分片仍解出 2 帧', W.ir.frames >= 2 && W.ir.ps[0] === 4444, W.ir.frames + '/' + W.ir.ps[0]);
+
+/* 温度 / IMU 换算 */
+W.prReset();
+const one = mkFrame([[0, 3, 100]], { temp: 2796, imu: [-16, -128, 2098, -36, -24, 3] });
+W.ir.buf = new Uint8Array(0);
+W.irFeed(one);
+const last = W.ir.last;
+chk('温度 raw 2796', last.tempRaw === 2796, last.tempRaw);
+chk('az ≈ 1.02 g', Math.abs(last.az - 1.0244) < 0.002, last.az.toFixed(4));
+chk('ay = -r1×系数 = +0.0078', Math.abs(last.ay - 0.0078) < 0.001, last.ay.toFixed(4));
+
+/* 右脚：同一批固件的槽位是行内翻列的，点 1 从槽位 68 挪到 66（该格没接传感器，落进未映射） */
+W.setCur('r');
+W.irBuildLut('r');
+chk('右脚点 1 翻到槽位 66', W.irLut[66] === 0 && W.irLut[68] === -1, W.irLut[66] + '/' + W.irLut[68]);
+W.prReset('r');
+feed([mkFrame([[0, 3, 888]]), mkFrame([])], 'r');
+chk('右脚下面按列 3 不再落到点 1', W.ir.ps[0] === 0 && W.ir.pSkip === 1, W.ir.ps[0] + '/' + W.ir.pSkip);
+W.setCur('l');
+W.irBuildLut('l');
+chk('切回左脚恢复', W.irLut[68] === 0 && W.irLut[66] === -1, W.irLut[68] + '/' + W.irLut[66]);
+
+/* v1 拓扑：点 1 应取槽位 67 */
+sels.prTopo.value = 'v1';
+W.irBuildLut();
+W.prReset();
+feed([mkFrame([[0, 2, 777]]), mkFrame([])]);
+chk('v1 下点 1 = 槽位 67', W.ir.ps[0] === 777, W.ir.ps[0]);
+sels.prTopo.value = 'v2';
+W.irBuildLut();
+
+/* ---------- 真机 4266 帧回放（只按 1 号位置） ---------- */
+const lines = fs.readFileSync(ROOT + '/tmp_w02_press1.txt', 'utf8').trim().split('\n');
+const real = lines.map((l) => l.split('\t')).filter((a) => a.length === 4);
+const frames = real.map((a) => Uint8Array.from(Buffer.from(a[3].trim(), 'hex')));
+chk('抓包 4267 行', real.length === 4267, real.length);
+
+W.prReset();
+W.ir.bad = 0;
+W.ir.buf = new Uint8Array(0);
+let peak0 = 0;
+for (const f of frames) {
+  W.irFeed(f);
+  if (W.ir.ps[0] > peak0) peak0 = W.ir.ps[0];
+}
+const pressFrames = real.filter((a) => +a[2] > 0).length;
+chk('抓包 CRC 全部通过（坏帧 0）', W.ir.bad === 0, W.ir.bad);
+chk('压力帧数 = 抓包 N>0 帧（仅 1 帧长度非法被丢）', W.ir.pFrames >= pressFrames - 1, W.ir.pFrames + '/' + pressFrames);
+chk('点 1 峰值 10000（按到上限截断）', peak0 === 10000, peak0);
+chk('松手后点 1 回落到 100', W.ir.ps[0] === 100, W.ir.ps[0]);
+chk('其余 55 点未重压', [...Array(56).keys()].filter((i) => i && W.ir.ps[i] > 100).length === 0, '');
+chk('未映射点为 0（映射表覆盖全部上报槽位）', W.ir.pSkip === 0, W.ir.pSkip);
+chk('已知点只有固件周期上报的 6 个', W.ir.seen.reduce((a, b) => a + b, 0) === 6,
+  [...W.ir.seen].map((v, i) => (v ? i + 1 : 0)).filter(Boolean).join(','));
+
+/* 记录模式 */
+W.prReset();
+W.ir.recording = true;
+W.ir.prec.length = 0;
+feed([mkFrame([[0, 3, 500]]), mkFrame([])]);
+chk('记录 1 行压力', W.ir.prec.length === 1, W.ir.prec.length);
+chk('记录带槽位号', W.ir.prec[0].ch === 1 && W.ir.prec[0].slot === 68, JSON.stringify(W.ir.prec[0]));
+W.ir.recording = false;
+
+/* ---------- 选中点波形 ---------- */
+W.prReset();
+W.ir.t0 = performance.now() - 6000;
+W.pwPush(0, 4.6, 1500);
+W.pwPush(0, 4.8, 2600);
+W.pwPush(0, 5.0, 3000);
+chk('波形按采样时刻累积', W.ir.hist[0].length === 3, W.ir.hist[0].length);
+W.pwPush(0, 30, 800);
+chk('超出 12 s 的旧样本被裁掉', W.ir.hist[0].length === 1, W.ir.hist[0].length);
+W.ir.hist[0].length = 0;
+W.pwPush(0, 4.6, 1500);
+W.pwPush(0, 4.8, 2600);
+W.pwPush(0, 5.0, 3000);
+/* 实时值取"最后一次上报"，所以要像真机那样把 seen/ps/lastSeen 一起写上 */
+W.ir.seen[0] = 1; W.ir.ps[0] = 3000; W.ir.lastSeen[0] = 5.0;
+
+chk('未选中时标题是「未选中」', sels.pwName.textContent === '未选中', sels.pwName.textContent);
+W.pwPick(0);
+chk('选中点 1', W.ir.sel === 0, W.ir.sel);
+chk('标题带点号/行/槽位', sels.pwName.textContent === '#1 · 第 1 行 · 槽位 68', sels.pwName.textContent);
+W.pwDraw();
+chk('实时值带单位', / g$/.test(sels.pwCur.textContent), sels.pwCur.textContent);
+chk('窗口内点数与 hist 一致', +sels.pwN.textContent === W.ir.hist[0].length, sels.pwN.textContent + '/' + W.ir.hist[0].length);
+W.pwPick(0);
+chk('再点一次取消选中', W.ir.sel === -1, W.ir.sel);
+
+W.irPressDraw();
+const hit = W.ir.hit[7];
+pressCv.onclick({ currentTarget: pressCv, clientX: hit.x, clientY: hit.y });
+chk('点击鞋垫命中第 8 点', W.ir.sel === 7, W.ir.sel);
+W.pwPick(7);
+
+/* ---------- 输出格式：单位跟设备回读走，不是本地开关 ---------- */
+const stBytes = (fmt) => {
+  const b = new Uint8Array(41);
+  const dv = new DataView(b.buffer);
+  b[0] = 1; b[1] = 100; b[2] = fmt;
+  dv.setUint16(3, 10000, true); dv.setUint16(5, 100, true);
+  b.set([...Buffer.from('D56-01')], 7);
+  dv.setUint16(23, 100, true);
+  dv.setInt16(25, 2600, true); dv.setInt16(27, 2650, true);
+  dv.setUint16(29, 3700, true); dv.setUint16(31, 88, true);
+  return b;
+};
+
+W.ir.fmt = null;
+W.irState(stBytes(4));
+chk('状态体解码出格式 4（重量）', W.ir.fmt === 4, W.ir.fmt);
+chk('状态体解码出频率/上下限', W.ir.state.freq === 100 && W.ir.state.max === 10000 && W.ir.state.min === 100,
+  [W.ir.state.freq, W.ir.state.max, W.ir.state.min].join('/'));
+chk('状态体解码出设备名', W.ir.state.name === 'D56-01', W.ir.state.name);
+chk('状态体解码出两路温度', W.ir.state.t1 === 2600 && W.ir.state.t2 === 2650,
+  W.ir.state.t1 + '/' + W.ir.state.t2);
+chk('下拉框同步到回读值', sels.dvFmt.value === '4', sels.dvFmt.value);
+
+W.prNums();
+chk('重量档色阶标 g', / g$/.test(sels.prScaleMax.textContent), sels.prScaleMax.textContent);
+chk('重量档零点偏置 100', W.prBase() === 100 && W.prU() === 'g', W.prBase() + '/' + W.prU());
+
+W.irState(stBytes(0));
+W.prNums();
+chk('原始 ADC 档格式 = 0', W.ir.fmt === 0, W.ir.fmt);
+chk('原始 ADC 档色阶标 ADC', / ADC$/.test(sels.prScaleMax.textContent), sels.prScaleMax.textContent);
+chk('原始 ADC 档不扣零点', W.prBase() === 0 && W.prSpan() === 4096, W.prBase() + '/' + W.prSpan());
+
+W.irState(stBytes(9));
+chk('未知格式不冒充单位（回落到重量）', W.ir.fmt === null && W.prFmt() === 4, String(W.ir.fmt));
+W.irState(stBytes(4));
+W.prNums();
+
+/* ---------- 主机命令编码 / ACK 解码：旧 80 B 合同 ---------- */
+W.ir.link = 'v1';
+const cmd = W.irCmd(W.irStates.l, 0x10, Uint8Array.of(0), 'v1');
+chk('旧合同命令 80 字节', cmd.length === 80, cmd.length);
+chk('命令头 5A + 命令字', cmd[0] === 0x5a && cmd[1] === 0x10, cmd[0].toString(16) + '/' + cmd[1].toString(16));
+chk('命令负载长字段 = 1', (cmd[10] | (cmd[11] << 8) | (cmd[12] << 16) | (cmd[13] << 24)) === 1, cmd[10]);
+chk('命令负载在偏移 14', cmd[14] === 0, cmd[14]);
+/* CRC 自指：写入的校验值本身参与计算，重算前必须先清零这两个字节 */
+const zeroed = cmd.slice(); zeroed[15] = 0; zeroed[16] = 0;
+const cmdCrc = W.irCrcIbm(zeroed.subarray(0, 76), 76);
+chk('命令 CRC 紧跟负载（小端）', (cmd[15] | (cmd[16] << 8)) === cmdCrc, cmdCrc.toString(16));
+const mut = zeroed.slice(); mut[3] ^= 0xff;
+chk('CRC 覆盖固定 76 B（改包头就变）', W.irCrcIbm(mut.subarray(0, 76), 76) !== cmdCrc, '');
+chk('CRC 后剩余字节为零', [...cmd.subarray(17)].every((b) => b === 0), '');
+
+function mkAck(type, size, data) {
+  const f = new Uint8Array(83);
+  f[0] = 0x5a; f[1] = 0x00; f[2] = type;
+  const dv = new DataView(f.buffer);
+  dv.setUint32(3, 7, true);
+  dv.setUint16(15, size, true);
+  f.set(data, 17);
+  let crc = 0xffff;
+  for (let i = 0; i < 81; i++) {
+    crc ^= f[i] << 8;
+    for (let k = 0; k < 8; k++) crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) & 0xffff : (crc << 1) & 0xffff;
+  }
+  dv.setUint16(81, crc, true);
+  return f;
+}
+const stAck = mkAck(0x0d, 42, Uint8Array.from([0, ...stBytes(0)]));
+chk('状态 ACK 固定 83 B 且 CRC 通过', W.irCrcAck(stAck), stAck.length);
+const stBad = stAck.slice(); stBad[81] ^= 0xff;
+chk('状态 ACK CRC 坏掉被判掉', !W.irCrcAck(stBad), '');
+
+W.ir.fmt = null;
+W.ir.buf = new Uint8Array(0);
+W.ir.bad = 0;
+W.prReset();
+feed([mkFrame([[0, 3, 1500]]), stAck, mkFrame([])]);
+chk('测量帧与 ACK 混包都能解', W.ir.ps[0] === 1500 && W.ir.fmt === 0, W.ir.ps[0] + '/' + W.ir.fmt);
+chk('混包不产生坏帧', W.ir.bad === 0, W.ir.bad);
+chk('ACK 计数 +1', W.ir.acks >= 1, W.ir.acks);
+
+/* 坏 ACK 插在测量帧之间：跳过它继续解压力 */
+W.ir.buf = new Uint8Array(0);
+W.ir.fmt = 4;
+W.prReset();
+feed([mkFrame([[0, 3, 111]]), stBad, mkFrame([[0, 3, 222]]), mkFrame([])]);
+chk('CRC 坏的 ACK 不阻断后续测量', W.ir.ps[0] === 222 && W.ir.fmt === 4, W.ir.ps[0] + '/' + W.ir.fmt);
+
+/* 格式切换后单位立刻跟着变（不需要重连） */
+W.irState(stBytes(0));
+W.prNums();
+chk('切到 ADC 后色阶标 ADC', / ADC$/.test(sels.prScaleMax.textContent), sels.prScaleMax.textContent);
+W.irState(stBytes(4));
+W.prNums();
+chk('切回重量后色阶标 g', / g$/.test(sels.prScaleMax.textContent), sels.prScaleMax.textContent);
+
+/* ---------- 新合同（2026-10-31 固件）：144 B 命令 + 19+size 紧凑 ACK ---------- */
+W.ir.link = 'v2';
+const cmd2 = W.irCmd(W.irStates.l, 0x10, Uint8Array.of(0), 'v2');
+chk('新合同命令 144 字节', cmd2.length === 144, cmd2.length);
+chk('新合同负载长字段 = 1', (cmd2[10] | (cmd2[11] << 8)) === 1, cmd2[10]);
+/* CRC 固定在帧尾 [142..143]、覆盖前 142 字节；算的时候这两个字节还是零 */
+const z2 = cmd2.slice(); z2[142] = 0; z2[143] = 0;
+const crc2 = W.irCrcIbm(z2.subarray(0, 142), 142);
+chk('新合同 CRC 在帧尾 142/143 小端', (cmd2[142] | (cmd2[143] << 8)) === crc2, crc2.toString(16));
+chk('新合同负载后面补零', [...cmd2.subarray(15, 142)].every((b) => b === 0), '');
+const m2 = z2.slice(); m2[5] ^= 0xff;
+chk('新合同 CRC 覆盖前 142 B（改包头就变）', W.irCrcIbm(m2.subarray(0, 142), 142) !== crc2, '');
+const empty2 = W.irCmd(W.irStates.l, 0x0d, null, 'v2');
+chk('新合同空负载 0x0D 帧长 144', empty2.length === 144 && empty2[10] === 0, empty2.length);
+
+function mkAck2(type, data) {
+  const f = new Uint8Array(19 + data.length);
+  f[0] = 0x5a; f[1] = 0x00; f[2] = type;
+  const dv = new DataView(f.buffer);
+  dv.setUint32(3, 11, true);
+  dv.setUint16(15, data.length, true);
+  f.set(data, 17);
+  dv.setUint16(17 + data.length, 0x1234, true);   // 新合同不校验这段 CRC，只占位
+  return f;
+}
+const a2 = mkAck2(0x0d, Uint8Array.from([0, ...stBytes(0)]));
+chk('紧凑 ACK 长 19+42=61', a2.length === 61, a2.length);
+W.ir.fmt = null;
+W.ir.buf = new Uint8Array(0);
+W.ir.bad = 0;
+W.prReset();
+feed([mkFrame([[0, 3, 4321]]), a2, mkFrame([])]);
+chk('紧凑 ACK 能解出新合同状态', W.ir.fmt === 0 && W.ir.ps[0] === 4321, W.ir.fmt + '/' + W.ir.ps[0]);
+chk('紧凑 ACK 记录合同 = v2', W.ir.lastAck && W.ir.lastAck.link === 'v2', W.ir.lastAck && W.ir.lastAck.link);
+chk('紧凑 ACK 混包不产生坏帧', W.ir.bad === 0, W.ir.bad);
+/* 新合同外壳下收到旧 83 B ACK：负载位置相同（[17..]、size=42），照样能解出状态，
+   只是尾巴多 22 字节被丢掉——不能因为长度不同就把状态判死 */
+W.ir.buf = new Uint8Array(0);
+W.ir.fmt = 4;
+W.ir.bad = 0;
+W.prReset();
+feed([mkAck(0x0d, 42, Uint8Array.from([0, ...stBytes(0)])), mkFrame([[0, 3, 777]]), mkFrame([])]);
+chk('新合同下旧 83 B ACK 仍解出状态', W.ir.fmt === 0 && W.ir.ps[0] === 777, W.ir.fmt + '/' + W.ir.ps[0]);
+chk('旧 ACK 尾巴不影响后续测量帧', W.ir.bad === 0, W.ir.bad);
+
+/* ---------- 无回执也要能干活：真机 0x10/0x0D 写了生效但一律不回 ---------- */
+(async () => {
+  const W2 = W;
+  W2.ir.dev = { name: 'W02-L', gatt: { connected: true } };
+  W2.ir.chr = {};
+  document.getElementById('dvLink').value = 'v1';
+  W2.ir.link = 'v1';
+
+  /* 1) 写入成功但设备一声不响：算成功，格式按写入值显示 */
+  W2.ir.write = { writeValueWithResponse: async () => {} };
+  W2.ir.fmt = 4; W2.ir.fmtSrc = 'read'; W2.ir.state = { fmt: 4 };
+  let threw = '';
+  try { await W2.irSetFmt(W2.irStates.l, 0); } catch (e) { threw = e.message; }
+  chk('无回执写入不报失败', threw === '', threw);
+  chk('无回执写入后口径跟写入值', W2.ir.fmt === 0 && W2.ir.fmtSrc === 'write', W2.ir.fmt + '/' + W2.ir.fmtSrc);
+  chk('无回执时清掉旧状态，不冒充当前值', W2.ir.state === null, String(W2.ir.state));
+  chk('标签注明无回执', /无回执/.test(sels.dvStat.textContent), sels.dvStat.textContent);
+  chk('工具栏标签不重复写无回执', !/无回执/.test(sels.dvUnit.textContent), sels.dvUnit.textContent);
+  chk('下拉跟着写入值走', sels.dvFmt.value === '0', sels.dvFmt.value);
+
+  /* 2) 写都没写出去（通道报错）才是真失败 */
+  W2.ir.write = { writeValueWithResponse: async () => { throw new Error('GATT busy'); } };
+  W2.ir.fmt = 4; W2.ir.fmtSrc = 'read';
+  let hard = '';
+  try { await W2.irSetFmt(W2.irStates.l, 1); } catch (e) { hard = e.message; }
+  chk('通道写失败仍报错', /写入|GATT/.test(hard), hard);
+  chk('写失败不改口径', W2.ir.fmt === 4 && W2.ir.fmtSrc === 'read', W2.ir.fmt + '/' + W2.ir.fmtSrc);
+
+  /* 3) 自动档两套都无回执：错误要带「写出去了」标记，且两套确实都发了 */
+  document.getElementById('dvLink').value = 'auto';
+  {
+    const lens = [];
+    W2.ir.link = 'v2';                    /* 默认首选，与页面初始化一致 */
+    W2.ir.write = { writeValueWithResponse: async (pkt) => { lens.push(pkt.length); } };
+    let noAck = null;
+    try { await W2.irProbe(W2.irStates.l, 0x0d, null, 60); } catch (e) { noAck = e; }
+    chk('两套都无回执时错误带 sent 标记', noAck && noAck.sent === true, noAck && noAck.message);
+    chk('两套都试过（先 144 B 后 80 B）', lens.length === 2 && lens[0] === 144 && lens[1] === 80, lens.join(','));
+  }
+
+  /* 4) 回读不到要给「不回状态」而不是笼统的回执超时 */
+  document.getElementById('dvLink').value = 'v1';
+  let rd = '';
+  try { await W2.irQueryState(W2.irStates.l, true); } catch (e) { rd = e.message; }
+  chk('回读失败明说设备不回状态', /不回状态/.test(rd), rd);
+
+  /* 5) 回执的 witch 不是 0x00 时，按「类型正好是刚发的那条」放宽也能认出来 */
+  const witched = mkAck(0x0d, 42, Uint8Array.from([0, ...stBytes(2)]));
+  witched[1] = 0x01;
+  { let crc = 0xffff; for (let i = 0; i < 81; i++) { crc ^= witched[i] << 8; for (let k = 0; k < 8; k++) crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) & 0xffff : (crc << 1) & 0xffff; } witched[81] = crc & 0xff; witched[82] = crc >> 8; }
+  W2.ir.buf = new Uint8Array(0); W2.ir.bad = 0; W2.ir.fmt = 4; W2.ir.looseHit = false;
+  W2.ir.wait = { type: 0x0d, link: 'v1', res: () => {}, rej: () => {}, timer: 0 };
+  W2.irFeed(witched);
+  W2.ir.wait = null;
+  chk('witch≠0 的回执也能解出状态', W2.ir.fmt === 2, String(W2.ir.fmt));
+  chk('放宽命中记一次', W2.ir.looseHit === true, String(W2.ir.looseHit));
+
+  /* 6) 等回执期间的「非测量帧」要被抓下来，不然永远不知道设备回了什么 */
+  W2.ir.odd.length = 0;
+  W2.ir.wait = { type: 0x0d, link: 'v1', res: () => {}, rej: () => {}, timer: 0 };
+  W2.irFeed(mkFrame([[0, 3, 555]]));
+  W2.irFeed(Uint8Array.from([0x5a, 0x07, 0x0d, 0x11, 0x22, 0x33]));
+  W2.ir.wait = null;
+  chk('非测量帧被抓到', W2.ir.odd.length === 1 && /^5A 07 0D/.test(W2.ir.odd[0]), W2.ir.odd.join(' | '));
+  chk('测量帧不算进去', !W2.ir.odd.some((s) => /^5A 00 09/.test(s)), '');
+
+  /* 7) 压力载荷里正好出现 5A xx 0D：放宽路径不能被它骗走一串测量帧 */
+  {
+    const trap = mkFrame([[0, 3, 555]]);
+    /* 把压力值区写成 5A、让下一个字节是 0x0D —— 制造假帧头 [5A ? 0D] */
+    trap[45] = 0x5a;
+    const before = { acks: W2.ir.acks, bad: W2.ir.bad, fmt: W2.ir.fmt };
+    W2.ir.buf = new Uint8Array(0);
+    W2.ir.looseHit = false;
+    W2.ir.wait = { type: 0x0d, link: 'v1', res: () => {}, rej: () => {}, timer: 0 };
+    W2.irFeed(Uint8Array.from([0x5a, 0x00, 0x0d, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+    W2.irFeed(trap);
+    W2.ir.wait = null;
+    chk('假帧头不产生假回执', W2.ir.acks === before.acks, W2.ir.acks - before.acks);
+    chk('假帧头不改口径', W2.ir.fmt === before.fmt, String(W2.ir.fmt));
+    chk('放宽未命中', W2.ir.looseHit === false, String(W2.ir.looseHit));
+  }
+
+  /* 8) 刷新后口径不能丢：这台固件不可回读，只能靠本地记住最近一次写入 */
+  {
+    W2.ir.write = { writeValueWithResponse: async () => {} };
+    document.getElementById('dvLink').value = 'v1';
+    W2.ir.link = 'v1';
+    W2.ir.fmt = 4; W2.ir.fmtSrc = 'read';
+    await W2.irSetFmt(W2.irStates.l, 1);
+    chk('写入后落到本地', localStorage.getItem(W2.FMT_KEY) === '1', String(localStorage.getItem(W2.FMT_KEY)));
+    W2.ir.fmt = null; W2.ir.fmtSrc = 'none';
+    W2.irFmtLoad(W2.irStates.l);
+    chk('刷新后恢复写入过的格式（标 saved 不冒充刚写入）', W2.ir.fmt === 1 && W2.ir.fmtSrc === 'saved', W2.ir.fmt + '/' + W2.ir.fmtSrc);
+    W2.irFmtText();
+    chk('刷新后下拉同步到恢复值', sels.dvFmt.value === '1', sels.dvFmt.value);
+    localStorage.removeItem(W2.FMT_KEY);
+    W2.ir.fmt = null; W2.ir.fmtSrc = 'none';
+    W2.irFmtLoad(W2.irStates.l);
+    chk('没存过就保持未回读（不能默认成 ADC）', W2.ir.fmt === null && W2.ir.fmtSrc === 'none', W2.ir.fmt + '/' + W2.ir.fmtSrc);
+    W2.ir.fmt = 4; W2.ir.fmtSrc = 'read';
+  }
+
+  /* 9) 没有回执时不能剪枝：两套必须每次都发，且 144 B 排在前面 */
+  {
+    document.getElementById('dvLink').value = 'auto';
+    W2.ir.link = 'v2';
+    const orders = [];
+    W2.ir.write = { writeValueWithoutResponse: async (pkt) => { orders.push(pkt.length); } };
+    for (let n = 0; n < 3; n++) {
+      try { await W2.irProbe(W2.irStates.l, 0x0d, null, 30); } catch (e) { /* 预期无回执 */ }
+    }
+    chk('每次自动档都发两包（不因无回执剪枝）', orders.length === 6, orders.join(','));
+    chk('144 B 排在 80 B 之前', orders[0] === 144 && orders[1] === 80, orders.slice(0, 2).join(','));
+    chk('三轮顺序稳定', orders.length === 6
+      && orders[2] === 144 && orders[3] === 80 && orders[4] === 144 && orders[5] === 80, orders.join(','));
+
+    /* 默认首选必须是 144 B：这台设备测量帧是 0x09，契约只认 144 B */
+    chk('默认 link 是 144 B', W2.ir.link === 'v2', W2.ir.link);
+
+    /* 144 B 写失败（单包容量不足）要能换 80 B 再试，而不是直接报死 */
+    let tried = [];
+    W2.ir.link = 'v2';
+    W2.ir.write = {
+      writeValueWithoutResponse: async (pkt) => {
+        tried.push(pkt.length);
+        if (pkt.length === 144) throw new Error('value too long');
+      }
+    };
+    let swapped = '';
+    try { await W2.irProbe(W2.irStates.l, 0x0d, null, 30); } catch (e) { swapped = e.message; }
+    chk('144 B 写失败后仍试 80 B', tried.length === 2 && tried[1] === 80, tried.join(','));
+    /* 80 B 写成功但没回执 → 报的是「等不到回执」，不是写失败（写失败已在 144 B 那轮被换掉） */
+    chk('换到能写的 80 B 后按无回执处理', /等不到回执|无回执/.test(swapped), swapped.slice(0, 60));
+
+    document.getElementById('dvLink').value = 'auto';
+    W2.ir.link = 'v2';
+  }
+
+  W2.ir.dev = null; W2.ir.write = null; W2.ir.chr = null;
+  document.getElementById('dvLink').value = 'auto';
+
+  /* 10) 严格逐帧：本帧没带这个点就是 0，不保持 */
+  {
+    W2.ir.sel = 0;
+    W2.ir.t0 = performance.now() - 20000;
+
+    feed([mkFrame([[0, 3, 1249]])]);
+    W2.pwDraw();
+    chk('本帧带了这个点就显示本帧值', /1,?249/.test(sels.pwCur.textContent), sels.pwCur.textContent);
+    chk('鞋垫取帧值', W2.prCur(0) === 1249, String(W2.prCur(0)));
+
+    /* 下一帧只带别的点：本点本帧没带 → 立刻 0 */
+    const p3 = W2.irLut.indexOf(2);
+    const sr3 = 13 - Math.floor(p3 / 5), cl3 = p3 % 5;
+    feed([mkFrame([[sr3, cl3, 900]])]);
+    W2.pwDraw();
+    chk('本帧没带就立刻是 0', W2.prCur(0) === 0, String(W2.prCur(0)));
+    chk('实时值也归 0', /^0 /.test(sels.pwCur.textContent), sels.pwCur.textContent);
+    chk('本帧带的点有值', W2.prCur(2) === 900, String(W2.prCur(2)));
+
+    chk('从未上报的点是 0', W2.prCur(40) === 0, String(W2.prCur(40)));
+
+    feed([mkFrame([[0, 3, 777]])]);
+    chk('回到有值时恢复', W2.prCur(0) === 777, String(W2.prCur(0)));
+    feed([mkFrame([])]);
+    chk('空帧把所有点清零', W2.prCur(0) === 0 && W2.prCur(2) === 0,
+      W2.prCur(0) + '/' + W2.prCur(2));
+  }
+
+  /* 11) 下载 parquet 的可用态跟着录制走：停止记录后必须能点 */
+  {
+    const L = W2.irStates.l, R = W2.irStates.r;
+    W2.setCur('l');
+    L.dev = { name: 'W02-L', gatt: { connected: true } };
+    L.chr = {};
+    R.dev = null;
+    L.rec.length = 0; R.rec.length = 0;
+    W2.irHead();
+    chk('没录过帧时 parquet 是灰的', sels['btnIrParquet-l'].disabled === true, String(sels['btnIrParquet-l'].disabled));
+    await W2.toggleRec();
+    feed([mkFrame([[0, 3, 500]])]);
+    chk('录制中的帧落到 rec', L.rec.length === 1, L.rec.length);
+    W2.stopRec();
+    chk('停止记录后 parquet 可点', sels['btnIrParquet-l'].disabled === false, String(sels['btnIrParquet-l'].disabled));
+    await W2.toggleRec();
+    chk('新一轮记录清空后 parquet 回灰', sels['btnIrParquet-l'].disabled === true, String(sels['btnIrParquet-l'].disabled));
+    W2.stopRec();
+    chk('空记录停止后仍灰', sels['btnIrParquet-l'].disabled === true, String(sels['btnIrParquet-l'].disabled));
+  }
+
+/* 12) 没上报的时间段按 0 画：不再断线、不再留占位字 */
+  {
+    W2.prReset();                  /* frame 是本帧快照：重置后 = 这帧没带值，不靠上一节残留 */
+    W2.ir.sel = 0;
+    W2.ir.t0 = performance.now() - 8000;
+    W2.ir.hist[0].length = 0;
+    W2.ir.seen[0] = 1;
+    W2.ir.ps[0] = 5000;
+    W2.ir.lastSeen[0] = 4.0;
+    W2.pwPush(0, 4.0, 5000);
+    W2.pwDraw();
+    /* 这条不再依赖"超时"：frame 里没有值就是 0 */
+    chk('frame 没值就显示 0', /^0 g$/.test(sels.pwCur.textContent), sels.pwCur.textContent);
+    chk('全部点一开始都是 0', [...W2.ir.frame].every((v) => v === 0) || W2.ir.frame[0] === 0, '');
+
+    const lum = (c) => { const m = c.match(/\d+/g).map(Number); return m[0] + m[1] + m[2]; };
+    const c0 = W2.prColor(0), cHi = W2.prColor(8000), cMid = W2.prColor(2500);
+    chk('0 值近白', lum(c0) > 700, c0);
+    chk('高值明显更深', lum(cHi) < lum(c0) - 300, cHi + ' vs ' + c0);
+    chk('中值介于两者之间', lum(cMid) < lum(c0) && lum(cMid) > lum(cHi), cMid);
+    W2.ir.seen[2] = 0;
+    chk('没上报的点按 0 取色', W2.prCur(2) === 0, String(W2.prCur(2)));
+  }
+
+/* 13) 色阶在常用区间要有区分度：线性 + 10000 满量程会把 1~3k 全挤在浅色端 */
+  {
+    const lum = (c) => { const m = c.match(/\d+/g).map(Number); return m[0] + m[1] + m[2]; };
+    const at = (v) => lum(W2.prColor(v));
+    chk('1.2k 与 2.6k 能区分', Math.abs(at(1200) - at(2600)) > 60, at(1200) + ' vs ' + at(2600));
+    chk('单调递增变深', at(300) > at(1200) && at(1200) > at(2600) && at(2600) > at(5000),
+      [300, 1200, 2600, 5000].map(at).join(' > '));
+    chk('顶到 10000 最深', at(10000) < at(5000), at(10000) + ' vs ' + at(5000));
+
+    chk('四位压成 k', W2.prLabel(2600) === '2.6k', W2.prLabel(2600));
+    chk('上限不撑破圆圈', W2.prLabel(10000) === '10k', W2.prLabel(10000));
+    chk('三位原样', W2.prLabel(300) === '300', W2.prLabel(300));
+    chk('0 就是 0', W2.prLabel(0) === '0', W2.prLabel(0));
+  }
+
+
+  /* 13.5) 广播名认脚别：带 -R/-L 的认得出，认不出留给「空着的那只」 */
+  {
+    chk('广播名 -R 认右脚', W2.footFromName('W01-R') === 'r', String(W2.footFromName('W01-R')));
+    chk('广播名 -L 认左脚', W2.footFromName('W01-L') === 'l', String(W2.footFromName('W01-L')));
+    chk('名字看不出就返回 null', W2.footFromName('D56V01') === null, String(W2.footFromName('D56V01')));
+  }
+
+  /* 14) 双鞋垫：两只各自独立，同一槽位不串数据 */
+  {
+    const L = W2.irStates.l, R = W2.irStates.r;
+    L.buf = new Uint8Array(0); R.buf = new Uint8Array(0);
+    L.rec.length = 0; R.rec.length = 0;
+    W2.prReset('l'); W2.prReset('r');
+    const fL = L.frames, fR = R.frames;
+    W2.irFeed(mkFrame([[0, 3, 111]]), 'l');
+    W2.irFeed(mkFrame([[0, 1, 222]]), 'r');   /* 右脚点 1 在槽位 66 */
+    chk('两只鞋垫各拿各的值', L.ps[0] === 111 && R.ps[0] === 222, L.ps[0] + '/' + R.ps[0]);
+    chk('帧计数分别累加', L.frames === fL + 1 && R.frames === fR + 1,
+      (L.frames - fL) + '/' + (R.frames - fR));
+
+    /* 选中点、波形、记录各是一份 */
+    L.sel = -1; R.sel = -1;                  /* pwPick 是开关，先清掉旧的选中 */
+    W2.setCur('l'); W2.pwPick(0);
+    W2.setCur('r'); W2.pwPick(1);
+    chk('选中点互不影响', L.sel === 0 && R.sel === 1, L.sel + '/' + R.sel);
+    L.hist[0].length = 0; R.hist[0].length = 0;
+    L.buf = new Uint8Array(0); R.buf = new Uint8Array(0);
+    W2.irFeed(mkFrame([[0, 3, 500]]), 'l');
+    chk('喂左脚不动右脚波形', L.hist[0].length === 1 && R.hist[0].length === 0,
+      L.hist[0].length + '/' + R.hist[0].length);
+
+    L.recording = true; R.recording = false;
+    L.rec.length = 0; R.rec.length = 0;
+    W2.irFeed(mkFrame([[0, 3, 600]]), 'l');
+    chk('记录只落在一只脚上', L.rec.length === 1 && R.rec.length === 0,
+      L.rec.length + '/' + R.rec.length);
+    L.recording = false;
+    W2.setCur('l');
+  }
+
+  /* 15) 清空数据：两只脚一起清、零偏一并重置；已录数据按确认结果去留 */
+  {
+    const L = W2.irStates.l, R = W2.irStates.r;
+    W2.state.recording = false;
+    L.rec.length = 0; R.rec.length = 0;
+    W2.state.rec = [1, 2];
+    L.recording = true; R.recording = true;
+    L.buf = new Uint8Array(0); R.buf = new Uint8Array(0);
+    W2.irFeed(mkFrame([[0, 3, 700]]), 'l');
+    W2.irFeed(mkFrame([[0, 3, 800]]), 'r');
+    L.recording = false; R.recording = false;
+    L.bias = Object.assign(W2.irBiasNew(), { g: [1.5, -2, 0.3], ready: true, still: 9,
+      mode: 'dynamic', anchor: [1.5, -2, 0.3], dynamic: { rows: [[1, 2, 3]] } });
+    R.bias = Object.assign(W2.irBiasNew(), { g: [0.4, 0.1, -0.2], ready: true, still: 5,
+      mode: 'dynamic', anchor: [0.4, 0.1, -0.2], dynamic: { rows: [[4, 5, 6]] } });
+
+    let msg = '';
+    global.confirm = (m) => { msg = m; return true; };
+    W2.clear();
+    chk('确认框报出 WT901 行数', /WT901 2 行/.test(msg), msg.split('\n')[0]);
+    chk('确认框报出鞋垫帧数', /鞋垫 2 帧（左 1 \/ 右 1）/.test(msg), msg.split('\n')[0]);
+    chk('确认后两脚 rec 都清空', L.rec.length === 0 && R.rec.length === 0, L.rec.length + '/' + R.rec.length);
+    chk('确认后 WT901 记录清空', W2.state.rec.length === 0, W2.state.rec.length);
+    chk('两脚实时缓冲都清空', L.samples.length === 0 && R.samples.length === 0
+      && L.frames === 0 && R.frames === 0, L.samples.length + '/' + R.samples.length);
+    chk('左脚零偏重置', L.bias.ready === false && L.bias.g.every((v) => v === 0) && L.bias.collect === null && L.bias.still === 0,
+      JSON.stringify(L.bias));
+    chk('右脚零偏重置', R.bias.ready === false && R.bias.g.every((v) => v === 0) && R.bias.collect === null && R.bias.still === 0,
+      JSON.stringify(R.bias));
+    chk('清空后两脚返回自动并清动态窗口和锚', [L, R].every((st) => st.bias.mode === 'dynamic'
+      && st.bias.dynamic === null && st.bias.anchor === null), L.bias.mode + '/' + R.bias.mode);
+    chk('清空后 parquet 回灰', sels['btnIrParquet-l'].disabled === true, String(sels['btnIrParquet-l'].disabled));
+
+    /* 取消 = 只清实时与零偏，已录数据留着导出 */
+    L.recording = true; R.recording = true;
+    L.buf = new Uint8Array(0); R.buf = new Uint8Array(0);
+    W2.irFeed(mkFrame([[0, 3, 701]]), 'l');
+    W2.irFeed(mkFrame([[0, 3, 801]]), 'r');
+    L.recording = false; R.recording = false;
+    W2.state.rec = [1];
+    L.bias = Object.assign(W2.irBiasNew(), { g: [1, 1, 1], ready: true, still: 3,
+      mode: 'dynamic', anchor: [1, 1, 1], dynamic: { rows: [[1, 1, 1]] } });
+    R.bias = Object.assign(W2.irBiasNew(), { g: [2, 2, 2], ready: true, still: 3,
+      mode: 'dynamic', anchor: [2, 2, 2], dynamic: { rows: [[2, 2, 2]] } });
+    global.confirm = (m) => { msg = m; return false; };
+    W2.clear();
+    chk('取消后已录数据保留', L.rec.length === 1 && R.rec.length === 1 && W2.state.rec.length === 1,
+      L.rec.length + '/' + R.rec.length + '/' + W2.state.rec.length);
+    chk('取消后零偏照样重置', L.bias.ready === false && R.bias.ready === false
+      && L.bias.g.every((v) => v === 0) && R.bias.g.every((v) => v === 0),
+      JSON.stringify(L.bias.g) + '/' + JSON.stringify(R.bias.g));
+    chk('保留录制时也返回自动并清动态窗口和锚', [L, R].every((st) => st.bias.mode === 'dynamic'
+      && st.bias.dynamic === null && st.bias.anchor === null), L.bias.mode + '/' + R.bias.mode);
+    chk('保留时 parquet 仍可点', sels['btnIrParquet-l'].disabled === false, String(sels['btnIrParquet-l'].disabled));
+
+    /* 没有任何已录数据就不该弹确认框 */
+    W2.state.rec = []; L.rec.length = 0; R.rec.length = 0;
+    let asked = false;
+    global.confirm = () => { asked = true; return true; };
+    W2.clear();
+    chk('没有已录数据不弹确认框', asked === false, String(asked));
+    delete global.confirm;
+    W2.setCur('l');
+  }
+
+  /* 16) 设备日历：帧时间取设备时钟增量（页面时钟只锚定零点），seq 跳号标丢帧 */
+  {
+    /* 帧头 11..14 = 十进制 YYYYMMDD，7..10 = HHMMSSmmm */
+    const c1 = W2.irDevClock(20261102, 141503570);
+    chk('设备日历解码 YYYYMMDD + HHMMSSmmm',
+      !!c1 && c1.date === '2026-11-02' && c1.time === '14:15:03.570', c1 && (c1.date + ' ' + c1.time));
+    const c2 = W2.irDevClock(20000104, 173521843);
+    chk('没对时的设备照样能解（值不可信，只采信增量）', !!c2 && c2.date === '2000-01-04', c2 && c2.date);
+    chk('帧头全 0 不算日历', W2.irDevClock(0, 0) === null, String(W2.irDevClock(0, 0)));
+    chk('非法日/时被拒', W2.irDevClock(20261132, 141503570) === null
+      && W2.irDevClock(20261102, 256000000) === null, '');
+
+    const L = W2.irStates.l, R = W2.irStates.r;
+    W2.setCur('l');
+    L.dev = { name: 'W02-L', gatt: { connected: true } };
+    L.chr = {};
+    R.dev = { name: 'W02-R', gatt: { connected: true } };
+    R.chr = {};
+    const D = 20261102;
+    const resetClk = (st) => { st.clk = W2.irClkNew(); st.effMs = 0; st.buf = new Uint8Array(0); };
+
+    /* 用可控时钟模拟真实到达：设备时间稳定 +20 ms，到达时刻 = 理想时刻 + 抖动（0~9 ms）。
+       抖动不能累积到页面前进里，否则延迟会越滚越大、看起来像设备时钟在漂。 */
+    const realPerf = global.performance;
+    let fnow = 5000, ideal = 5000, tsNow = 141503570;
+    Object.defineProperty(global, 'performance', {
+      value: { now: () => fnow }, configurable: true, writable: true
+    });
+    const put = (foot, seq, dts, jit) => {
+      ideal += 20; tsNow += dts;
+      fnow = ideal + jit;
+      W2.irFeed(mkFrame([[0, 3, 500]], { seq, date: D, ts: tsNow }), foot);
+    };
+    const oneL = (jit, seq, dts) => put('l', seq, dts === undefined ? 20 : dts, jit);
+    /* 同一 tick 两脚各发一帧，按到达先后灌（fnow 只能往前） */
+    const tick = (jitL, jitR, seq) => {
+      ideal += 20; tsNow += 20;
+      for (const [foot, j] of [['l', jitL], ['r', jitR]].sort((a, b) => a[1] - b[1])) {
+        fnow = ideal + j;
+        W2.irFeed(mkFrame([[0, 3, 500]], { seq, date: D, ts: tsNow }), foot);
+      }
+    };
+
+    /* 两脚各自锚定：首帧延迟不同（左 0 / 右 7 ms），但都遇得到 0 延迟那次 */
+    const JL = [0, 6, 3, 9, 1], JR = [7, 0, 5, 9, 1];
+    resetClk(L); resetClk(R);
+    for (let i = 0; i < 45; i++) tick(JL[i % 5], JR[i % 5], 400 + i);
+    tick(4, 9, 900);
+    chk('同一设备时刻的两脚时标对齐（最小延迟锚定）',
+      Math.abs(L.last.perf - R.last.perf) < 2, (L.last.perf - R.last.perf).toFixed(2));
+
+    /* 录制：设备时间每帧 +20，到达抖动 8/1/6 —— 帧时间必须跟设备走 */
+    resetClk(L);
+    for (let i = 0; i < 45; i++) oneL(JL[i % 5], 500 + i);
+    await W2.toggleRec();
+    oneL(8, 100); oneL(1, 101); oneL(6, 105);
+    W2.stopRec();
+    chk('三帧都进了 rec', L.rec.length === 3, L.rec.length);
+    chk('帧上挂了解出来的设备日历', !!L.rec[0].clk && /^\d\d:\d\d:\d\d\.\d{3}$/.test(L.rec[0].clk.time),
+      L.rec[0].clk && L.rec[0].clk.time);
+    const devGap = L.rec[1].effMs - L.rec[0].effMs;
+    chk('帧时间跟设备时钟走（20 ms）', Math.abs(devGap - 20) < 1, devGap.toFixed(2));
+    chk('对照：到达时刻被抖动揉成 13 / 25 ms',
+      Math.abs((L.rec[1].t - L.rec[0].t) * 1000 - 13) < 1
+      && Math.abs((L.rec[2].t - L.rec[1].t) * 1000 - 25) < 1,
+      ((L.rec[1].t - L.rec[0].t) * 1000).toFixed(0) + '/' + ((L.rec[2].t - L.rec[1].t) * 1000).toFixed(0));
+    chk('时间来源标成 device', L.rec[0].tSrc === 'device', L.rec[0].tSrc);
+
+    const col = W2.irParquetColumns();
+    const names = col.cols.map((c) => c.name);
+    const at = (k) => col.cols[names.indexOf(k)].data;
+    chk('导出含 device_date / device_time / dropped_frames_before',
+      ['device_date', 'device_time', 'dropped_frames_before'].every((k) => names.includes(k)), names.length + ' 列');
+    chk('device_date 是设备原文', at('device_date')[0] === '2026-11-02', at('device_date')[0]);
+    chk('device_time 带毫秒', /^\d\d:\d\d:\d\d\.\d{3}$/.test(at('device_time')[2]), at('device_time')[2]);
+    chk('seq 100→101→105 标成缺 0/0/3', JSON.stringify(at('dropped_frames_before')) === '[0,0,3]',
+      JSON.stringify(at('dropped_frames_before')));
+    chk('导出信息里汇总丢帧数', col.drop === 3, col.drop);
+    chk('effective_elapsed_us 由设备时钟推出',
+      Number(at('effective_elapsed_us')[1] - at('effective_elapsed_us')[0]) === 20000
+      && Number(at('effective_elapsed_us')[2] - at('effective_elapsed_us')[0]) === 40000,
+      [0, 1, 2].map((i) => String(at('effective_elapsed_us')[i])).join(','));
+
+    /* 设备被校时（跳 5 s）→ 重锚，不让整段时间轴跟着走 */
+    resetClk(L);
+    for (let i = 0; i < 45; i++) oneL(JL[i % 5], 600 + i);
+    await W2.toggleRec();
+    oneL(2, 200); oneL(2, 201); oneL(2, 202, 5020);
+    W2.stopRec();
+    chk('设备时钟跳 5 s 后重锚', L.clk.reanchor === 1, L.clk.reanchor);
+    chk('重锚不让时间轴跟着跳', Math.abs(L.rec[2].effMs - L.rec[1].effMs) < 100,
+      (L.rec[2].effMs - L.rec[1].effMs).toFixed(1));
+
+    /* 设备时钟只按整秒走 → 不能当时间基准，退回用到达时刻 */
+    resetClk(L);
+    await W2.toggleRec();
+    for (let i = 0; i < 4; i++) oneL(2, 300 + i, 0);
+    W2.stopRec();
+    chk('连续同值判定设备时钟过粗', L.clk.coarse === true, String(L.clk.coarse));
+    chk('过粗之后改用到达时刻', L.rec[3].tSrc === 'host', L.rec[3].tSrc);
+    chk('过粗前几帧仍按设备时钟', L.rec[0].tSrc === 'device', L.rec[0].tSrc);
+    chk('帧时间来源汇总成 mixed', W2.irParquetColumns().clk === 'mixed', W2.irParquetColumns().clk);
+
+    Object.defineProperty(global, 'performance', { value: realPerf, configurable: true, writable: true });
+    resetClk(L); resetClk(R);
+    L.rec.length = 0; R.rec.length = 0;
+    L.dev = null; R.dev = null;
+    W2.irHead();
+  }
+
+  /* 17) 导出与 app 的 standard_measurement_frames 逐列对齐 */
+  {
+    chk('sha256 与标准向量一致', W2.sha256Hex('abc')
+      === 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad', W2.sha256Hex('abc'));
+    const u = W2.ulid(1469918176385);
+    chk('ULID 是 26 位 Crockford base32', /^[0-9A-HJKMNP-TV-Z]{26}$/.test(u), u);
+    chk('ULID 前 10 位是可排序的毫秒时间', u.slice(0, 10) === '01ARYZ6S41', u.slice(0, 10));
+
+    const L = W2.irStates.l;
+    W2.setCur('l');
+    L.dev = { name: 'W02-L', gatt: { connected: true } };
+    L.chr = {};
+    L.rec.length = 0;
+    W2.state.rec = [];
+    L.clk = W2.irClkNew(); L.effMs = 0; L.buf = new Uint8Array(0);
+    const D = 20261102, T0 = 141503570;
+    await W2.toggleRec();
+    const f1 = mkFrame([[0, 3, 500]], { seq: 100, date: D, ts: T0 });
+    feed([f1, mkFrame([[0, 3, 600]], { seq: 101, date: D, ts: T0 + 20 }),
+      mkFrame([[0, 3, 700]], { seq: 105, date: D, ts: T0 + 60 })]);
+    W2.stopRec();
+
+    const col = W2.irParquetColumns();
+    const names = col.cols.map((c) => c.name);
+    const at = (k) => col.cols[names.indexOf(k)].data;
+    const leaf = (nm) => col.schema.find((s) => s.name === nm) || {};
+
+    chk('列数 = app 62 + 自定义 5', names.length === 67 && APP_COLS.length === 62, names.length);
+    chk('前 62 列与 app 同名同序', JSON.stringify(names.slice(0, 62)) === JSON.stringify(APP_COLS),
+      names.slice(0, 62).filter((v, i) => v !== APP_COLS[i]).join(',') || 'ok');
+    chk('自定义列排在末尾', JSON.stringify(names.slice(62)) === JSON.stringify(
+      ['placement_code', 'gyro_temperature_celsius', 'device_date', 'device_time', 'dropped_frames_before']),
+      names.slice(62).join(','));
+    /* 侧别两列都写：app 5.x 的下游按 placement_code 筛左右，只认 assigned_side 的照样能用 */
+    chk('placement_code 写 left_instep', at('placement_code').every((v) => v === 'left_instep'),
+      at('placement_code')[0]);
+    /* 温度列名照 app 5.x，值是帧里 0.01 ℃ 的 int16 / 100；测试帧默认 2796 */
+    chk('gyro_temperature_celsius = tempRaw/100', at('gyro_temperature_celsius')[0] === 27.96
+      && leaf('gyro_temperature_celsius').type === 'DOUBLE', String(at('gyro_temperature_celsius')[0]));
+    chk('schema 项数 = 1 + 54 标量 + 13 列表 × 3', col.schema.length === 94, col.schema.length);
+    chk('connection_epoch 是 UINT_64', leaf('connection_epoch').type === 'INT64'
+      && leaf('connection_epoch').converted_type === 'UINT_64', JSON.stringify(leaf('connection_epoch')));
+    chk('source_frame_ordinal 是无符号转换的 INT64', leaf('source_frame_ordinal').type === 'INT64'
+      && !leaf('source_frame_ordinal').converted_type);
+    chk('pressure_raw_bits 是可选 LIST', leaf('pressure_raw_bits').converted_type === 'LIST'
+      && leaf('pressure_raw_bits').repetition_type === 'OPTIONAL');
+    chk('列表元素类型逐列区分', col.schema.filter((s) => s.name === 'element')
+      .map((s) => s.type).join(',') ===
+      'INT32,DOUBLE,DOUBLE,INT32,DOUBLE,DOUBLE,BYTE_ARRAY,INT32,INT64,INT64,INT64,INT64,BYTE_ARRAY',
+      col.schema.filter((s) => s.name === 'element').map((s) => s.type).join(','));
+
+    chk('source_frame_ordinal 在丢帧处跳号', JSON.stringify(at('source_frame_ordinal').map(Number))
+      === '[1,2,6]', at('source_frame_ordinal').map(Number).join(','));
+    chk('source_frame_ordinal_delta = 1/1/4', JSON.stringify(at('source_frame_ordinal_delta')
+      .map((v) => (v === null ? null : Number(v)))) === '[null,1,4]');
+    chk('continuity_status 三态齐全', JSON.stringify(at('continuity_status'))
+      === '["boundary_start","continuous","source_gap"]', at('continuity_status').join(','));
+    chk('丢帧行带 quality flag', JSON.stringify(at('quality_flag_codes'))
+      === '[[],[],["measurement_sequence_gap"]]', JSON.stringify(at('quality_flag_codes')[2]));
+    /* 帧时间映射的精度在 16) 用可控时钟逐毫秒验过，这里只验结构：首行无前值、之后不倒退 */
+    chk('effective 首行无 delta、其余非负', at('effective_elapsed_delta_us')[0] === null
+      && at('effective_elapsed_delta_us').slice(1).every((v) => Number(v) >= 0),
+      at('effective_elapsed_delta_us').join(','));
+    chk('设备日历可用时状态为 mapped', at('effective_time_status').every((v) => v === 'mapped'));
+    chk('device_time_raw 是打包的 HHMMSSmmm', at('device_time_raw')[2] === T0 + 60, at('device_time_raw')[2]);
+    chk('source_time_value 是设备日历的 epoch ms',
+      Number(at('source_time_value')[0]) === new Date(2026, 10, 2, 14, 15, 3, 570).getTime(),
+      String(at('source_time_value')[0]));
+
+    const ids = ['dataset_id', 'session_id', 'processing_input_snapshot_id',
+      'processing_attempt_id', 'alignment_revision_id', 'capture_stream_id', 'stream_segment_id',
+      'capture_period_id'];
+    chk('8 个标识都是 26 位 ULID', ids.every((k) => /^[0-9A-HJKMNP-TV-Z]{26}$/.test(at(k)[0])),
+      ids.map((k) => at(k)[0].length).join(','));
+    chk('frame_identity 是 sha256 且逐行不同',
+      /^[0-9a-f]{64}$/.test(at('frame_identity')[0])
+      && new Set(at('frame_identity')).size === 3, at('frame_identity')[0]);
+    chk('raw_packet_sha256 = 原始帧的 sha256', at('raw_packet_sha256')[0] === W2.sha256Hex(f1),
+      at('raw_packet_sha256')[0]);
+    chk('pressure_raw_bits / imu_raw_bits 是空 list',
+      at('pressure_raw_bits').every((a) => a.length === 0) && at('imu_raw_bits').every((a) => a.length === 0));
+    chk('压力数组宽度 70 / 56', at('pressure_raw_values')[0].length === 70
+      && at('pressure_values')[0].length === 56);
+    chk('source_native_sequences 带 seq', JSON.stringify(at('source_native_sequences')
+      .map((a) => a.map(Number))) === '[[100],[101],[105]]', JSON.stringify(at('source_native_sequences')[2].map(Number)));
+    chk('observed_session_elapsed_us 单调不减',
+      at('observed_session_elapsed_us').every((v, i, a) => i === 0 || Number(v) >= Number(a[i - 1])));
+
+    /* 设备日历解不出来时不冒充设备时间：状态 unavailable、effective 留空 */
+    L.rec.length = 0; L.clk = W2.irClkNew(); L.effMs = 0;
+    await W2.toggleRec();
+    feed([mkFrame([[0, 3, 500]], { seq: 10, date: 0, ts: 0 }),
+      mkFrame([[0, 3, 600]], { seq: 11, date: 0, ts: 0 })]);
+    W2.stopRec();
+    const c2 = W2.irParquetColumns();
+    const n2 = c2.cols.map((c) => c.name);
+    const b2 = (k) => c2.cols[n2.indexOf(k)].data;
+    chk('设备日历不可用时状态 unavailable', b2('effective_time_status').every((v) => v === 'unavailable'),
+      b2('effective_time_status')[0]);
+    chk('unavailable 时 effective / aligned 为空',
+      b2('effective_elapsed_us').every((v) => v === null) && b2('aligned_session_elapsed_us').every((v) => v === null));
+    chk('时间域标 unknown 而不是 device_local_calendar',
+      b2('source_time_domain').every((v) => v === 'unknown'), b2('source_time_domain')[0]);
+    chk('source_time_value 退回本机收到时刻', Number(b2('source_time_value')[0]) > 1e12,
+      String(b2('source_time_value')[0]));
+    chk('时基汇总成 host-fallback', c2.clk === 'host-fallback', c2.clk);
+
+    L.rec.length = 0; L.dev = null;
+    W2.irHead();
+  }
+
+  console.log(ok.join('\n'));
+  console.log('\n小计 ' + ok.filter((x) => x.startsWith('PASS')).length + '/' + ok.length + ' 通过');
+})();
