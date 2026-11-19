@@ -2,8 +2,9 @@
 const path = require('node:path');
 const readline = require('node:readline');
 const { createBiasTracker } = require(path.resolve(__dirname, 'reference/insole_bias.cjs'));
-const gate = process.env.WALKPAD_BIAS_GATE || 'confirmed';
-if (!['legacy', 'bounded', 'confirmed'].includes(gate)) throw new Error('unknown WALKPAD_BIAS_GATE');
+const configuredGate = process.env.WALKPAD_BIAS_GATE || 'confirmed';
+const gate = configuredGate === 'bounded' ? 'confirmed' : configuredGate;
+if (gate !== 'legacy' && gate !== 'confirmed') throw new Error('unknown WALKPAD_BIAS_GATE');
 let feet;
 function reset() {
   feet = new Map();
@@ -12,8 +13,7 @@ function reset() {
 function track(key) {
   let f = feet.get(key);
   if (!f) {
-    // legacy 关闭大偏移复核，其余模式都按“6 秒静止确认”恢复。
-    f = { tracker: createBiasTracker({ recovery: gate !== 'legacy' }), connection: null, retired: new Set(), generation: 0, previous: null, clock: null };
+    f = { tracker: createBiasTracker({ recovery: gate === 'confirmed' }), connection: null, retired: new Set(), generation: 0, previous: null, clock: null };
     feet.set(key, f);
   }
   return f;

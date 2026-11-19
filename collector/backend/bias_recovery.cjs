@@ -7,29 +7,36 @@ function createBiasRecovery(overrides = {}) {
   let phase = 'initializing', fast = false, confirmed = 0;
   function invalidate() { fast = false; phase = 'holding'; }
   function reset() { fast = false; phase = 'initializing'; confirmed = 0; }
-  /* drift / gravity 是候选静止跨度内首尾均值差，由调用方按同一批帧算出。 */
-  function assess({ bias, gyro, drift, gravity, runMs }) {
+  function assess({ bias, gyro, runMs, measureStability }) {
     const innovation = Math.hypot(...gyro.map((x, k) => x - bias[k]));
     if (innovation > limits.max) {
       invalidate(); phase = 'change_too_large';
-      return { hold: true, reason: '候选偏移超出恢复上限，保留补偿' };
+      return { hold: true, reason: '候选偏移超出恢复上限，保留原补偿' };
     }
     if (innovation > limits.innovation) {
+      let reason;
+      if (runMs < limits.confirm) {
+        const elapsed = (Math.floor(runMs / 100) / 10).toFixed(1);
+        reason = `候选偏移 ${innovation.toFixed(2)} °/s · 连续静止确认 ${elapsed}/${limits.confirm / 1000} 秒`;
+      } else {
+        const stability = measureStability(limits.confirm);
+        if (!stability || !Number.isFinite(stability.gyro) || !Number.isFinite(stability.gravity)) {
+          reason = '有效静止样本不足';
+        } else if (stability.gyro > limits.drift || stability.gravity > limits.gravity) {
+          reason = '候选静止跨度内仍有变化';
+        }
+      }
+      if (reason) {
+        fast = false; phase = 'confirming';
+        return { hold: true, reason: reason + ' · 保留原补偿' };
+      }
+      if (!fast) confirmed++;
+      fast = true;
+    } else if (innovation <= limits.settled) {
       fast = false;
-      if (!(runMs >= limits.confirm)) {
-        phase = 'confirming';
-        return { hold: true, reason: '候选偏移 ' + innovation.toFixed(2) + ' °/s，等待 6 秒静止复核' };
-      }
-      if (!(drift <= limits.drift) || !(gravity <= limits.gravity)) {
-        phase = 'confirming';
-        return { hold: true, reason: '候选静止跨度内仍在变化，保留补偿' };
-      }
-      fast = true; confirmed++; phase = 'fast_tracking';
-      return { hold: false, tau: limits.fastTau };
     }
-    if (fast && innovation <= limits.settled) fast = false;
     phase = fast ? 'fast_tracking' : 'slow_tracking';
-    return { hold: false, tau: fast ? limits.fastTau : limits.slowTau };
+    return { hold: false, fast, tau: fast ? limits.fastTau : limits.slowTau };
   }
   return { assess, invalidate, reset, initialized() { fast = false; phase = 'slow_tracking'; },
     snapshot: () => ({ phase, confirmed_changes: confirmed, fast, limits: { ...limits } }) };

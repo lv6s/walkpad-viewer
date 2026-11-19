@@ -234,16 +234,20 @@ function irBiasDynamic(st, s) {
     irBiasText(st); return;
   }
   const obs = short.stats.mu.slice(0, 3);
-  let tau = IR_DYN_SLOW_TAU;
+  let tau = IR_DYN_SLOW_TAU, fast = false;
   if (recovery) {
-    const drift = irBiasDrift(rows, c.runStart, now);
-    const decision = recovery.assess({ bias: b.g, gyro: obs, drift: drift.gyro, gravity: drift.gravity, runMs });
+    const decision = recovery.assess({ bias: b.g, gyro: obs, runMs, measureStability(confirmMs) {
+      // 复核只看最近一段完整静止窗，不能引用已淘汰的静止起点。
+      const from = now - confirmMs;
+      return from >= c.runStart && from >= rows[0][6] ? irBiasDrift(rows, from, now) : null;
+    } });
     if (decision.hold) {
       c.learning = false; lastReject = decision.reason;
       b.status = decision.reason;
       irBiasText(st); return;
     }
     tau = decision.tau;
+    fast = decision.fast;
   } else if (Math.hypot(...obs.map((v, k) => v - b.g[k])) > 0.8) {
     c.learning = false;
     b.status = '候选偏移过大，保留补偿；需静止校准或重新佩戴确认';
@@ -257,8 +261,7 @@ function irBiasDynamic(st, s) {
   b.g = b.g.map((v, k) => v + delta[k] * scale);
   if (!c.learning) { c.learning = true; acceptedWindows++; }
   lastReject = null;
-  b.status = recovery && recovery.snapshot().phase === 'fast_tracking'
-    ? '静止复核通过 · 快速重定位' : '在线跟踪 · 已更新';
+  b.status = fast ? '静止确认通过 · 快速跟随中' : '在线跟踪 · 已更新';
   irBiasText(st);
 }
 
@@ -393,7 +396,7 @@ function irBiasReset(st, silent) {
   function snapshot() {
     const b = st.bias;
     return { ready: b.ready, gyro_bias_dps: [...b.g], mode: b.mode, status: b.status, candidate_frames: b.still,
-      gate_version: recovery ? 'confirmed-rest-v3' : 'bounded-noise-v2', last_reject: lastReject,
+      gate_version: recovery ? 'confirmed-rest-v4' : 'bounded-noise-v2', last_reject: lastReject,
       accepted_windows: acceptedWindows, rejected_windows: rejectedWindows, diagnostics,
       ...(recovery ? { recovery: recovery.snapshot() } : {}) };
   }

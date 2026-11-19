@@ -20,10 +20,13 @@ function records(plan) {
   return out;
 }
 
-function run(plan) {
+function run(plan, gate) {
   const input = JSON.stringify({ records: records(plan) }) + '\n';
+  const env = { ...process.env };
+  delete env.WALKPAD_BIAS_GATE;
+  if (gate) env.WALKPAD_BIAS_GATE = gate;
   const stdout = execFileSync(process.execPath, [path.join(ROOT, 'backend', 'bias_worker.cjs')],
-    { input, encoding: 'utf-8', maxBuffer: 1 << 28, env: { ...process.env, WALKPAD_BIAS_GATE: 'confirmed' } });
+    { input, encoding: 'utf-8', maxBuffer: 1 << 28, env });
   const result = JSON.parse(stdout);
   assert.equal(result.ok, true, result.error);
   return result;
@@ -55,6 +58,29 @@ test('穿戴级 2.5 °/s 偏移在 6 秒静止复核后跟上', () => {
   const r = run([[7, 6.0], [2, 60], [14, 8.5]]);
   const tail = r.states[r.states.length - 1].gyro_bias_dps[0];
   assert.ok(tail > 8.0 && tail < 8.7, String(tail));
+});
+
+test('确认期间保持就绪并继续用旧偏置输出', () => {
+  const r = run([[7, 6], [2, 60], [5, 8.5]]);
+  const confirming = r.states.filter(s => s.recovery.phase === 'confirming');
+  assert.ok(confirming.length > 0);
+  const events = new Map(r.events.map(e => [e.available_ms, e]));
+  for (const state of confirming) {
+    assert.ok(state.ready);
+    assert.ok(Math.abs(state.gyro_bias_dps[0] - 6) < 0.08);
+    const e = events.get(state.processing_ms);
+    assert.ok(e, '确认期间不能丢弃已就绪帧');
+    assert.equal(e.values[3], e.raw[4] * 0.07 - state.gyro_bias_dps[0]);
+  }
+});
+
+test('bounded 兼容默认模式，legacy 不启用大偏移恢复', () => {
+  const plan = [[7, 6], [2, 60], [14, 8.5]];
+  assert.deepEqual(run(plan, 'bounded'), run(plan, 'confirmed'));
+  const last = run(plan, 'legacy').states.at(-1);
+  assert.equal(last.gate_version, 'bounded-noise-v2');
+  assert.equal(last.recovery, undefined);
+  assert.ok(Math.abs(last.gyro_bias_dps[0] - 6) < 0.08);
 });
 
 test('未就绪时不产生事件', () => {

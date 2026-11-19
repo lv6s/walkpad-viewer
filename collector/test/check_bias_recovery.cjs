@@ -5,6 +5,7 @@
    需要 ≥6 s 连续静止且首尾一致才快速重定位；>8 °/s 一律保留补偿。
    恒速转动与零偏在六轴上不可区分，本文件明确展示这一物理局限。 */
 const assert = require('node:assert/strict');
+const { createBiasRecovery } = require('../backend/bias_recovery.cjs');
 const { createBiasTracker } = require('../backend/reference/insole_bias.cjs');
 let count = 0;
 function test(name, fn) { fn(); console.log('PASS', name); count++; }
@@ -28,7 +29,7 @@ test('静止 5 秒合格才初始化，4.5 秒不足', () => {
   const r = rig();
   assert.equal(r.feed(4.5).ready, false);
   assert.equal(r.feed(1.0).ready, true);
-  assert.equal(r.tr.snapshot().gate_version, 'confirmed-rest-v3');
+  assert.equal(r.tr.snapshot().gate_version, 'confirmed-rest-v4');
 });
 
 test('初始化均值按时间加权，与真实偏置一致', () => {
@@ -89,7 +90,8 @@ test('穿戴级 2.5 °/s 台阶：先不学，6 秒静止复核后快速重定�
   const r = rig(); r.feed(6); r.feed(2, [60, 0, 0]);
   const hold = r.feed(6.2, [2.5, 0, 0]);
   assert.ok(hold.gyro_bias_dps[0] < 0.2, '复核前不能直接吸收：' + hold.gyro_bias_dps);
-  assert.match(hold.status, /等待 6 秒静止复核|已更新/);
+  assert.match(hold.status, /连续静止确认 5\.\d\/6 秒 · 保留原补偿/);
+  assert.equal(hold.recovery.confirmed_changes, 0);
   const moved = r.feed(8, [2.5, 0, 0]);
   assert.ok(moved.gyro_bias_dps[0] > 2.0, String(moved.gyro_bias_dps));
   assert.ok(moved.gyro_bias_dps[0] < 2.6, String(moved.gyro_bias_dps));
@@ -100,6 +102,16 @@ test('重定位收敛后回到慢跟踪', () => {
   const s = r.tr.snapshot();
   assert.equal(s.recovery.phase, 'slow_tracking');
   assert.ok(Math.abs(s.gyro_bias_dps[0] - 2.5) < 0.12, String(s.gyro_bias_dps));
+});
+
+test('7.5 °/s 持续偏移跨过历史窗口后仍能完整收敛', () => {
+  for (const hz of [20, 50, 100]) {
+    const r = rig(hz); r.feed(6);
+    const s = r.feed(40, [7.5, 0, 0]);
+    assert.equal(s.recovery.phase, 'slow_tracking', `${hz} Hz: ${s.status}`);
+    assert.ok(Math.abs(s.gyro_bias_dps[0] - 7.5) < 0.1, String(s.gyro_bias_dps));
+    assert.equal(s.recovery.confirmed_changes, 1);
+  }
 });
 
 test('超过 8 °/s 的偏移一律保留补偿', () => {
@@ -115,6 +127,33 @@ test('复核期间再次运动立即停止学习', () => {
   const s = r.feed(3, [60, 0, 0]);
   assert.deepEqual(s.gyro_bias_dps, before);
   assert.equal(s.recovery.fast, false);
+});
+
+test('中断后重新积累完整确认窗，两次通过各计一次', () => {
+  const r = rig(); r.feed(6); r.feed(8, [2.5, 0, 0]);
+  assert.equal(r.tr.snapshot().recovery.phase, 'fast_tracking');
+  assert.equal(r.tr.snapshot().recovery.confirmed_changes, 1);
+  r.feed(0.1, [60, 0, 0]);
+  const before = r.tr.snapshot().gyro_bias_dps;
+  const hold = r.feed(6.2, [2.5, 0, 0]);
+  assert.equal(hold.recovery.phase, 'confirming');
+  assert.deepEqual(hold.gyro_bias_dps, before);
+  assert.equal(hold.recovery.confirmed_changes, 1);
+  assert.equal(r.feed(1, [2.5, 0, 0]).recovery.confirmed_changes, 2);
+});
+
+test('复核进度取自配置，缺样与不稳定均不能通过', () => {
+  const recovery = createBiasRecovery({ confirm: 4000 });
+  const check = (runMs, measureStability) => recovery.assess({
+    bias: [0, 0, 0], gyro: [2.5, 0, 0], runMs, measureStability
+  });
+  assert.match(check(3999, () => assert.fail('未满确认窗不应计算稳定性')).reason, /3\.9\/4 秒/);
+  assert.match(check(4000, () => null).reason, /样本不足/);
+  assert.match(check(4000, () => ({ gyro: 0.4, gravity: 0 })).reason, /仍有变化/);
+  assert.equal(check(4000, span => {
+    assert.equal(span, 4000);
+    return { gyro: 0.2, gravity: 0.01 };
+  }).fast, true);
 });
 
 test('断流保留补偿并清除候选', () => {
