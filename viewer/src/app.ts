@@ -99,6 +99,9 @@ function updateChips() {
   const totalFrames = state.sides.reduce((a, s) => a + s.n, 0);
   const maxDur = Math.max(...state.sides.map(s => s.dur));
   const nImu = state.sides.filter(s => s.imu).length;
+  // 角速度口径：有扣偏结果的帧用扣偏值，其余回落原始换算值（逐帧判定，可能两种都有）
+  const calReady = state.sides.reduce((a, s) => a + ((s.cal && s.cal.ready) || 0), 0);
+  const calRaw = state.sides.reduce((a, s) => a + ((s.cal && s.cal.raw) || 0), 0);
   // 温度只有一部分导出才有（app 5.x / 网页导出 / 维特 TXT）；两侧都有时合成一条 min–max
   const tSides = state.sides.filter(s => s.temp || Number.isFinite(s.tLo));
   const tLo = tSides.length ? Math.min(...tSides.map(s => s.tLo)) : NaN;
@@ -114,6 +117,8 @@ function updateChips() {
     ['均记录率', isFinite(state.sides[0].fs) ? state.sides[0].fs.toFixed(2) + ' Hz' : '—'],
     ...(hasP ? [['通道', state.sides[0].nch], ['全段最大', fmt(state.gmax) + ' ADC']] : []),
     ...(nImu ? [['IMU', `${nImu} 侧 × 6 轴`]] : []),
+    ...(nImu ? [['角速度', calReady && calRaw ? `扣偏 ${fmt(calReady)} / 原始 ${fmt(calRaw)} 帧`
+      : calReady ? '已扣偏' : '原始换算（无扣偏结果）']] : []),
     ...(tSides.length && Number.isFinite(tLo) ? [['温度', `${tLo.toFixed(2)}–${tHi.toFixed(2)} ℃`]] : []),
     ...(nUnmapped ? [['时间未映射', nUnmapped + ' 帧']] : [])
   ].map(([k, v]) => `<span class="chip">${k} <b>${v}</b></span>`).join('');

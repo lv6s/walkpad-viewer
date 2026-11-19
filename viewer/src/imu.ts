@@ -660,7 +660,7 @@ function drawImu(entry) {
 
   if (entry.metaEl) {
     const src = srcOf(s);
-    const note = src === 'raw' ? 'imu_raw_values（硬件 LSB 计数，通道序 r1..r6）' : 'imu_physical_values（加速度 g / 角速度 °/s）';
+    const note = src === 'raw' ? 'imu_raw_values（硬件 LSB 计数，通道序 r1..r6）' : 'imu_physical_values（加速度 g / 角速度 °/s；角速度优先用扣偏值）';
     const gs = gapOn() && !s._lod ? gapSpans(s, state.imuGapMs) : null;
     entry.metaEl.textContent = `全段 ${s.dur.toFixed(1)} s · 均记录率 ${isFinite(s.fs) ? s.fs.toFixed(2) : '—'} Hz`
       + ` · ${fmt(entry.s.n)} 帧　|　数据源 ${note}`
@@ -774,7 +774,7 @@ function syncImuSrcUi() {
     b.disabled = !has;
     b.title = has
       ? (k === 'raw' ? 'imu_raw_values：硬件整数计数，未换算，通道序 r1..r6'
-                     : 'imu_physical_values：采集端已换算，加速度 g、角速度 °/s')
+                     : 'imu_physical_values：采集端已换算，加速度 g、角速度 °/s；角速度有扣偏结果时用扣偏值')
       : state.mode === 'imu'
         ? '维特 TXT 只有上位机换算后的物理量，没有原始计数'
         : `本文件没有 imu_${k === 'raw' ? 'raw_values' : 'physical_values'} 列`;
@@ -813,7 +813,7 @@ function syncImuSrcUi() {
     + (noSrc.length ? noSrc.join('、') + ` 无 ${raw ? 'raw' : 'physical'} 列　·　` : '')
     + (raw ? 'imu_raw_values：硬件 LSB 计数，未换算，通道序 r1..r6'
            : state.mode === 'imu' ? '维特 TXT：加速度 g、角速度 °/s（上位机已换算）'
-           : 'imu_physical_values：加速度 g、角速度 °/s，已换算')
+           : 'imu_physical_values：加速度 g、角速度 °/s，已换算；角速度优先用扣偏值')
     + (state.lazy ? '；纵轴「全段」档使用已载入段最大 |值|' : '；纵轴默认按全段最大 |值| 定')
     + '，缩放后可用「按窗口」，0 居中';
 }

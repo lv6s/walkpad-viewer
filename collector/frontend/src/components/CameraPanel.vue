@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { api, status, upload } from '../store'
 const video = ref<HTMLVideoElement>()
+const canvas = ref<HTMLCanvasElement>()
 const devices = ref<MediaDeviceInfo[]>([])
 const selected = ref('')
 const resolution = ref('1280x720')
@@ -9,9 +10,14 @@ const fps = ref(30)
 const linked = ref(true)
 const active = ref(false)
 const recording = ref(false)
+const rotate = ref(0)
+const mirror = ref(false)
 const message = ref('录像按块写入本次记录目录；无需在内存累积整段视频。')
+const transformed = computed(() => rotate.value !== 0 || mirror.value)
 let stream: MediaStream | undefined
 let recorder: MediaRecorder | undefined
+let painted: MediaStream | undefined
+let raf = 0
 let chain: Promise<void> = Promise.resolve()
 let pending = 0
 let bytes = 0
@@ -22,6 +28,38 @@ let stopPromise: Promise<void> | undefined
 let resolveStop: (() => void) | undefined
 async function enumerate() {
   devices.value = (await navigator.mediaDevices.enumerateDevices()).filter(device => device.kind === 'videoinput')
+}
+// 预览与录像共用一套变换：MediaRecorder 录的是流，DOM 上的 transform 进不了文件，
+// 旋转只能靠 canvas 重绘后再 captureStream。
+function render(target: HTMLCanvasElement) {
+  const v = video.value
+  const w = v?.videoWidth || 0, h = v?.videoHeight || 0
+  if (!v || !w || !h) return
+  const swap = rotate.value % 180 !== 0
+  const cw = swap ? h : w, ch = swap ? w : h
+  if (target.width !== cw || target.height !== ch) { target.width = cw; target.height = ch }
+  const ctx = target.getContext('2d')
+  if (!ctx) return
+  ctx.save()
+  ctx.translate(cw/2, ch/2)
+  ctx.rotate(rotate.value * Math.PI/180)
+  if (mirror.value) ctx.scale(-1, 1)
+  ctx.drawImage(v, -w/2, -h/2, w, h)
+  ctx.restore()
+}
+function loop() { const c = canvas.value; if (c) render(c); raf = requestAnimationFrame(loop) }
+function startLoop() {
+  cancelAnimationFrame(raf); raf = 0
+  if (transformed.value && active.value && canvas.value) raf = requestAnimationFrame(loop)
+}
+function stopLoop() { cancelAnimationFrame(raf); raf = 0 }
+function releasePainted() { painted?.getTracks().forEach(track => track.stop()); painted = undefined; stopLoop() }
+// 录像源跟着变换走：不旋转时直接录摄像头流，旋转/镜像时录重绘后的 canvas
+function recordSource() {
+  if (!transformed.value) return stream
+  startLoop()
+  painted = canvas.value!.captureStream(fps.value)
+  return painted
 }
 async function open() {
   try {
@@ -42,7 +80,9 @@ async function start() {
     const current = await (await fetch('/api/status')).json()
     session = current.recorder.session_id
     const mime = ['video/webm;codecs=vp8', 'video/webm', 'video/mp4'].find(type => MediaRecorder.isTypeSupported(type)) || ''
-    recorder = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 4_000_000 } : undefined)
+    const source = recordSource()
+    if (!source) throw new Error('录像源不可用')
+    recorder = new MediaRecorder(source, mime ? { mimeType: mime, videoBitsPerSecond: 4_000_000 } : undefined)
     const id = crypto.randomUUID().replaceAll('-', '')
     let index = 0
     pending = 0; bytes = 0; failed = false; chain = Promise.resolve()
@@ -70,6 +110,7 @@ async function start() {
     recorder.onstop = async () => {
       await chain
       recording.value = false
+      releasePainted()
       if (!failed) message.value = `录像已保存 ${(bytes / 1048576).toFixed(1)} MB · 随本次记录ZIP导出`
       resolveStop?.()
     }
@@ -82,21 +123,29 @@ async function start() {
 async function stop() {
   if (recorder?.state === 'recording') recorder.stop()
   if (stopPromise) await stopPromise
+  releasePainted()
 }
-async function close() { await stop(); stream?.getTracks().forEach(track => track.stop()); stream = undefined; active.value = false }
+async function close() { await stop(); stream?.getTracks().forEach(track => track.stop()); stream = undefined; active.value = false; stopLoop() }
 async function pip() {
   try { await video.value?.requestPictureInPicture() } catch (error) { message.value = String(error) }
 }
 async function shot() {
   if (!video.value || !active.value) { message.value = '先开启摄像头再拍照'; return }
+  // 拍照走同一套变换，图里看到的和文件里的一致
   const canvas = document.createElement('canvas')
-  canvas.width = video.value.videoWidth; canvas.height = video.value.videoHeight
-  canvas.getContext('2d')!.drawImage(video.value, 0, 0)
+  if (transformed.value) {
+    render(canvas)
+  } else {
+    canvas.width = video.value.videoWidth; canvas.height = video.value.videoHeight
+    canvas.getContext('2d')!.drawImage(video.value, 0, 0)
+  }
   canvas.toBlob(async blob => {
     if (!blob) return
     const anchor = document.createElement('a'); anchor.href = URL.createObjectURL(blob); anchor.download = `camera_${new Date().toISOString().replaceAll(':', '-')}.png`; anchor.click(); URL.revokeObjectURL(anchor.href)
   })
 }
+// 旋转/镜像只改变绘制方式，录像中途改会让码流几何跳变，所以录像时锁住
+watch([rotate, mirror], () => { if (!recording.value) startLoop() })
 watch(() => status.value?.recorder.recording, async (value, old) => {
   if (value && !old && linked.value && active.value && !recording.value) await start()
   if (!value && old && recording.value) await stop()
@@ -106,4 +155,4 @@ onMounted(() => { enumerate().catch(() => {}); window.addEventListener('beforeun
 onUnmounted(() => { close(); window.removeEventListener('beforeunload', unload) })
 defineExpose({ stop, recording })
 </script>
-<template><section class="panel camera-panel"><div class="panel-head"><h2>摄像头</h2><span class="badge" :class="{ live: recording }">{{ recording ? '录像写盘中' : active ? '预览中' : '未开启' }}</span></div><div class="toolbar"><select v-model="selected" :disabled="active"><option value="">默认摄像头</option><option v-for="device in devices" :key="device.deviceId" :value="device.deviceId">{{ device.label || device.deviceId }}</option></select><select v-model="resolution" :disabled="active"><option>640x480</option><option>1280x720</option><option>1920x1080</option><option>3840x2160</option></select><select v-model="fps" :disabled="active"><option :value="15">15 fps</option><option :value="30">30 fps</option><option :value="60">60 fps</option></select><button v-if="!active" @click="open">开启摄像头</button><button v-else @click="close">关闭</button><button :disabled="!active" @click="pip">画中画</button><button :disabled="!active" @click="shot">拍照</button></div><video ref="video" autoplay playsinline muted></video><div class="toolbar"><label><input v-model="linked" type="checkbox"> 随传感器记录启停</label><button :disabled="!active || recording" @click="start">开始录像</button><button :disabled="!recording" @click="stop">停止录像</button></div><p class="muted">{{ message }}</p><p class="micro">传感器记录不依赖页面；摄像头仍由浏览器持有，刷新前请先停止录像。同步点击启停不代表帧级时间同步。</p></section></template>
+<template><section class="panel camera-panel"><div class="panel-head"><h2>摄像头</h2><span class="badge" :class="{ live: recording }">{{ recording ? '录像写盘中' : active ? '预览中' : '未开启' }}</span></div><div class="toolbar"><select v-model="selected" :disabled="active"><option value="">默认摄像头</option><option v-for="device in devices" :key="device.deviceId" :value="device.deviceId">{{ device.label || device.deviceId }}</option></select><select v-model="resolution" :disabled="active"><option>640x480</option><option>1280x720</option><option>1920x1080</option><option>3840x2160</option></select><select v-model="fps" :disabled="active"><option :value="15">15 fps</option><option :value="30">30 fps</option><option :value="60">60 fps</option></select><button v-if="!active" @click="open">开启摄像头</button><button v-else @click="close">关闭</button><button :disabled="!active" @click="pip">画中画</button><button :disabled="!active" @click="shot">拍照</button></div><div class="camera-preview"><video ref="video" autoplay playsinline muted :class="{ veiled: transformed }"></video><canvas v-show="transformed" ref="canvas" class="preview-canvas"></canvas></div><div class="toolbar"><select v-model.number="rotate" :disabled="!active || recording"><option :value="0">方向：原始</option><option :value="90">方向：顺时针90°</option><option :value="180">方向：180°</option><option :value="270">方向：顺时针270°</option></select><label><input v-model="mirror" type="checkbox" :disabled="!active || recording"> 镜像</label><label><input v-model="linked" type="checkbox"> 随传感器记录启停</label><button :disabled="!active || recording" @click="start">开始录像</button><button :disabled="!recording" @click="stop">停止录像</button></div><p class="muted">{{ message }}</p><p class="micro">方向与镜像对预览、拍照和录像文件同时生效（录像走 canvas 重绘，不是给画面加 CSS 旋转）；录像中锁定，避免码流分辨率中途跳变。传感器记录不依赖页面；摄像头仍由浏览器持有，刷新前请先停止录像。同步点击启停不代表帧级时间同步。</p></section></template>

@@ -120,6 +120,8 @@ export interface Side {
   ictoIn: IctoInput | null;
   /** 取不到有效帧时间而被丢掉的帧数 */
   nT: number;
+  /** 角速度口径计数：ready = 用了包内扣偏值的帧，raw = 回落原始换算值的帧 */
+  cal?: {ready: number; raw: number};
   dur: number;
   /** 全段平均有效记录率 (n-1)/(t[last]-t[0]) */
   fs: number;

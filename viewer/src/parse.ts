@@ -275,7 +275,7 @@ function expandSides(groups) {
       axes: Array.from({length: 6}, (_, j) => Float32Array.from(g.iph, ph => numOrNaN(ph?.[j])))};
     const temp = tHi >= tLo ? tp : null;
     sides.push({ activityIn, side, n, nch, t, ch, mx, mn, zc, miss, imu, fno: hasSeq ? fno : null,
-                 temp, tLo, tHi, t0, ictoIn, nT: nDrop, dur: t[n - 1],
+                 temp, tLo, tHi, t0, ictoIn, nT: nDrop, cal: g.cal, dur: t[n - 1],
                  fs: n > 1 ? 1 / (dt / (n - 1)) : NaN,
                  // 绘图一律读 blk：整段载入时与上面是同一批数组，懒加载时只含窗口内的帧
                  blk: {n, t, ch, imu, temp, ictoIn, a: t[0], b: t[n - 1]} });
@@ -315,7 +315,8 @@ function rebaseCommon(sides) {
 // 56 格布局与旧包同源（d56-14x5-56-side-mirrored-candidate-v3），core.js 的 GRID 直接可用。
 const DEVICE_ANGLE_COLS = ['pitchDeg', 'sideTiltDeg'];
 const PKG_COLS = ['effectiveElapsedUs', 'timeUs', 'validity', 'frameType', 'pressureAdc', 'accelerationG',
-  'angularVelocityDps', 'accelerationRaw', 'angularVelocityRaw', 'deviceSequence', 'temperatureCelsius', ...DEVICE_ANGLE_COLS];
+  'angularVelocityDps', 'accelerationRaw', 'angularVelocityRaw', 'deviceSequence', 'temperatureCelsius',
+  'imuCalibration', ...DEVICE_ANGLE_COLS];
 const hasDeviceAngles = files => files.some(f => DEVICE_ANGLE_COLS.some(c => f.cols.includes(c)));
 const collectAngles = files => hasDeviceAngles(files) ? {pitch: [], sideTilt: []} : undefined;
 function appendDeviceAngles(angles, r) {
@@ -326,7 +327,7 @@ function appendDeviceAngles(angles, r) {
 function deviceAngleArrays(angles) {
   return angles && {pitch: Float64Array.from(angles.pitch), sideTilt: Float64Array.from(angles.sideTilt)};
 }
-const IMU_COLS = ['accelerationG', 'angularVelocityDps', 'accelerationRaw', 'angularVelocityRaw'];
+const IMU_COLS = ['accelerationG', 'angularVelocityDps', 'accelerationRaw', 'angularVelocityRaw', 'imuCalibration'];
 
 // 一次导出里除 inertial / insole 外还夹着 magnetic 与 deviceQuaternion 帧：它们既没有压力也没有六轴，
 // 计进帧数与采样率就会把 50 Hz 的惯性流报成 70 多 Hz。短包按「有没有本页要画的量」剔，
@@ -400,8 +401,11 @@ async function parquetBuffer(zf, path) {
 // 返回 false 的行不占帧数、不占下标。
 function pushPkgRow(g, r, i) {
   if (!isSignalType(r.frameType)) return false;
-  const ph = struct6(r.accelerationG, r.angularVelocityDps);
+  const gy = gyroOf(r);
+  const ph = struct6(r.accelerationG, gy);
   const rw = struct6(r.accelerationRaw, r.angularVelocityRaw);
+  // 口径计数：扣偏值是新建对象，回落的仍是原列引用，据此区分，不必再判一次
+  if (gy && gy !== r.angularVelocityDps) g.cal.ready++; else if (gy) g.cal.raw++;
   const pa = (r.pressureAdc && r.pressureAdc.length) ? r.pressureAdc : null;
   if (!ph && !rw && !pa) return false;
   const ok = r.validity === 'valid', eff = numOrNaN(r.effectiveElapsedUs);
@@ -430,6 +434,16 @@ function struct6(a, b) {
   const f = o => o ? [numOrNaN(o.x), numOrNaN(o.y), numOrNaN(o.z)] : [NaN, NaN, NaN];
   return f(a).concat(f(b));
 }
+
+// 角速度口径：该帧带扣偏结果就用扣偏值，没有（老包 / 未标定帧）才用采集端换算的原始值。
+// 判定按帧走，不看整包：同一段记录里前几秒常在等零偏就绪。
+// 原始值本身不改写，仍在 angularVelocityRaw 与本列里。
+const gyroOf = r => {
+  const c = r.imuCalibration;
+  const v = c && c.status === 'ready' ? c.angularVelocityCompensatedDps : null;
+  return v ? {x: numOrNaN(v.x), y: numOrNaN(v.y), z: numOrNaN(v.z)} : r.angularVelocityDps;
+};
+const phys6 = r => struct6(r.accelerationG, gyroOf(r));
 
 async function parsePackage(file) {
   if (typeof DecompressionStream !== 'function') {
@@ -530,7 +544,8 @@ const LAZY_PAD = 5;    // 窗口前后各多读的余量 s，平移时不必每�
 
 // 短片段：整段读进对象数组再交给共用展开
 async function readAllRows(job) {
-  const g = {eff: [], obs: [], v: [], iph: [], irw: [], ist: [], fno: [], tmp: [], st: [], ns: [], al: [], sfo: [], deviceAngles: collectAngles(job.files)};
+  const g = {eff: [], obs: [], v: [], iph: [], irw: [], ist: [], fno: [], tmp: [], st: [], ns: [], al: [], sfo: [],
+    cal: {ready: 0, raw: 0}, deviceAngles: collectAngles(job.files)};
   let rows = 0;
   for (const f of job.files) {
     const part = await ParquetHQ.parquetReadObjects({file: f.ab, compressors: ParquetHQ.compressors, columns: f.cols});
@@ -575,7 +590,7 @@ async function buildLazySide(job) {
     nT: job.nAll - n,
     // 全段统计（零值率 / 最大 / 温度范围 / 丢包）要扫一遍全表，扫描完成前留空
     ch: null, mx: null, mn: null, zc: null, miss: null,
-    imu: null, temp: null, tLo: NaN, tHi: NaN, ictoIn: null,
+    imu: null, temp: null, tLo: NaN, tHi: NaN, ictoIn: null, cal: {ready: 0, raw: 0},
     blk: null, statPending: true
   };
   lodInit(s);          // 全段抽样：后台扫描时才填，扫完前「全段」是半截
@@ -667,7 +682,7 @@ function makeBlock(rows, nch, t0) {
     t[k] = (numOrNaN(r.effectiveElapsedUs) - t0) / 1e6;
     const pv = r.pressureAdc || [];
     for (let j = 0; j < nch; j++) ch[j][k] = numOrNaN(pv[j]);
-    const a = struct6(r.accelerationG, r.angularVelocityDps);
+    const a = phys6(r);
     const b = struct6(r.accelerationRaw, r.angularVelocityRaw);
     if (a) { hasPhys = true; for (let j = 0; j < 6; j++) { ph[j][k] = a[j]; const q = Math.abs(a[j]); if (q > phMax[j]) phMax[j] = q; } }
     if (b) { hasRaw = true; for (let j = 0; j < 6; j++) { rw[j][k] = b[j]; const q = Math.abs(b[j]); if (q > rwMax[j]) rwMax[j] = q; } }
@@ -737,9 +752,11 @@ async function scanStats(s, gen) {
         ovFeed(s, lastT, sum);
         const c = numOrNaN(r.temperatureCelsius);
         if (Number.isFinite(c)) { if (c < tLo) tLo = c; if (c > tHi) tHi = c; }
+        const gy = gyroOf(r);
+        if (gy && gy !== r.angularVelocityDps) s.cal.ready++; else if (gy) s.cal.raw++;
         if (s.lod) {
-          const ph = (r.accelerationG || r.angularVelocityDps)
-            ? struct6(r.accelerationG, r.angularVelocityDps) : null;
+          const ph = (r.accelerationG || gy)
+            ? struct6(r.accelerationG, gy) : null;
           const rw = (r.accelerationRaw || r.angularVelocityRaw)
             ? struct6(r.accelerationRaw, r.angularVelocityRaw) : null;
           lodFeed(s, lastT, pv || null, ph, rw, c);
@@ -1108,11 +1125,12 @@ export async function activityInput(s, alive = () => true) {
   const angles = collectAngles(s.files);
   for (const f of s.files) for (const [r0, r1] of f.rgs) {
     if (!alive()) throw new Error('已取消');
-    const cols = ['effectiveElapsedUs', 'timeUs', 'validity', 'frameType', 'accelerationG', 'angularVelocityDps', 'accelerationRaw', 'deviceSequence', ...DEVICE_ANGLE_COLS].filter(c => f.cols.includes(c));
+    const cols = ['effectiveElapsedUs', 'timeUs', 'validity', 'frameType', 'accelerationG', 'angularVelocityDps',
+      'accelerationRaw', 'deviceSequence', 'imuCalibration', ...DEVICE_ANGLE_COLS].filter(c => f.cols.includes(c));
     const rows = await ParquetHQ.parquetReadObjects({file: f.ab, compressors: ParquetHQ.compressors, columns: cols, rowStart: r0, rowEnd: r1});
     for (const r of rows) {
       if (!isSignalType(r.frameType)) continue;
-      const ph = struct6(r.accelerationG, r.angularVelocityDps);
+      const ph = phys6(r);
       const effective = numOrNaN(r.effectiveElapsedUs), mapped = r.validity === 'valid' && Number.isFinite(effective);
       const us = mapped ? effective : numOrNaN(r.timeUs);
       raw.push(us); seq.push(numOrNaN(r.deviceSequence)); ok.push(mapped && ph ? 1 : 0);

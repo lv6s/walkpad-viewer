@@ -24,6 +24,9 @@ FRAME_SCHEMA = pa.schema([
     ('pressure_observed_slots',pa.list_(pa.int32())),('pressure_output_format',pa.int32()),
     ('sensor_topology',pa.string()),('gyro_temperature_celsius',pa.float64()),
     ('frame_kind',pa.int32()),('raw_packet_sha256',pa.string()),('raw_frame_hex',pa.string()),
+    # 在线零偏的三轴结果必须逐帧落盘，否则导出无法说明该帧用的是哪个偏置
+    ('imu_bias_dps',pa.list_(pa.float64())),('imu_bias_ready',pa.bool_()),
+    ('imu_bias_revision',pa.int32()),('imu_bias_gate',pa.string()),
 ])
 
 

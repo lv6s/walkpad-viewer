@@ -14,6 +14,7 @@ from .algorithm import Algorithm
 from .protocol import Decoder, command_packet, crc_ccitt, crc_measurement, demo_packet, slot_map
 from .storage import Recorder, atomic_json
 from .velocity import VelocityEstimator
+from .version import VERSION
 
 INSOLE_NOTIFY = '00002a37-0000-1000-8000-00805f9b34fb'
 INSOLE_WRITE = '0000ffe1-0000-1000-8000-00805f9b34fb'
@@ -360,6 +361,8 @@ class Capture:
                 return
         algo_frames = []
         for index, frame in enumerate(frames):
+            # 每帧独立判定：上一帧的偏置状态不能顺延到本帧
+            bias_state = None
             d['frames'] += 1; d['recent'].append(receipt)
             frame = dict(frame,device_id=key,foot=d['foot'],bias_key=d['bias_key'],profile=d['profile'],connection=d['connection'],
                          placement=d['placement'],placement_label=d['placement_label'],
@@ -399,6 +402,10 @@ class Capture:
                 pressure_raw_values=frame.get('pressure_slots',[]),pressure_sparse_values=frame.get('pressure_sparse',[]),
                 pressure_observed_slots=frame.get('pressure_observed_slots',[]),pressure_output_format=d['format'],
                 sensor_topology=d['topology'],gyro_temperature_celsius=frame.get('temperature'),
+                imu_bias_dps=None if not frame.get('bias_used') else list(frame['bias_used']),
+                imu_bias_ready=bool(frame.get('bias_used')),
+                imu_bias_revision=int((bias_state or {}).get('generation') or 0),
+                imu_bias_gate=(bias_state or {}).get('gate_version'),
                 frame_kind=frame['kind'],raw_packet_sha256=frame['raw_packet_sha256'],raw_frame_hex=frame['raw_frame_hex']))
             if d['has_pressure'] or frame.get('inference_eligible'):
                 algo_frames.append(frame)
@@ -645,7 +652,7 @@ class Capture:
         return {k:d[k] for k in ('id','name','profile','kind','has_pressure','foot','bias_key','address','placement','placement_label','source','connected','reconnecting','connection','frames','bad','last','topology','format','format_status','command_status')} | {'rate':len(recent),'velocity':tracker.snapshot()}
 
     def snapshot(self):
-        return dict(version='2.0.0',source=self.source,devices=[self.public(d) for d in self.devices.values()],
+        return dict(version=VERSION,source=self.source,devices=[self.public(d) for d in self.devices.values()],
                     recorder=self.recorder.state(),algorithm=self.algorithm.snapshot(),phone=self.phone,
                     error=self.error,logs=list(self.logs),cursor=self.cursor,demo_allowed=self.demo_allowed,
                     warning='设备日历、手机接收与电脑接收属于不同时间域；未证明硬件同步或真实单程延迟')

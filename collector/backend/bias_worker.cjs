@@ -33,7 +33,7 @@ function prepare(records) {
       else if (r.action === 'start_calibration') f.tracker.startCalibration();
       else if (r.action === 'cancel_calibration') f.tracker.cancelCalibration();
       else throw new Error('unknown action');
-      states.push({ key, foot: r.foot ?? null, processing_ms: r.processing_ms, action: r.action, ...f.tracker.snapshot(), discontinuity: r.action === 'reset_bias' });
+      states.push({ key, foot: r.foot ?? null, processing_ms: r.processing_ms, action: r.action, ...f.tracker.snapshot(), generation: f.generation, discontinuity: r.action === 'reset_bias' });
       continue;
     }
     if (f.retired.has(r.connection)) continue;
@@ -52,7 +52,7 @@ function prepare(records) {
       f.previous=[...b.gyro_bias_dps]; f.clock={device_ms:r.device_ms,receipt_ms:r.receipt_ms};
       events.push({key,foot:r.foot ?? null,device_ms:r.device_ms,receipt_ms:r.receipt_ms,available_ms:r.processing_ms,seq:r.seq,segment:r.connection+':'+f.generation,values:v.map((x,i)=>i<3?x:x-b.gyro_bias_dps[i-3]),raw:[...raw]});
     } else if (f.previous) { f.previous=null;f.generation++;discontinuity=true; }
-    states.push({key,foot:r.foot ?? null,processing_ms:r.processing_ms,...b,discontinuity});
+    states.push({key,foot:r.foot ?? null,processing_ms:r.processing_ms,...b,generation:f.generation,discontinuity});
     trace.push({key,foot:r.foot ?? null,processing_ms:r.processing_ms,own_before_bias:v,...b,emitted:b.ready,discontinuity});
   }
   return {events,states,trace};

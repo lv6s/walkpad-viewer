@@ -10,6 +10,8 @@ import time
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from .version import VERSION
+
 
 def validate(body):
     if not isinstance(body,dict) or body.get('v') != 1:
@@ -116,7 +118,7 @@ class Phone:
             addresses = sorted(set(x for x in socket.gethostbyname_ex(socket.gethostname())[2] if not x.startswith('127.')))
         except OSError:
             addresses = []
-        return {'token':self.token,'port':self.port,'addresses':addresses,'version':'2.0.0','event_stream_version':1,
+        return {'token':self.token,'port':self.port,'addresses':addresses,'version':VERSION,'event_stream_version':1,
                 'encrypted':False,'warning':'仅可信局域网；HTTP未加密'}
 
     async def _persist(self, target, checkpoint=None):

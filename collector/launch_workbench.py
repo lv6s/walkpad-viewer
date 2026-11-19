@@ -14,15 +14,25 @@ import webbrowser
 ROOT = Path(__file__).resolve().parent
 RUNTIME = ROOT/'runtime'
 STATE = RUNTIME/'server.json'
+if str(ROOT) not in sys.path:
+    sys.path.insert(0,str(ROOT))
+from backend.version import VERSION
 
 
-def probe(port):
+def config(port):
+    """返回端口上的工作台配置；不是本工作台（缺令牌或 demo 实例）时返回 None。"""
     try:
         with urllib.request.urlopen('http://127.0.0.1:%d/api/config' % port,timeout=.5) as response:
             result = json.load(response)
-            return result.get('version') == '2.0.0' and bool(result.get('control_token')) and not result.get('demo_allowed')
     except (OSError,ValueError):
-        return False
+        return None
+    return result if result.get('control_token') and not result.get('demo_allowed') else None
+
+
+def probe(port):
+    """该端口跑的是可复用的实例：同为工作台且版本一致，升级后不复用旧进程。"""
+    result = config(port)
+    return bool(result) and result.get('version') == VERSION
 
 
 def interpreter():
@@ -102,7 +112,7 @@ def stop_services():
         alive = False
         try:
             if marker is None:
-                alive = probe(port)
+                alive = config(port) is not None
             else:
                 with urllib.request.urlopen('http://127.0.0.1:%d/' % port,timeout=1.5) as response:
                     alive = marker in response.read(40000).decode('utf-8',errors='replace')
@@ -180,7 +190,7 @@ def main():
                 time.sleep(.15)
             else:
                 raise RuntimeError('后台启动尚未就绪，请查看 '+str(RUNTIME/'server.log'))
-            STATE.write_text(json.dumps({'port':port,'pid':process.pid,'version':'2.0.0'}),encoding='utf-8')
+            STATE.write_text(json.dumps({'port':port,'pid':process.pid,'version':VERSION}),encoding='utf-8')
         url = 'http://127.0.0.1:%d/' % port
         print(url)
         if not args.no_open:

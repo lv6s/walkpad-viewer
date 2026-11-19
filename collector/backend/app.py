@@ -16,8 +16,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from .capture import Capture
-from .exports import export_standard, export_txt
+from .exports import export_package, export_standard, export_txt
 from .phone import Phone
+from .version import VERSION
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -127,7 +128,7 @@ def create_app(root=ROOT,demo=False,phone_port=8766,debug=False,idle_exit=8):
 
     @app.get('/api/config')
     async def config():
-        return {'version':'2.0.0','control_token':app.state.token,'demo_allowed':demo,'phone_port':phone_port,'idle_exit':idle_exit}
+        return {'version':VERSION,'control_token':app.state.token,'demo_allowed':demo,'phone_port':phone_port,'idle_exit':idle_exit}
 
     @app.get('/api/status')
     async def status():
@@ -250,6 +251,8 @@ def create_app(root=ROOT,demo=False,phone_port=8766,debug=False,idle_exit=8):
                 target = await asyncio.to_thread(export_txt,path)
             elif format == 'parquet':
                 target = await asyncio.to_thread(export_standard,path)
+            elif format == 'package':
+                target = await asyncio.to_thread(export_package,path)
             elif format == 'zip':
                 target = await asyncio.to_thread(app.state.capture.recorder.export,sid)
             else:

@@ -182,7 +182,8 @@ try {
     assert.equal(stepHeads.length, 9);
     assert.equal(await page.locator('#gaitSteps [data-gait-device]:visible').count(), 0);
     assert.match(stepHeads[0], /序号|步次/);
-    for (const token of ['脚', 'IC', 'TO', '接地', '触地俯仰', '离地俯仰', '三轴加速度合量', '峰值时刻']) assert.ok(stepHeads.join('|').includes(token), `逐步明细缺少「${token}」列：${stepHeads}`);
+    for (const token of ['脚', 'IC', 'TO', '接地', '三轴加速度合量', '峰值时刻']) assert.ok(stepHeads.join('|').includes(token), `逐步明细缺少「${token}」列：${stepHeads}`);
+    assert.match(stepHeads.join('|'), /触地.*俯仰/); assert.match(stepHeads.join('|'), /离地.*俯仰/);
     assert.doesNotMatch(stepHeads.join('|'), /COP/);
     const steps = page.locator('#gaitStepRows tr');
     await steps.first().waitFor({state: 'visible'});

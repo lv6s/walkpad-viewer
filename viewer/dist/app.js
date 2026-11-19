@@ -1091,7 +1091,7 @@
 	}
 	var metricMean = (s, side, key) => s.feet[side][key].sum / s.feet[side][key].n;
 	// src/core/constants.ts
-	var APP_VER = "3.14.0";
+	var APP_VER = "3.15.0";
 	var GRID = {
 		left: {
 			1: [13, 2],
@@ -10803,7 +10803,7 @@
 		g.fillStyle = cMuted;
 		g.fillText("时间", padL + plotW / 2, yAx + 29);
 		if (entry.metaEl) {
-			const note = srcOf(s) === "raw" ? "imu_raw_values（硬件 LSB 计数，通道序 r1..r6）" : "imu_physical_values（加速度 g / 角速度 °/s）";
+			const note = srcOf(s) === "raw" ? "imu_raw_values（硬件 LSB 计数，通道序 r1..r6）" : "imu_physical_values（加速度 g / 角速度 °/s；角速度优先用扣偏值）";
 			const gs = gapOn() && !s._lod ? gapSpans(s, state.imuGapMs) : null;
 			entry.metaEl.textContent = `全段 ${s.dur.toFixed(1)} s · 均记录率 ${isFinite(s.fs) ? s.fs.toFixed(2) : "—"} Hz · ${fmt(entry.s.n)} 帧　|　数据源 ${note}` + (step > 1 ? `　|　按 ${(hz / step).toFixed(2)} Hz 抽样绘制（放大后自动加密）` : "") + (s.temp ? `　|　温度 ${s.tLo.toFixed(2)}–${s.tHi.toFixed(2)} ℃（${state.src && state.src.tempCol || "逐帧温度"}）` : "") + (s.imu.nPart ? `　|　${s.imu.nPart} 帧单位未确认（加速度为空）` : "") + (gs ? gs.list.length ? `　|　间隔 > ${state.imuGapMs} ms 的区段 ${fmt(gs.list.length)} 处，共 ${gs.total.toFixed(3)} s` : `　|　没有间隔 > ${state.imuGapMs} ms 的区段` : "") + (gs && state.mode === "imu" ? "（维特 TXT：标的是写盘节奏抖动，不是真实丢帧）" : "");
 		}
@@ -10928,7 +10928,7 @@
 			const has = k === "raw" ? nRaw : nPhys;
 			b.classList.toggle("on", k === state.imuSrc);
 			b.disabled = !has;
-			b.title = has ? k === "raw" ? "imu_raw_values：硬件整数计数，未换算，通道序 r1..r6" : "imu_physical_values：采集端已换算，加速度 g、角速度 °/s" : state.mode === "imu" ? "维特 TXT 只有上位机换算后的物理量，没有原始计数" : `本文件没有 imu_${k === "raw" ? "raw_values" : "physical_values"} 列`;
+			b.title = has ? k === "raw" ? "imu_raw_values：硬件整数计数，未换算，通道序 r1..r6" : "imu_physical_values：采集端已换算，加速度 g、角速度 °/s；角速度有扣偏结果时用扣偏值" : state.mode === "imu" ? "维特 TXT 只有上位机换算后的物理量，没有原始计数" : `本文件没有 imu_${k === "raw" ? "raw_values" : "physical_values"} 列`;
 		});
 		el$1.viewImu.querySelectorAll("button[data-ax]").forEach((b) => {
 			const j = IMU_AX.indexOf(b.dataset.ax);
@@ -10955,7 +10955,7 @@
 		}
 		const missing = state.sides.filter((s) => !s.imu).map((s) => SIDE_CN[s.side] || s.side);
 		const noSrc = im.filter((s) => !s.imu[state.imuSrc]).map((s) => SIDE_CN[s.side] || s.side);
-		el$1.imuNote.textContent = (missing.length ? missing.join("、") + " 无 IMU　·　" : "") + (noSrc.length ? noSrc.join("、") + ` 无 ${raw ? "raw" : "physical"} 列　·　` : "") + (raw ? "imu_raw_values：硬件 LSB 计数，未换算，通道序 r1..r6" : state.mode === "imu" ? "维特 TXT：加速度 g、角速度 °/s（上位机已换算）" : "imu_physical_values：加速度 g、角速度 °/s，已换算") + (state.lazy ? "；纵轴「全段」档使用已载入段最大 |值|" : "；纵轴默认按全段最大 |值| 定") + "，缩放后可用「按窗口」，0 居中";
+		el$1.imuNote.textContent = (missing.length ? missing.join("、") + " 无 IMU　·　" : "") + (noSrc.length ? noSrc.join("、") + ` 无 ${raw ? "raw" : "physical"} 列　·　` : "") + (raw ? "imu_raw_values：硬件 LSB 计数，未换算，通道序 r1..r6" : state.mode === "imu" ? "维特 TXT：加速度 g、角速度 °/s（上位机已换算）" : "imu_physical_values：加速度 g、角速度 °/s，已换算；角速度优先用扣偏值") + (state.lazy ? "；纵轴「全段」档使用已载入段最大 |值|" : "；纵轴默认按全段最大 |值| 定") + "，缩放后可用「按窗口」，0 居中";
 	}
 	function renderImu() {
 		el$1.imu.innerHTML = "";
@@ -14234,6 +14234,8 @@
 		const totalFrames = state.sides.reduce((a, s) => a + s.n, 0);
 		const maxDur = Math.max(...state.sides.map((s) => s.dur));
 		const nImu = state.sides.filter((s) => s.imu).length;
+		const calReady = state.sides.reduce((a, s) => a + (s.cal && s.cal.ready || 0), 0);
+		const calRaw = state.sides.reduce((a, s) => a + (s.cal && s.cal.raw || 0), 0);
 		const tSides = state.sides.filter((s) => s.temp || Number.isFinite(s.tLo));
 		const tLo = tSides.length ? Math.min(...tSides.map((s) => s.tLo)) : NaN;
 		const tHi = tSides.length ? Math.max(...tSides.map((s) => s.tHi)) : NaN;
@@ -14246,6 +14248,7 @@
 			["均记录率", isFinite(state.sides[0].fs) ? state.sides[0].fs.toFixed(2) + " Hz" : "—"],
 			...hasP ? [["通道", state.sides[0].nch], ["全段最大", fmt(state.gmax) + " ADC"]] : [],
 			...nImu ? [["IMU", `${nImu} 侧 × 6 轴`]] : [],
+			...nImu ? [["角速度", calReady && calRaw ? `扣偏 ${fmt(calReady)} / 原始 ${fmt(calRaw)} 帧` : calReady ? "已扣偏" : "原始换算（无扣偏结果）"]] : [],
 			...tSides.length && Number.isFinite(tLo) ? [["温度", `${tLo.toFixed(2)}–${tHi.toFixed(2)} ℃`]] : [],
 			...nUnmapped ? [["时间未映射", nUnmapped + " 帧"]] : []
 		].map(([k, v]) => `<span class="chip">${k} <b>${v}</b></span>`).join("");
@@ -14636,6 +14639,7 @@
 				t0,
 				ictoIn,
 				nT: nDrop,
+				cal: g.cal,
 				dur: t[n - 1],
 				fs: n > 1 ? 1 / (dt / (n - 1)) : NaN,
 				blk: {
@@ -14693,6 +14697,7 @@
 		"angularVelocityRaw",
 		"deviceSequence",
 		"temperatureCelsius",
+		"imuCalibration",
 		...DEVICE_ANGLE_COLS
 	];
 	var hasDeviceAngles = (files) => files.some((f) => DEVICE_ANGLE_COLS.some((c) => f.cols.includes(c)));
@@ -14715,7 +14720,8 @@
 		"accelerationG",
 		"angularVelocityDps",
 		"accelerationRaw",
-		"angularVelocityRaw"
+		"angularVelocityRaw",
+		"imuCalibration"
 	];
 	var SKIP_TYPE = {
 		magnetic: 1,
@@ -14776,8 +14782,11 @@
 	}
 	function pushPkgRow(g, r, i) {
 		if (!isSignalType(r.frameType)) return false;
-		const ph = struct6(r.accelerationG, r.angularVelocityDps);
+		const gy = gyroOf(r);
+		const ph = struct6(r.accelerationG, gy);
 		const rw = struct6(r.accelerationRaw, r.angularVelocityRaw);
+		if (gy && gy !== r.angularVelocityDps) g.cal.ready++;
+		else if (gy) g.cal.raw++;
 		const pa = r.pressureAdc && r.pressureAdc.length ? r.pressureAdc : null;
 		if (!ph && !rw && !pa) return false;
 		const ok = r.validity === "valid", eff = numOrNaN(r.effectiveElapsedUs);
@@ -14809,6 +14818,16 @@
 		];
 		return f(a).concat(f(b));
 	}
+	var gyroOf = (r) => {
+		const c = r.imuCalibration;
+		const v = c && c.status === "ready" ? c.angularVelocityCompensatedDps : null;
+		return v ? {
+			x: numOrNaN(v.x),
+			y: numOrNaN(v.y),
+			z: numOrNaN(v.z)
+		} : r.angularVelocityDps;
+	};
+	var phys6 = (r) => struct6(r.accelerationG, gyroOf(r));
 	async function parsePackage(file) {
 		if (typeof DecompressionStream !== "function") {
 			fail("这个浏览器不支持页面内解压（DecompressionStream），请改用 Edge / Chrome。");
@@ -14950,6 +14969,10 @@
 			ns: [],
 			al: [],
 			sfo: [],
+			cal: {
+				ready: 0,
+				raw: 0
+			},
 			deviceAngles: collectAngles(job.files)
 		};
 		let rows = 0;
@@ -15029,6 +15052,10 @@
 			tLo: NaN,
 			tHi: NaN,
 			ictoIn: null,
+			cal: {
+				ready: 0,
+				raw: 0
+			},
 			blk: null,
 			statPending: true
 		};
@@ -15134,7 +15161,7 @@
 			t[k] = (numOrNaN(r.effectiveElapsedUs) - t0) / 1e6;
 			const pv = r.pressureAdc || [];
 			for (let j = 0; j < nch; j++) ch[j][k] = numOrNaN(pv[j]);
-			const a = struct6(r.accelerationG, r.angularVelocityDps);
+			const a = phys6(r);
 			const b = struct6(r.accelerationRaw, r.angularVelocityRaw);
 			if (a) {
 				hasPhys = true;
@@ -15259,8 +15286,11 @@
 						if (c < tLo) tLo = c;
 						if (c > tHi) tHi = c;
 					}
+					const gy = gyroOf(r);
+					if (gy && gy !== r.angularVelocityDps) s.cal.ready++;
+					else if (gy) s.cal.raw++;
 					if (s.lod) {
-						const ph = r.accelerationG || r.angularVelocityDps ? struct6(r.accelerationG, r.angularVelocityDps) : null;
+						const ph = r.accelerationG || gy ? struct6(r.accelerationG, gy) : null;
 						const rw = r.accelerationRaw || r.angularVelocityRaw ? struct6(r.accelerationRaw, r.angularVelocityRaw) : null;
 						lodFeed(s, lastT, pv || null, ph, rw, c);
 					}
@@ -15816,6 +15846,7 @@
 				"angularVelocityDps",
 				"accelerationRaw",
 				"deviceSequence",
+				"imuCalibration",
 				...DEVICE_ANGLE_COLS
 			].filter((c) => f.cols.includes(c));
 			const rows = await ParquetHQ.parquetReadObjects({
@@ -15827,7 +15858,7 @@
 			});
 			for (const r of rows) {
 				if (!isSignalType(r.frameType)) continue;
-				const ph = struct6(r.accelerationG, r.angularVelocityDps);
+				const ph = phys6(r);
 				const effective = numOrNaN(r.effectiveElapsedUs), mapped = r.validity === "valid" && Number.isFinite(effective);
 				const us = mapped ? effective : numOrNaN(r.timeUs);
 				raw.push(us);

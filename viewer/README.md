@@ -2,11 +2,9 @@
 
 在浏览器里离线查看鞋垫压力与 IMU 录制的波形，并给出活动识别和走跑步态统计。所有解析与计算都在本机完成，不上传任何数据。
 
-本目录是仓库里的查看器应用；采集工具在同仓的 [`collector/`](../collector/)。
-
 ## 直接使用
 
-克隆或下载本仓库后，双击 `viewer/index.html` 即可，不需要安装 Node.js，也不需要起服务器。页面以 `file://` 打开，调用的是本目录里预构建好的 `dist/app.js`。
+克隆或下载本仓库后，双击 `index.html` 即可，不需要安装 Node.js，也不需要起服务器。页面以 `file://` 打开，调用的是仓库里预构建好的 `dist/app.js`。
 
 支持拖入或选择的文件：
 
@@ -19,7 +17,6 @@
 改代码才需要这一步，需要 Node.js 20 以上。
 
 ```bash
-cd viewer
 npm install
 npm run build      # 产物写到 dist/app.js，页面直接加载它
 npm run dev        # 开发时用 vite 起热更新服务
