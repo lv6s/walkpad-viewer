@@ -68,8 +68,48 @@ try {
   assert.ok((await page.locator('#ver').textContent()).includes(APP_VER));
   assert.equal(await page.locator('#activityModel').inputValue(), 'B1Q 实测候选');
   assert.deepEqual(await page.locator('#activityModel option').evaluateAll(options => options.map(o => o.value)),
-    ['B1Q 实测候选', 'Moticon 多域时序模型', 'GaitWindow 优化版']);
+    ['B1Q 实测候选', 'Moticon 多域时序模型', 'GaitWindow 优化版', '正常走跑提取']);
   assert.equal(await page.locator('#activityIctoVersion').inputValue(), 'legacy');
+  if (process.env.D56_COP_ZIP) {
+    await importFile({name: 'd56-cop.zip', mimeType: 'application/zip', buffer: fs.readFileSync(process.env.D56_COP_ZIP)});
+    assert.equal(await page.locator('#activityCop').isEnabled(), false);
+    await page.locator('[data-tab="cop"]').click();
+    assert.match(await page.locator('#copScope').textContent(), /未选中步行或跑步段/);
+    assert.equal(await page.locator('#copSeek').count(), 0);
+    await page.getByRole('button', {name: '前往活动分段'}).click();
+    await analyze();
+    const copRows = page.locator('#activityRows tr');
+    const all = await copRows.evaluateAll(rows => rows.map(r => [...r.cells].map(c => c.textContent)));
+    const longest = all.reduce((best, r, i) => /^(步行|跑步)$/.test(r[4]) && (best < 0 || +r[3] > +all[best][3]) ? i : best, -1);
+    assert.ok(longest >= 0, JSON.stringify(all));
+    const [start, end] = all[longest].slice(1, 3).map(Number);
+    await copRows.nth(longest).click(); await page.locator('#activityCop').click();
+    const seek = page.locator('#copSeek'); await seek.waitFor({state: 'visible'});
+    assert.equal(Number(await seek.getAttribute('min')), 1000 * start);
+    assert.equal(Number(await seek.getAttribute('max')), 1000 * end);
+    assert.match(await page.locator('#copScope').textContent(), new RegExp(all[longest][4]));
+    let summary = [];
+    for (const button of await page.locator('.cop-item.play button').filter({hasText: /^CSV$/}).all()) {
+      const [file] = await Promise.all([page.waitForEvent('download'), button.click()]);
+      const values = fs.readFileSync(await file.path(), 'utf8').trim().split(/\r?\n/).slice(1).map(r => r.split(',').map(Number));
+      assert.ok(values.length > 10 && values.every(([, t, x, y]) => t >= start && t < end && Number.isFinite(x) && Number.isFinite(y)));
+      const xs = values.map(r => r[2]).sort((a,b) => a-b);
+      summary.push([file.suggestedFilename(), new Set(values.map(r => r[0])).size, xs[Math.floor(xs.length / 2)]]);
+    }
+    assert.equal(summary.length, 2);
+    if (process.env.D56_COP_ZIP.endsWith('鞋垫_CoP优化_v4.zip')) {
+      assert.ok(summary.every(([, count]) => count >= 25), JSON.stringify(summary));
+    }
+    await seek.fill(String(1000 * end)); await page.locator('#copPlay').click();
+    assert.ok(Number(await seek.inputValue()) >= 1000 * start && Number(await seek.inputValue()) < 1000 * end);
+    await page.locator('#copPlay').click();
+    await page.getByRole('button', {name: '前往活动分段'}).click();
+    const nonGait = all.findIndex(r => !/^(步行|跑步)$/.test(r[4]));
+    assert.ok(nonGait >= 0);
+    await copRows.nth(nonGait).click(); assert.equal(await page.locator('#activityCop').isEnabled(), false);
+    await page.locator('[data-tab="cop"]').click(); assert.equal(await page.locator('#copSeek').count(), 0);
+    console.log('PASS selected gait CoP, exact bounds, both CSVs and stale-selection clearing', start, end, summary);
+  }
   await importFile('dual_gap.zip'); await analyze();
   assert.match(await page.locator('#activityStatus').textContent(), /WT-offline-B1Q/);
   const rows = await page.locator('#activityRows tr').allTextContents(); assert.ok(rows.length >= 3);
@@ -98,7 +138,34 @@ try {
   const tasCsv = await tasDownload;
   assert.match(tasCsv.suggestedFilename(), /WT-offline-Moticon-TAS-v1_状态分段\.csv$/);
   assert.match(fs.readFileSync(await tasCsv.path(), 'utf8'), /,WT-offline-Moticon-TAS-v1\b/);
-  console.log('PASS Moticon TAS, three visible options, gap isolation and model-tagged CSV');
+  assert.equal(await page.locator('#activityTurnLLegend').isHidden(), true);
+  await page.selectOption('#activityModel', '正常走跑提取'); await analyze();
+  assert.match(await page.locator('#activityStatus').textContent(), /WT-gait-extraction-v1/);
+  assert.equal(await page.locator('#activityTurnLLegend').isVisible(), true);
+  assert.ok(await page.locator('#activityRows tr').evaluateAll(rows => rows.some(r => {
+    const t = r.cells; return t[4].textContent === '无法判断' && Number(t[1].textContent) <= 6 && Number(t[2].textContent) >= 7;
+  })));
+  const selectionCSV = page.waitForEvent('download'); await page.locator('#activityCsv').click();
+  assert.match(fs.readFileSync(await (await selectionCSV).path(), 'utf8'), /model,walk_review/);
+  for (const [file, abnormal] of [[process.env.D56_NORMAL_WALK_ZIP, false], [process.env.D56_ABNORMAL_WALK_ZIP, true]]) {
+    if (!file) continue;
+    await importFile({name: 'd56-walk.zip', mimeType: 'application/zip', buffer: fs.readFileSync(file)}); await analyze();
+    const rows = await page.locator('#activityRows tr').evaluateAll(rs => rs.map(r => [...r.cells].map(c => c.textContent)));
+    const select = label => rows.filter(r => r[4] === label).map(r => r.slice(1, 3).map(Number));
+    assert.deepEqual(select('左转'), abnormal ? [[23.2, 26.7]] : [[14.9, 19]]);
+    assert.deepEqual(select('右转'), abnormal ? [[60, 83.1]] : []);
+    assert.deepEqual(select('步行'), abnormal ? [] : [[1.7, 14.9], [19, 30.5]]);
+    assert.deepEqual(select('跑步'), []);
+    assert.ok(rows.some(r => r[4] === '其他' && r[5] === '—' && r[8].includes('摆动偏低')));
+  }
+  if (process.env.D56_EXTRACTION_RUN_ZIP) {
+    const buffer = fs.readFileSync(process.env.D56_EXTRACTION_RUN_ZIP);
+    await importFile({name: 'd56-run.zip', mimeType: 'application/zip', buffer}); await analyze();
+    const segments = await page.locator('#activityRows tr').evaluateAll(rows => rows.filter(r => r.cells[4].textContent === '跑步').map(r => Number(r.cells[3].textContent)));
+    assert.deepEqual(segments, [60.6]);
+  }
+  await importFile('dual_gap.zip');
+  console.log('PASS raw Moticon TAS and gait extraction options, gap isolation, model-tagged CSV and optional D56 replay');
   await page.selectOption('#activityModel', 'GaitWindow 优化版');
   assert.ok(await page.locator('#activityStillLegend').isVisible()); await analyze();
   assert.match(await page.locator('#activityStatus').textContent(), /WT-offline-GaitWindow-Refined/);

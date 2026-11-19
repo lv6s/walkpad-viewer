@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {activityEngine} from '../src/activity-engine.ts';
 import {ACTIVITY_WALK_RUN_UNCERTAIN, analyzeGaitWindow, reviewGaitSpan, windowFeatures, windowProbabilities} from '../src/gait-window.ts';
-import {ACTIVITY_STILL} from '../src/core/constants.ts';
+import {ACTIVITY_STILL, ACTIVITY_TURN_L, ACTIVITY_TURN_R} from '../src/core/constants.ts';
+import {analyzeGaitExtraction, screenGait, WALK_REVIEW} from '../src/turn-rule.ts';
 import {analyzeMoticonTas, decodeMoticonTas, predictMoticonTas} from '../src/moticon-tas.ts';
 const contract = JSON.parse(fs.readFileSync(new URL('../src/o1-model.json', import.meta.url)));
 const fixture = JSON.parse(fs.readFileSync(new URL('./o1-parity.json', import.meta.url)));
@@ -76,6 +77,45 @@ for (let i = 0; i < tk; i++) {
   for (const [c, cls] of classMap.entries()) assert.ok(Math.abs(chunked.probs[cls * nt + i + 2] - exp[c] / total) < 2e-5);
 }
 console.log('PASS Moticon TAS PyTorch state/boundary/decode parity, chunk joins and gap isolation', tasError, boundaryError);
+
+const feetFor = (seconds, swing, yaw = () => 0) => [0, 1].map(foot => {
+  const count = seconds * 50, source = {
+    t: Float64Array.from({length: count}, (_, i) => (i + .5) / 50), seq: Float64Array.from({length: count}, (_, i) => i),
+    ok: new Uint8Array(count).fill(1), axes: Array.from({length: 6}, () => new Float32Array(count))
+  };
+  source.axes[2].fill(1);
+  for (let i = 0; i < count; i++) {
+    source.axes[3][i] = swing(i / 50, foot) * Math.sin(i * 2 * Math.PI / 50 + foot * Math.PI);
+    source.axes[5][i] = yaw(i / 50);
+  }
+  return source;
+});
+const screen = (swing, labels = new Int8Array(100)) => screenGait(labels, new Int8Array(100), feetFor(10, swing).map(s => engine.sample(s, 500)), 500);
+assert.ok(screen(() => 220).labels.every(v => v === 0));
+assert.ok(screen(() => 95).walkReview.every(v => v === WALK_REVIEW.lowSwing));
+assert.ok(screen((_, foot) => foot ? 95 : 350).labels.every(v => v === 2));
+const pause = screen(t => t >= 4 && t < 6 ? 0 : 250);
+assert.equal(pause.labels[50], 2); assert.ok(pause.walkReview[50] & WALK_REVIEW.pause);
+assert.equal(pause.labels[30], 0); assert.equal(pause.labels[70], 0);
+const shortWalk = new Int8Array(100).fill(2); shortWalk.fill(0, 30, 49);
+assert.ok(screen(() => 220, shortWalk).walkReview.slice(30, 49).every(v => v === WALK_REVIEW.short));
+const turnFeet = feetFor(23, () => 0, t => t >= 4 && t < 7 ? 80 : t >= 13 && t < 16 ? -80 : 0);
+turnFeet[1].ok.fill(0, 500, 525);
+const takeoff = new Int8Array(230).fill(ACTIVITY_STILL); takeoff.fill(1, 110, 230); takeoff.fill(-1, 100, 105);
+const extracted = await analyzeGaitExtraction(engine, turnFeet, 23, () => {}, 'extraction', {labels: takeoff, edge: new Uint8Array(230), probs: new Float32Array(1150)});
+assert.equal(extracted.labels[20], 2);
+assert.equal(extracted.labels[50], ACTIVITY_TURN_L);
+assert.equal(extracted.labels[140], ACTIVITY_TURN_R);
+assert.equal(extracted.labels[200], 1);
+assert.ok(extracted.labels.slice(100, 105).every(v => v === -1));
+assert.equal(extracted.turnRuns.length, 2);
+const broken = feetFor(4, () => 0, () => 35);
+for (const foot of broken) foot.ok.fill(0, 96, 104);
+const brokenResult = await analyzeGaitExtraction(engine, broken, 4, () => {}, 'extraction', {
+  labels: new Int8Array(40).fill(-1), edge: new Uint8Array(40), probs: new Float32Array(200)
+});
+assert.equal(brokenResult.turnRuns.length, 0);
+console.log('PASS step extraction: dual-foot swing, stop, minimum duration, independent turns, gaps and straight running');
 
 const nReview = 160, first = 3, grid = (nReview + first) * 5;
 const gyro = (lag, amplitude = 100, phase = 0) => {

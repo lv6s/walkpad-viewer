@@ -3,10 +3,10 @@
 import {renderActivity} from './activity';
 import {drawAction, renderAction} from './action';
 import {drawAxis, renderAxis} from './axis';
-import {drawMean, drawSeek, renderCop, setCopTime, stopPlay} from './cop';
+import {renderCop, stopPlay} from './cop';
 import {SIDE_CN} from './core/constants';
 import {$, el} from './core/dom';
-import {gapView, imuView, meanView, seekView, state, view, zeroView} from './core/state';
+import {gapView, imuView, state, view, zeroView} from './core/state';
 import {fmt} from './core/util';
 import {openDetail} from './detail';
 import {exportCsv, exportPng} from './export';
@@ -65,12 +65,7 @@ function setTab(name) {
     updateWinBar();
     if (state.detail) openDetail(state.detail.side, state.detail.j);
   } else if (name === 'cop') {
-    // 懒加载时 COP 是「按当前块算出来的」：换了块必须重算，不能沿用上一块的轨迹
-    if (state.lazy) renderCop(); else {
-      for (const e of meanView.values()) drawMean(e);
-      for (const e of seekView.values()) drawSeek(e);
-      setCopTime(state.copT);
-    }
+    void renderCop();
   } else if (name === 'zero') {
     for (const e of zeroView.values()) drawZero(e);
     applyZeroFilter();
@@ -157,7 +152,6 @@ function renderAll() {
   if (hasP) {
     el.panels.innerHTML = '';
     view.clear();
-    renderCop();
     renderZero();
   }
   renderActivity();

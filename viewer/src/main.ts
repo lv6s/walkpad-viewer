@@ -7,7 +7,7 @@ import {initAction} from './action';
 import {setTab} from './app';
 import {drawAxis, syncAxisUi} from './axis';
 import {initAxisPage} from './axis/page';
-import {copSegBaseRef, jumpSeg, setCopTime, togglePlay} from './cop';
+import {copSegBaseRef, jumpSeg, renderCop, setCopTime, togglePlay} from './cop';
 import {APP_VER} from './core/constants';
 import {el} from './core/dom';
 import {state, view} from './core/state';
@@ -149,6 +149,7 @@ function bindViewer(): void {
     if (list === lastSegList) return;
     lastSegList = list;
     if (state.tab === 'imu' && state.sides.length) redrawImu();
+    if (state.tab === 'cop' && state.sides.length) void renderCop();
   });
   el.scrub.after(el.imuOvBar);
   bindOverview();

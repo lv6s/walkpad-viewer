@@ -1,6 +1,6 @@
 /* IMU 页：physical / raw 两套数据、六轴分栏、全程总览条。 */
 
-import {ACTIVITY_STILL, SEG_C, SEG_CN, SIDE_CN} from './core/constants';
+import {ACTIVITY_STILL, ACTIVITY_TURN, SEG_C, SEG_CN, SIDE_CN} from './core/constants';
 import {$, el} from './core/dom';
 import {imuView, state} from './core/state';
 import {baseName, css, downloadCanvas, fmt, fmtT, niceMax} from './core/util';
@@ -214,7 +214,7 @@ export function syncImuSegUi(): void {
     for (const s of seg.list) t[s.cls] += s.b - s.a;
     const modelStill = seg.list.some(s => s.cls === ACTIVITY_STILL && s.confidence != null);
     el.imuSegNote.innerHTML = `${id} · ` + SEG_CN
-      .map((nm, i) => i < 3 || (i === ACTIVITY_STILL && t[i] > 0) ? `<span style="color:${SEG_C[i]}">■</span>${i === ACTIVITY_STILL && modelStill ? '静止' : nm} ${t[i].toFixed(1)} s` : '')
+      .map((nm, i) => i < 3 || ((i === ACTIVITY_STILL || i >= ACTIVITY_TURN) && t[i] > 0) ? `<span style="color:${SEG_C[i]}">■</span>${i === ACTIVITY_STILL && modelStill ? '静止' : nm} ${t[i].toFixed(1)} s` : '')
       .filter(Boolean).join('　')
       + (state.imuSeg ? '' : ' · 底色已关');
   } else el.imuSegNote.textContent = '未分析';

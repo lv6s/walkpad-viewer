@@ -792,6 +792,13 @@ async function scanStats(s, gen) {
   if (state.sides.length) setTab(state.tab);
 }
 
+export async function readCopBlock(s, a: number, b: number) {
+  if (!s.lazy || blkCovers(s, a, b)) return s.blk;
+  const isolated = {...s};
+  await loadBlock(isolated, a, b);
+  return isolated.blk;
+}
+
 let loadingWin = false, pendingWin = null;
 // 块算不算覆盖窗口：看窗口里真正要画的首末样本是否都在块内，不能只看有没有交集。
 // 已有 [0,60]、要看 [30,90] 时两者相交，但后 30 s 根本没读进来。

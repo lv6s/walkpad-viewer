@@ -1,6 +1,7 @@
 import {activityEngine} from './activity-engine';
 import {analyzeGaitWindow} from './gait-window';
 import {analyzeMoticonTas} from './moticon-tas';
+import {analyzeGaitExtraction} from './turn-rule';
 import {ACTIVITY_STILL} from './core/constants';
 import {ictoDetectRows} from './icto/core';
 import {gaitIctoInput, gaitMetrics} from './gait/core';
@@ -13,10 +14,15 @@ function buildSegments(r): ActivitySegment[] {
   const out: ActivitySegment[] = [];
   for (let i = 0; i < r.ticks;) {
     let end = i + 1; while (end < r.ticks && r.labels[end] === r.labels[i]) end++;
-    const label = r.labels[i], cls = label < 0 ? 3 : label; let sum = 0, edge = false, reviewed = false;
+    const label = r.labels[i], cls = label < 0 ? 3 : label;
+    let sum = 0, edge = false, reviewed = false, walkReview = 0, changed = false;
     const modeled = (label >= 0 && label < 3) || (label === ACTIVITY_STILL && r.probs.length > ACTIVITY_STILL * r.ticks);
-    for (let k = i; k < end; k++) { if (modeled) sum += r.probs[label * r.ticks + k]; edge ||= !!r.edge[k]; reviewed ||= !!r.reviewed?.[k]; }
-    out.push({a: i / 10, b: end / 10, cls, confidence: !modeled || reviewed ? null : sum / (end - i), edge, reviewed}); i = end;
+    for (let k = i; k < end; k++) {
+      if (modeled) sum += r.probs[label * r.ticks + k];
+      edge ||= !!r.edge[k]; reviewed ||= !!r.reviewed?.[k]; walkReview |= r.walkReview?.[k] ?? 0;
+      changed ||= !!r.baseLabels && r.baseLabels[k] !== label;
+    }
+    out.push({a: i / 10, b: end / 10, cls, confidence: !modeled || reviewed || changed ? null : sum / (end - i), edge, reviewed, walkReview}); i = end;
   }
   const end = r.ticks / 10;
   if (r.duration > end + 1e-6) {
@@ -28,12 +34,20 @@ function buildSegments(r): ActivitySegment[] {
 }
 
 const engine = activityEngine();
+const dispatch = (contract, inputs, duration, progress) =>
+  contract.kind === 'moticon-tas' ? analyzeMoticonTas(engine, inputs, duration, progress)
+    : contract.kind === 'gait-window' ? analyzeGaitWindow(engine, contract.id, inputs, duration, progress, contract.reviewGait)
+    : engine.analyze(contract, inputs, duration, progress);
 self.onmessage = async ({data: {contract, inputs, duration}}) => {
   try {
     const progress = (value: number) => self.postMessage({progress: value});
-    const result = contract.kind === 'moticon-tas' ? await analyzeMoticonTas(engine, inputs, duration, progress)
-      : contract.kind === 'gait-window' ? await analyzeGaitWindow(engine, contract.id, inputs, duration, progress, contract.reviewGait)
-      : await engine.analyze(contract, inputs, duration, progress);
+    let result;
+    if (contract.kind === 'gait-extraction') {
+      const base = await analyzeMoticonTas(engine, inputs, duration, p => progress(Math.round(p * .7)));
+      result = await analyzeGaitExtraction(engine, inputs, duration, p => progress(Math.round(70 + p * .3)), contract.id, base);
+    } else {
+      result = await dispatch(contract, inputs, duration, progress);
+    }
     const segments = buildSegments(result);
     self.postMessage({phase: 'gait'});
     let gait: GaitSegment[] = [], runningGait: GaitSegment[] | null = null;

@@ -1,6 +1,8 @@
 /* COP 页：Otsu 分段、零相位低通、零点扣除、平均轨迹与逐帧播放。 */
 
-import {NCH, SIDE_CN} from './core/constants';
+import {selectedCopSegment} from './activity';
+import {setTab} from './app';
+import {NCH, SEG_CN, SIDE_CN} from './core/constants';
 import {$, el} from './core/dom';
 import {meanView, seekView, state} from './core/state';
 import {baseName, blkOf, css, downloadCanvas, fmt, med, miniBtn, miniRow} from './core/util';
@@ -8,17 +10,12 @@ import {idxAt} from './detail';
 import {exportCopCsv} from './export';
 import {COP_PTS, INNER_RIGHT, VIS_X, VIS_Y, strokeOutline} from './geometry';
 import {showTipAt} from './interact';
+import {readCopBlock} from './parse';
+import {strictRange} from './timewin';
 
 const COP_LP = 6;
-// 支撑判定阈值由 Otsu 自动定（实测稳定落在 44–49% 峰值），落点是「两簇之间的间隙」，
-// 与峰值百分比无关。底数抬高后摆动簇整体上移，任何固定小百分比都会跌进簇内而失效，
-// 所以只在双峰不显著（eta 低）或越界时回退半峰。
 const THR_LO = 0.25, THR_HI = 0.65, THR_FALLBACK = 0.5, THR_OFF = 0.55, THR_ETA_MIN = 0.6;
-// 两级阈值：Otsu 只判「是不是一步」，段端点由窗宽门限外扩决定。
-// gate 取摆动底（段外帧的中位载）的 2 倍，干净数据等价于固定 3% 峰值，软鞋垫抬到实际平地线之上。
 const GATE_FLOOR = 0.03, GATE_K = 2, GATE_MAX_OFF = 0.9;
-// 两级阈值：Otsu 只判「是不是一步」，段端点由窗宽门限外扩决定。
-// gate 取摆动底（段外帧的中位载）的 2 倍，干净数据等价于固定 3% 峰值，软鞋垫抬到实际平地线之上。
 
 // 总载直方图做 Otsu 分割，返回分界值与类间方差占比 eta。
 // eta 接近 1 表示双峰分离干净；单峰（全程受载）时 eta 低，调用方应回退。
@@ -210,25 +207,33 @@ function copCalc(src) {
   let peak = 0;
   for (let k = 0; k < n; k++) if (tot[k] > peak) peak = tot[k];
   if (!(peak > 0)) return null;
-  const otsu = otsuSplit(tot, n);
-  let auto = otsu.eta >= THR_ETA_MIN && otsu.t >= THR_LO * peak && otsu.t <= THR_HI * peak;
+  // 转场的少量高载不应抬高正常步的支撑门限。
+  const sorted = tot.slice().sort();
+  const refPeak = sorted[Math.floor(.95 * (n - 1))] || peak;
+  const otsu = otsuSplit(tot.map(v => Math.min(v, refPeak)), n);
+  const auto = otsu.eta >= THR_ETA_MIN && otsu.t >= THR_LO * refPeak && otsu.t <= THR_HI * refPeak;
   const minLen = Math.max(3, Math.round(0.1 * (s.fs || 50)));
   const detect = uOn => {
     const uOff = THR_OFF * uOn;
     const d = contactsOf(tot, uOn, uOff, minLen);
     const gm = gapMedian(tot, d, n);
-    const g = Math.min(Math.max(GATE_FLOOR * peak, GATE_K * gm), GATE_MAX_OFF * uOff);
+    const g = Math.min(Math.max(GATE_FLOOR * refPeak, GATE_K * gm), GATE_MAX_OFF * uOff);
     return {segs: d, gapMed: gm, gate: g, off: uOff};
   };
-  let on = auto ? otsu.t : THR_FALLBACK * peak;
-  let det = detect(on);
-  // 检测阈值掉进摆动带里（底数没扣、或数据全程受载）⇒ 分段不可信，退回半峰重判一次
-  if (on <= det.gate) { on = THR_FALLBACK * peak; det = detect(on); auto = false; }
+  const on = auto ? otsu.t : THR_FALLBACK * refPeak;
+  const det = detect(on);
   const off = det.off, gate = det.gate, gapMed = det.gapMed;
-  const segs = extendSegs(tot, det.segs, gate, n);
+  const gapLimit = 2.5 / (s.fs || 50);
+  const segs = extendSegs(tot, det.segs, gate, n).filter(([a, b]) => {
+    if (a === 0 || b === n - 1) return false;
+    for (let k = a; k <= b + 1; k++) if (s.t[k] - s.t[k - 1] > gapLimit) return false;
+    return true;
+  });
+  const support = new Uint8Array(n);
+  for (const [a, b] of segs) support.fill(1, a, b + 1);
   const thr = gate;
   for (let k = 0; k < n; k++) {
-    if (!(tot[k] > thr)) { cx[k] = NaN; cy[k] = NaN; }
+    if (!support[k] || !(tot[k] > thr)) { cx[k] = NaN; cy[k] = NaN; }
   }
   if (state.copLp) {
     const bq = biquadLP(COP_LP, s.fs);
@@ -252,8 +257,8 @@ function copCalc(src) {
     path.push(L);
   }
   const out: any = {tot, cx, cy, peak, thr, segs, dur, ap, ml, path, rawPeak, rawMin,
-               on, off, gate, gapMed, eta: otsu.eta, auto, thrPct: 100 * on / peak,
-               gatePct: 100 * gate / peak,
+               on, off, gate, gapMed, eta: otsu.eta, auto, thrPct: 100 * on / refPeak,
+               gatePct: 100 * gate / refPeak,
                zero: {sum: zsum, n: zch, applied: !!base},
                landX: segs.map(([a]) => cx[a]), offX: segs.map(([, b]) => cx[b]),
                landY: segs.map(([a]) => cy[a]), offY: segs.map(([, b]) => cy[b])};
@@ -327,7 +332,7 @@ function copBase(g, geo, s) {
   strokeOutline(g, s.side, X, Y);
   g.restore();
 
-  // 格点：实心 = 有读数，空心 = 该段恒为 0
+  // 格点：实心 = 选中段有正读数，空心 = 无正读数
   const P = COP_PTS[s.side];
   if (P) {
     const nch = Math.min(NCH, s.nch, P.x.length);
@@ -439,8 +444,7 @@ function paintSeek(entry, t) {
   const Y = y => geo.padT + (VIS_Y[1] - y) * geo.scale;
   // ⚠ 段表 d.segs 与 d.cx/cy 都是块内下标：游标也必须用块内时间轴换算，不能用全段的 s
   const bs = s.blk;
-  if (!bs || !(bs.n > 0)) return;
-  const k = idxAt(t, bs);
+  const k = t < bs.t[0] || t > bs.t[bs.n - 1] ? -1 : idxAt(t, bs);
   let si = -1;
   for (let i = 0; i < d.segs.length; i++) {
     if (k >= d.segs[i][0] && k <= d.segs[i][1]) { si = i; break; }
@@ -487,7 +491,7 @@ function paintSeek(entry, t) {
       ? `<span>t ${t.toFixed(2)} s</span>`
         + `<span>COP (${d.cx[k].toFixed(1)}, ${d.cy[k].toFixed(1)}) mm</span>`
         + `<span>总载 ${fmt(d.tot[k])} ADC（${Math.round(100 * d.tot[k] / d.peak)}%）</span>`
-      : `<span>t ${t.toFixed(2)} s</span><span>COP —</span><span>腾空，无 COP</span>`;
+      : `<span>t ${t.toFixed(2)} s</span><span>COP —</span><span>${k < 0 ? '无采样' : '无有效支撑'}</span>`;
   }
 }
 
@@ -520,7 +524,7 @@ function onSeekHover(entry, ev) {
   if (entry.hov !== k) { entry.hov = k; paintSeek(entry, state.copT); }
   const d = entry.d, s = entry.s, v = d.tot[k];
   el.tip.innerHTML = `<b>t = ${s.blk.t[k].toFixed(2)} s</b><br>`
-    + (isFinite(d.cx[k]) ? `COP (${d.cx[k].toFixed(1)}, ${d.cy[k].toFixed(1)}) mm<br>` : '腾空，无 COP<br>')
+    + (isFinite(d.cx[k]) ? `COP (${d.cx[k].toFixed(1)}, ${d.cy[k].toFixed(1)}) mm<br>` : '无有效支撑，无 COP<br>')
     + `总载 ${fmt(v)} ADC（${Math.round(100 * v / d.peak)}%）<br>`
     + '<span style="opacity:.7">点一下跳到这一帧</span>';
   showTipAt(ev.clientX, ev.clientY);
@@ -608,45 +612,97 @@ function copTick(ts) {
   const dt = copLast ? (ts - copLast) / 1000 : 0;
   copLast = ts;
   let t = state.copT + dt * (state.copRate || 1);
-  if (t >= state.copSpan) { t = 0; copLast = 0; }
+  if (t >= state.copSpan) { t = state.copA; copLast = 0; }
   setCopTime(t);
   copRaf = requestAnimationFrame(copTick);
 }
 
 function togglePlay() {
   if (state.playing) { stopPlay(); return; }
-  if (!(state.copSpan > 0)) return;
-  if (state.copT >= state.copSpan - 1e-3) state.copT = 0;
+  if (!(state.copSpan > state.copA) || !copSegBase) return;
+  if (state.copT >= state.copSpan - 1e-3) setCopTime(state.copA);
   state.playing = true;
   copLast = 0;
   if (el.copPlay) el.copPlay.textContent = '⏸ 暂停';
   copRaf = requestAnimationFrame(copTick);
 }
 
-function renderCop() {
+async function segmentSides(sides, a: number, b: number) {
+  const items = await Promise.all(sides.filter(s => s.nch >= 2).map(async s => {
+    const blk = await readCopBlock(s, a, b);
+    if (!blk) return null;
+    const {i0, i1} = strictRange(blk, a, b);
+    let end = i1 + 1;
+    while (end > i0 && blk.t[end - 1] >= b) end--;
+    if (end - i0 < 2) return null;
+    const t = blk.t.subarray(i0, end), ch = blk.ch.map(col => col.subarray(i0, end));
+    const mx = ch.map(col => col.reduce((m, v) => v > m ? v : m, 0));
+    return {...s, mx, blk: {n: t.length, t, ch, a: t[0], b: t[t.length - 1]}};
+  }));
+  return items.filter(Boolean);
+}
+
+let copRenderId = 0, copLoad = null;
+let shownSegment = null;
+async function renderCop() {
+  const id = ++copRenderId;
   stopPlay();
-  el.cop.innerHTML = '';
+  el.cop.replaceChildren();
+  el.tip.style.display = 'none';
   meanView.clear(); seekView.clear();
-  el.copPlay = el.copSeek = el.copClock = null;
+  el.copPlay = el.copSeek = el.copClock = copSegBase = null;
+  state.copA = state.copSpan = 0;
   if (!state.sides.length) return;
 
+  const sides = state.sides, segment = selectedCopSegment();
   const sec = document.createElement('section');
   sec.className = 'copsec';
+  el.cop.appendChild(sec);
   const h2 = document.createElement('h2');
-  h2.textContent = 'COP 平面轨迹（力加权质心）';
+  h2.textContent = 'CoP 平面轨迹（压力读数加权）';
+  const scope = document.createElement('p');
+  scope.id = 'copScope'; scope.className = 'meta';
+  scope.textContent = segment ? `${SEG_CN[segment.cls]} · ${segment.a.toFixed(2)}–${segment.b.toFixed(2)} s · 仅统计本段完整支撑`
+    : '未选中步行或跑步段。请在「活动分段」分析并选中一段，再查看 CoP。';
+  const choose = document.createElement('button');
+  choose.type = 'button'; choose.textContent = '前往活动分段';
+  choose.onclick = () => setTab('activity');
+  sec.append(h2, scope, choose);
+  if (!segment) { shownSegment = copLoad = null; return; }
+
+  const msg = document.createElement('p'); msg.className = 'meta';
+  msg.textContent = '正在读取选中段的逐帧压力…';
+  sec.append(msg);
+  const current = () => id === copRenderId && state.sides === sides && state.tab === 'cop' && selectedCopSegment() === segment;
+  let scoped;
+  try {
+    if (copLoad?.sides !== sides || copLoad?.segment !== segment) {
+      copLoad = {sides, segment, data: segmentSides(sides, segment.a, segment.b)};
+    }
+    scoped = await copLoad.data;
+  } catch (e) {
+    if (current()) { copLoad = null; msg.textContent = '选中段压力读取失败：' + (e?.message || e); }
+    return;
+  }
+  if (!current()) return;
+  if (shownSegment !== segment) state.copT = segment.a;
+  shownSegment = segment;
+
+  const items = scoped.map(s => ({s, d: copCalc(s)})).filter(it => it.d);
+  copSegBase = items.find(it => it.d.segs.length) ?? null;
+  msg.remove();
   const note = document.createElement('details');
   note.className = 'note';
   const sum = document.createElement('summary');
   sum.textContent = '口径说明：COP 怎么算、一段支撑怎么定、零点怎么扣';
   const meta = document.createElement('p');
   meta.textContent = 'COP = Σ(q·p)/Σq　q = 该格读数（无单位），p = D56 v3 格点坐标（mm）；读数本身是该格总载荷，'
-    + '不加面积权重。支撑/摆动用两级阈值判定：先按总载直方图的 Otsu 分界（实测落在峰值 44–49%，即两簇间隙）'
-    + '配合 55% 滞回定出「哪一段是一步」，再把每段端点外扩到总载跌破「摆动底 2 倍」处，'
-    + '摆动底取段外帧的中位载——干净数据下等价于固定 3% 峰值，底数高的数据会自动抬高，不会把触地与蹬离截掉。'
-    + '总载低于该门限的帧不出 COP（分母趋 0，质心无定义）。双峰不显著或分界掉进摆动带时回退到半峰并标注。'
+    + '不加面积权重。支撑候选由本段总载的 Otsu 分界与滞回确定，双峰不显著时用参考载荷的一半。'
+    + '参考载荷取本段总载的第 95 百分位，减少少量转场冲击抬高门限。'
+    + '支撑端点依据低载门限外扩；未进入有效支撑、载荷过低或跨采样缺口的轨迹不纳入。'
     + '「扣除每通道零点」按各脚总载最低 12% 的帧逐通道取中位数当零点，扣完负值截 0——数据全程不归零时'
     + '（存在直流偏置）必须开，否则摆动簇被整体抬高、任何固定阈值都会跌进簇内，整段被判成一次支撑。'
-    + '左右脚各按自身坐标绘制，内侧朝身体中线，未做镜像。';
+    + '只计算选中步行/跑步段内完整支撑；贴住段边界的支撑不纳入。左右脚按自身坐标绘制，不镜像、不横移。';
   note.append(sum, meta);
 
   const ctl = document.createElement('div');
@@ -680,18 +736,16 @@ function renderCop() {
   stat.className = 'copstats';
   stat.hidden = true;                        // 侧别算完再填，无数据时不留空行
 
-  sec.appendChild(h2); sec.appendChild(note); sec.appendChild(ctl); sec.appendChild(stat);
-  if (state.lazy) {
-    const w = document.createElement('p');
-    w.className = 'meta';
-    w.textContent = '⚠ 长录制只载入了一个时间窗：本页的支撑分段、平均轨迹与逐帧播放都只算这一块，'
-      + '拖时间窗后按新块重算；全段的支撑统计要看「丢包 / 采样率」页。';
-    sec.appendChild(w);
+  sec.append(note, ctl, stat);
+  if (!copSegBase) {
+    msg.textContent = '当前设置下未检测到完整有效支撑，无法显示 CoP。';
+    sec.append(msg);
+    return;
   }
 
   const hd1 = document.createElement('div');
   hd1.className = 'rowhd';
-  hd1.textContent = '① 全程平均轨迹：各步按步内进程 0 → 100% 对齐后取均值，一条细线；空心点 = 着地，实心点 = 离地';
+  hd1.textContent = '① 选中段平均轨迹：各步按支撑进程 0 → 100% 对齐后取均值；空心点 = 着地，实心点 = 离地';
   const row1 = document.createElement('div');
   row1.className = 'cop-row';
   sec.appendChild(hd1); sec.appendChild(row1);
@@ -713,32 +767,11 @@ function renderCop() {
     + '<option value="1" selected>1×</option><option value="2">2×</option>'
     + '<option value="4">4×</option></select>';
   sec.appendChild(hd2); sec.appendChild(row2); sec.appendChild(bar);
-  el.cop.appendChild(sec);
-
-  // 懒加载的长录制只载入了一个窗口块：本页的 COP 也只能算这一块，进度条长度跟着块走，
-  // 否则拖到块外会一直停在块末帧、看起来像「这一秒没有 COP」。
-  let span = 0, from = Infinity;
-  for (const s of state.sides) {
-    const b = blkOf(s);
-    if (!(b.n > 1)) continue;
-    span = Math.max(span, b.t[b.n - 1]);
-    from = Math.min(from, b.t[0]);
-  }
-  state.copSpan = span;
-  state.copA = Number.isFinite(from) ? from : 0;
-  state.copT = Math.max(state.copA, Math.min(state.copT, span));
-
-  const items = [];
-  for (const s of state.sides) {
-    const d = copCalc(s);
-    if (d) items.push({s, d});
-  }
-  copSegBase = null;                                // 段跳转的基准脚，用第一只有支撑段的脚
-  // 起手停在第一次支撑的中段，否则落点落在腾空里、第二排是空白。懒加载时块的起点不是 0，
-  // 所以比的是「还没离开块首」，不是「等于 0」
-  if (items.length && state.copT <= (state.copA || 0) && items[0].d.segs.length) {
-    const [a, b] = items[0].d.segs[0];
-    state.copT = (items[0].s.blk.t[a] + items[0].s.blk.t[b]) / 2;
+  state.copSpan = segment.b;
+  state.copA = segment.a;
+  if (state.copT <= segment.a) {
+    const [a, b] = copSegBase.d.segs[0];
+    state.copT = (copSegBase.s.blk.t[a] + copSegBase.s.blk.t[b]) / 2;
   }
 
   for (const {s, d} of items) {
@@ -791,12 +824,11 @@ function renderCop() {
     for (const {s, d} of items) {
       const pct = d.rawPeak > 0 ? 100 * d.rawMin / d.rawPeak : 0;
       // 阈值与段数是判定可靠性的直接读数：单峰数据（全程受载）本就该只有 1 段
-      const note = (d.auto ? '' : '　<span class="warn">自动分界不可靠，按半峰切</span>')
-        + (d.segs.length <= 1 ? '　<span class="warn">只判出 1 段，本段可能全程受载</span>' : '');
+      const note = d.auto ? '' : '　<span class="warn">未找到可靠分界，使用一半参考载荷</span>';
       const row = document.createElement('div');
       row.innerHTML = `<b>${SIDE_CN[s.side] || s.side}</b>　峰值总载 <b>${fmt(d.rawPeak)}</b> ADC`
-        + `　全程最低总载 <b>${fmt(d.rawMin)}</b> ADC（占峰值 ${pct.toFixed(1)}%）`
-        + `　支撑 <b>${d.segs.length}</b> 段　阈值 <b>${Math.round(d.thrPct)}%</b>（η ${d.eta.toFixed(2)}）`
+        + `　本段最低总载 <b>${fmt(d.rawMin)}</b> ADC（占峰值 ${pct.toFixed(1)}%）`
+        + `　支撑 <b>${d.segs.length}</b> 段　阈值 <b>${Math.round(d.thrPct)}%</b>（相对参考载荷，η ${d.eta.toFixed(2)}）`
         + (d.gatePct > 5 ? `　摆动底 <b>${d.gatePct.toFixed(0)}%</b>` : '') + note;
       stat.appendChild(row);
     }

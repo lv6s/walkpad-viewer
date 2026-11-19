@@ -6,20 +6,23 @@ import type {GaitReportSegment, ReportSummary} from './gait/walking';
 import {gaitBadge, gaitFormat, initGaitDetail, renderGaitDetail, renderGaitOverview} from './gait/view';
 import {IC_TO_LABELS} from './gait/running-icto';
 import type {IctoVersion} from './gait/running-icto';
-import {ACTIVITY_STILL, SEG_C, SEG_CN, SIDE_CN} from './core/constants';
+import {ACTIVITY_STILL, ACTIVITY_TURN, ACTIVITY_TURN_L, ACTIVITY_TURN_R, SEG_C, SEG_CN, SIDE_CN} from './core/constants';
 import {state} from './core/state';
 import {activityInput} from './parse';
 import {applyWin, winOf} from './timewin';
 import {setTab} from './app';
+import {WALK_REVIEW} from './turn-rule';
 
 const names = SEG_CN;
 const colors = SEG_C;
 const MODELS = [
   {label: 'B1Q 实测候选', name: 'B1Q（默认）', contract: b1q as any},
   {label: 'Moticon 多域时序模型', name: 'Moticon 多域时序模型（新版试用）', contract: {id: 'WT-offline-Moticon-TAS-v1', kind: 'moticon-tas'} as any},
-  {label: 'GaitWindow 优化版', name: 'GaitWindow 优化版（对照）', contract: {id: 'WT-offline-GaitWindow-Refined', kind: 'gait-window', reviewGait: true} as any}
+  {label: 'GaitWindow 优化版', name: 'GaitWindow 优化版（对照）', contract: {id: 'WT-offline-GaitWindow-Refined', kind: 'gait-window', reviewGait: true} as any},
+  {label: '正常走跑提取', name: '正常走跑提取（TAS + 步态复核 + 转向）', contract: {id: 'WT-gait-extraction-v1', kind: 'gait-extraction'} as any}
 ];
 const modelStill = () => MODELS[modelIndex].contract.kind === 'moticon-tas';
+const isExtraction = () => MODELS[modelIndex].contract.kind === 'gait-extraction';
 const stateName = (cls: number) => cls === ACTIVITY_STILL && modelStill() ? '静止' : names[cls];
 const contextSeconds = (c) => ((2 * c.radius + 1) * .1 + .4).toFixed(1);
 let source = null, worker: Worker = null, result = null, running = false, token = 0, selected = -1, page = 0, modelIndex = 0;
@@ -30,6 +33,24 @@ let ictoVersion: IctoVersion = 'legacy', runningError = false, gaitNote = '', st
 const usesRefined = (i: number) => ictoVersion === 'running' && !!refinedRunReport?.[i];
 const showDetail = (i: number) => renderGaitDetail(usesRefined(i) ? runningGait?.[i] : gait[i],
   usesRefined(i) ? refinedRunReport[i] : report[i], segments[i], i, usesRefined(i));
+/* 转身段的判据明细：同向累计角与持续时长，达到转圈档就点出来 */
+function turnQuality(s: ActivitySegment) {
+  const run = (result?.turnRuns ?? []).find(r => r.a <= s.a + .05 && r.b >= s.b - .05);
+  if (!run) return '转身判据命中';
+  const angle = Math.abs(run.angle), span = run.b - run.a;
+  const feet = run.dir === 0 ? `双脚方向证据不足（${run.left.toFixed(0)}° / ${run.right.toFixed(0)}°）`
+    : `双脚同向（${run.left.toFixed(0)}° / ${run.right.toFixed(0)}°）`;
+  return `同向 ${angle.toFixed(0)}° / ${span.toFixed(1)} s · ${feet}${angle >= 300 && span >= 6 ? ' · 已达转圈档' : ''}`;
+}
+function walkReviewReasons(mask = 0) {
+  return [mask & WALK_REVIEW.lowSwing ? '摆动偏低' : '', mask & WALK_REVIEW.pause ? '双脚摆动中断' : '',
+    mask & WALK_REVIEW.short ? '连续步行段过短' : ''].filter(Boolean);
+}
+const summaryClasses = (totals: number[], still: boolean) => isExtraction()
+  ? [0, 1, 2, ACTIVITY_TURN_L, ACTIVITY_TURN_R, ...(totals[ACTIVITY_TURN] > 0 ? [ACTIVITY_TURN] : []), 3]
+  : still ? [0, 1, ACTIVITY_STILL, 2, 3] : [0, 1, 2, 3];
+const probClasses = () => isExtraction() ? [0, 1, 2, ACTIVITY_STILL, ACTIVITY_TURN]
+  : modelStill() ? [0, 1, 2, ACTIVITY_STILL] : [0, 1, 2];
 // 分析完成（或失败/取消）时兑现，IMU 页的「分析整段」靠它知道什么时候该刷新底色
 let pending: (() => void) | null = null;
 const listeners: Array<() => void> = [];
@@ -105,19 +126,26 @@ async function run() {
       ...s.axes.map(a => a.buffer)]));
   } catch (e) { if (!alive()) return; running = false; status = '分析失败：' + (e?.message || e); finish(); renderActivity(); }
 }
+export function selectedCopSegment() {
+  const s = source === state.sides ? segments[selected] : undefined;
+  return s && (s.cls === 0 || s.cls === 1) ? s : null;
+}
+
 function choose(i) {
   const s = segments[i]; if (!s) return;
   selected = i; state.gaitFocus = null; applyWin(s.a, s.b); drawActivity(); renderRows();
   $('activityImu').disabled = false;
+  $('activityCop').disabled = !state.hasP || !selectedCopSegment();
   showDetail(i);
 }
 function saveCsv() {
   if (!result) return;
   const refined = MODELS[modelIndex].contract.reviewGait;
-  const reviewCol = refined ? ',state_source' : result.reviewed ? ',run_review' : '';
+  const reviewCol = isExtraction() ? ',walk_review' : refined ? ',state_source' : result.reviewed ? ',run_review' : '';
   const rows = ['start_s,end_s,duration_s,state,mean_model_probability,limited_context,model' + reviewCol];
   for (const s of segments) {
-    const extra = refined ? [s.cls === ACTIVITY_STILL ? 'imu_still' : s.cls === 3 ? 'unclassified' : s.reviewed ? 'local_review' : 'model']
+    const extra = isExtraction() ? [walkReviewReasons(s.walkReview).join(' / ')]
+      : refined ? [s.cls === ACTIVITY_STILL ? 'imu_still' : s.cls === 3 ? 'unclassified' : s.reviewed ? 'local_review' : 'model']
       : result.reviewed ? [s.reviewed ? 'yes' : 'no'] : [];
     rows.push([s.a.toFixed(3), s.b.toFixed(3), (s.b - s.a).toFixed(3), stateName(s.cls), s.confidence?.toFixed(6) ?? '', s.edge ? 'yes' : 'no', result.modelId, ...extra].join(','));
   }
@@ -148,6 +176,7 @@ export function initActivity() {
     setTab('imu');
   });
   $('activityImu').onclick = () => { const s = segments[selected]; if (s) { state.gaitFocus = null; applyWin(s.a, s.b); setTab('imu'); } };
+  $('activityCop').onclick = () => { if (state.hasP && selectedCopSegment()) setTab('cop'); };
   $('activityProbability').ontoggle = () => { if ($('activityProbability').open) drawActivity(); };
   $('activityPrev').onclick = () => { page = Math.max(0, page - 1); renderRows(); };
   $('activityNext').onclick = () => { page++; renderRows(); };
@@ -167,8 +196,12 @@ function renderRows() {
     const flags = s.edge ? ['含上下文不足的边缘'] : [];
     if (s.cls < 2) flags.push(w?.countableMs ? `可计步 ${gaitFormat(w.countableMs / 1000, 2)} s` : '无双脚可计步覆盖');
     if (s.reviewed) flags.unshift(MODELS[modelIndex].contract.reviewGait ? '含短段复核' : '含双脚周期复核');
-    const quality = s.cls === ACTIVITY_STILL && !modelStill() ? '双脚 IMU 局部低运动'
-      : s.cls === 3 ? '缺脚 / 缺口 / 时间或物理量无效 / 窗口上下文不足' : flags.join(' · ') || '模型推断';
+    const quality = s.cls >= ACTIVITY_TURN ? turnQuality(s)
+      : s.cls === ACTIVITY_STILL && !modelStill() ? '双脚 IMU 局部低运动'
+      : s.cls === 3 ? '缺脚 / 缺口 / 时间或物理量无效 / 窗口上下文不足'
+      : isExtraction() && s.cls === 2 ? [...flags, ...walkReviewReasons(s.walkReview)].join(' · ') || '未提取为走跑'
+      : isExtraction() && s.cls < 2 ? [s.cls === 0 ? '通过步态复核' : 'TAS 跑步候选，未做跑姿复核', ...flags].join(' · ')
+      : flags.join(' · ') || '模型推断';
     for (const value of [String(i + 1), s.a.toFixed(2), s.b.toFixed(2), (s.b - s.a).toFixed(2), gaitBadge(s.cls, stateName(s.cls)), s.confidence == null ? '—' : (s.confidence * 100).toFixed(1) + '%', gaitFormat(w?.cadence, 1), gaitFormat(w?.steps, 0), quality]) {
       const td = document.createElement('td'); td.append(value); row.append(td);
     }
@@ -180,6 +213,7 @@ export function renderActivity() {
   if (source !== state.sides) reset();
   $('activityStatus').textContent = status + (state.receiptTiming ? ' · WT 本地版使用手机接收时钟估计采样时间，双脚传输延迟未知。' : ''); $('activityRun').disabled = running || !state.sides.length; $('activityCancel').hidden = !running;
   $('activityCsv').disabled = !result; $('activityImu').disabled = !segments[selected];
+  $('activityCop').disabled = !state.hasP || !selectedCopSegment();
   const experimental = ictoVersion === 'running';
   $('activityIctoHint').textContent = experimental ? '步行沿用原版；跑步按所选 IC/TO 结果重算同一套指标。' + (runningError ? '实验版计算失败，跑步当前显示原版。'
     : result && !refinedRunReport ? '本次没有可供实验版复核的跑步周期，显示原版。' : '未用同步压力或视频验证。') : '走跑共用指标；切换 IC/TO 不改变状态分段。';
@@ -190,12 +224,18 @@ export function renderActivity() {
   const contract = MODELS[modelIndex].contract;
   $('activityStillLegend').hidden = !(contract.reviewGait || modelStill());
   $('activityStillLegend').textContent = '■ ' + stateName(ACTIVITY_STILL);
-  const classes = $('activityStillLegend').hidden ? [0, 1, 2, 3] : [0, 1, ACTIVITY_STILL, 2, 3];
+  $('activityTurnLLegend').hidden = !isExtraction();
+  $('activityTurnRLegend').hidden = !isExtraction();
+  const classes = summaryClasses(totals, !$('activityStillLegend').hidden);
   $('activitySummary').textContent = result ? classes.map(i => `${stateName(i)} ${totals[i].toFixed(1)} s`).join('　·　')
     : `${contract.id} · 双脚 12 通道 · 50 Hz 输入 · ${contract.kind === 'gait-window'
       ? '2.4 秒窗口 / 每 0.2 秒分类 · 双脚静止判据 + 短段复核'
+      : isExtraction() ? 'TAS 找候选 · 双脚摆动复核步行 · 独立检测转向并排除转向区间'
       : modelStill() ? '10 Hz 四类概率 · 双向 TCN + 边界解码'
       : `10 Hz 概率 · 约 ${contextSeconds(contract)} 秒上下文 · 整段联合解码`}`;
+  $('activityProbability').querySelector('summary').textContent = isExtraction()
+    ? '原始 TAS 概率 + 转向判据强度（玫红；不是最终分段的置信度）'
+    : '原始模型概率（不含静止判据或复核）';
   renderRows(); if (state.tab === 'activity') drawActivity();
   $('gaitWaveFocus').hidden = !state.gaitFocus;
   state.seg = {busy: running, status, modelId: MODELS[modelIndex].contract.id, list: segments};
@@ -221,7 +261,7 @@ export function drawActivity() {
     } else {
       const top = 16, ph = height - 48, first = Math.max(0, Math.floor(w.a * 10)), last = Math.min(result.ticks, Math.ceil(w.b * 10));
       ctx.fillStyle = ink; ctx.fillText('1.0', 10, top + 6); ctx.fillText('0.0', 10, top + ph);
-      for (const c of modelStill() ? [0, 1, 2, ACTIVITY_STILL] : [0, 1, 2]) {
+      for (const c of probClasses()) {
         ctx.strokeStyle = colors[c]; ctx.lineWidth = 1.5; ctx.beginPath(); let active = false;
         const step = Math.max(1, Math.floor((last - first) / Math.max(1, pw * 2)));
         for (let k = first; k < last; k += step) { const v = result.probs[c * result.ticks + k]; if (!Number.isFinite(v)) { active = false; continue; } const xx = x((k + .5) / 10), yy = top + (1 - v) * ph; if (!active) ctx.moveTo(xx, yy); else ctx.lineTo(xx, yy); active = true; } ctx.stroke();
