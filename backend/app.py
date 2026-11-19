@@ -27,6 +27,7 @@ class Command(BaseModel):
     action: str
     device_id: str | None = None
     profile: str | None = None
+    kind: str | None = None
     foot: str | None = None
     placement: str | None = None
     placement_label: str | None = None
@@ -146,7 +147,7 @@ def create_app(root=ROOT,demo=False,phone_port=8766,debug=False,idle_exit=8):
             if action == 'connect':
                 if not body.address or body.profile not in ('wt','insole'):
                     raise ValueError('请选择设备与协议')
-                return await c.connect(body.address,body.profile,body.placement or body.foot,label=body.placement_label)
+                return await c.connect(body.address,body.profile,body.placement or body.foot,label=body.placement_label,kind=body.kind)
             if action == 'disconnect':
                 return await c.disconnect(body.device_id)
             if action == 'forget':

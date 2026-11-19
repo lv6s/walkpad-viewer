@@ -20,10 +20,30 @@ INSOLE_WRITE = '0000ffe1-0000-1000-8000-00805f9b34fb'
 WT_NOTIFY = '0000ffe4-0000-1000-8000-00805f9a34fb'
 WT_WRITE = '0000ffe9-0000-1000-8000-00805f9a34fb'
 
-# 位置 -> (显示名, 只有标成左右脚背的设备才进左右脚算法与零偏)
+# 位置 -> (显示名, 脚别)；只有左右脚背带脚别进左右脚算法，其余位置照常采集与零偏
 PLACEMENTS = {'leftInstep':('左脚背','l'),'rightInstep':('右脚背','r'),
-              'leftWrist':('左手腕',None),'rightWrist':('右手腕',None)}
+              'leftWrist':('左手腕',None),'rightWrist':('右手腕',None),
+              'leftAnkle':('左踝',None),'rightAnkle':('右踝',None),
+              'leftShank':('左小腿',None),'rightShank':('右小腿',None),
+              'leftThigh':('左大腿',None),'rightThigh':('右大腿',None),
+              'pelvis':('骨盆',None)}
 FOOT_PLACEMENT = {'l':'leftInstep','r':'rightInstep'}
+# 0x1111 紧凑广播：data[0]=布局版本，data[1] 高四位产品(1 鞋垫/3 独立IMU)、低四位脚位，data[2:4] 配对号
+ADVERTISEMENT_COMPANY_ID = 0x1111
+PRODUCT_KINDS = {1:'insole',3:'imu'}
+PRODUCT_SIDES = {1:'l',2:'r'}
+
+
+def advertisement_identity(advertisement):
+    """按已登记布局读广播身份；未登记布局返回 (None,None,None)，不拿名称当身份。"""
+    data = (getattr(advertisement,'manufacturer_data',None) or {}).get(ADVERTISEMENT_COMPANY_ID)
+    if not data or len(data) not in (4,8) or data[0] != 1:
+        return None,None,None
+    if len(data) == 8 and data[:4] != data[4:]:
+        return None,None,None
+    kind = PRODUCT_KINDS.get(data[1] >> 4)
+    foot = PRODUCT_SIDES.get(data[1] & 15) if kind == 'insole' else None
+    return kind,foot,data[2:4].hex()
 
 
 class Capture:
@@ -35,6 +55,7 @@ class Capture:
         self.algorithm.on_decision = lambda result:self.recorder.put('decision',result)
         self.devices = {}
         self.found = {}
+        self.found_identity = {}
         self.ingress = asyncio.Queue(maxsize=10000)
         self.sequence = 0
         self.cursor = 0
@@ -58,7 +79,7 @@ class Capture:
         except (OSError,ValueError):
             saved = []
         for d in saved:
-            self._device(d['id'],d['name'],d['profile'],d.get('foot'),d.get('address',''))
+            self._device(d['id'],d['name'],d['profile'],d.get('foot'),d.get('address',''),kind=d.get('kind'))
 
     async def start(self):
         self.loop = asyncio.get_running_loop()
@@ -69,10 +90,13 @@ class Capture:
         if self.debug:
             print('[capture]',level,text,flush=True)
 
-    def _device(self, key, name, profile, foot, address='', source='direct', placement=None, label=None):
+    def _device(self, key, name, profile, foot, address='', source='direct', placement=None, label=None, kind=None):
         placement = placement or FOOT_PLACEMENT.get(foot)
         if not label:
             label = PLACEMENTS[placement][0] if placement in PLACEMENTS else placement
+        # 独立 IMU 与鞋垫共用同一套测量协议，区别只在没有压力通道
+        kind = kind or ('wt' if profile == 'wt' else 'insole')
+        has_pressure = kind == 'insole'
         # 零偏按设备记账：脚背位置用 l/r（步态引擎按脚别取用），其余位置用设备键
         bias_key = foot or 'd:'+key
         if key in self.devices:
@@ -80,9 +104,9 @@ class Capture:
             if (d['profile'],d['source'],d['placement']) != (profile,source,placement):
                 d['velocity_tracker'].reset()
             d['velocity_tracker'].external_bias = profile == 'insole'
-            d.update(name=name,profile=profile,foot=foot,address=address,source=source,placement=placement,placement_label=label,bias_key=bias_key)
+            d.update(name=name,profile=profile,foot=foot,address=address,source=source,placement=placement,placement_label=label,bias_key=bias_key,kind=kind,has_pressure=has_pressure)
             return d
-        d = dict(id=key,name=name,profile=profile,foot=foot,address=address,source=source,
+        d = dict(id=key,name=name,profile=profile,foot=foot,address=address,source=source,kind=kind,has_pressure=has_pressure,
                  placement=placement,placement_label=label,bias_key=bias_key,
                  connected=False,reconnecting=False,connection='',client=None,decoder=Decoder(profile),
                  frames=0,bad=0,last=None,samples=collections.deque(maxlen=4000),recent=collections.deque(maxlen=1000),
@@ -123,7 +147,7 @@ class Capture:
 
     def persist_devices(self):
         self.config_path.parent.mkdir(exist_ok=True)
-        atomic_json(self.config_path,[{k:d[k] for k in ('id','name','profile','foot','address','placement','placement_label')} for d in self.devices.values() if d['source'] == 'direct'])
+        atomic_json(self.config_path,[{k:d[k] for k in ('id','name','profile','foot','address','placement','placement_label','kind')} for d in self.devices.values() if d['source'] == 'direct'])
 
     async def scan(self):
         if self.source != 'direct':
@@ -134,17 +158,36 @@ class Capture:
         for address,(device,adv) in found.items():
             name = device.name or adv.local_name or address
             upper = name.upper()
-            profile = 'insole' if upper.startswith(('IMU','W0','D56')) else 'wt'
+            kind,foot,pair = advertisement_identity(adv)
+            if kind:
+                # 已登记广播优先：产品类型决定协议，脚位只对鞋垫有意义
+                profile = 'insole'
+            elif upper.startswith('WT'):
+                kind,profile = 'wt','wt'
+            elif upper.startswith(('IMU','W0','D56')):
+                # 广播未登记时不冒认独立 IMU，只按名称给出鞋垫协议，缺压通道靠实采确认
+                kind,profile = None,'insole'
+            else:
+                kind,profile = 'wt','wt'
             self.found[address] = device
-            result.append(dict(address=address,name=name,rssi=adv.rssi,profile=profile))
+            self.found_identity[address] = (kind,foot,pair)
+            result.append(dict(address=address,name=name,rssi=adv.rssi,profile=profile,kind=kind,foot=foot,pair_id=pair))
         return sorted(result,key=lambda x:x['rssi'],reverse=True)
 
-    async def connect(self, address, profile, placement=None, key=None, label=None):
+    async def connect(self, address, profile, placement=None, key=None, label=None, kind=None):
         if self.source != 'direct':
             raise ValueError('非电脑直连模式不能连接电脑蓝牙')
         if profile not in ('wt','insole'):
             raise ValueError('invalid profile')
-        placement, text, foot = self.resolve_placement(placement, label)
+        if kind not in (None,'insole','imu','wt'):
+            raise ValueError('invalid kind')
+        known,adv_foot,_ = self.found_identity.get(address,(None,None,None))
+        kind = kind or known or ('wt' if profile == 'wt' else 'insole')
+        profile = 'wt' if kind == 'wt' else 'insole'
+        placement, text, foot = self.resolve_placement(placement or adv_foot, label)
+        if kind == 'imu':
+            # 独立 IMU 无压力通道，不进左右脚步态引擎；位置只作采集标注
+            foot = None
         for other in self.devices.values():
             if other['connected'] and other['source'] == 'direct' and other['address'] == address:
                 if other['profile'] != profile or other['placement'] != placement:
@@ -158,7 +201,7 @@ class Capture:
                 device = await BleakScanner.find_device_by_address(address,timeout=8)
             if not device:
                 raise ValueError('未扫描到设备，请确认上电且未被其他程序占用')
-            d = self._device(key or profile+':'+address,device.name or address,profile,foot,address,placement=placement,label=text)
+            d = self._device(key or profile+':'+address,device.name or address,profile,foot,address,placement=placement,label=text,kind=kind)
             if d['connected']:
                 return self.public(d)
             d['manual'] = False
@@ -252,7 +295,7 @@ class Capture:
     def emit(self,d,kind,data,receipt=None,epoch=None,source_receipt=None,source_domain=None):
         self.sequence += 1
         receipt = time.monotonic()*1000 if receipt is None else receipt
-        event = dict(v=2,id=self.sequence,type=kind,device_id=d['id'],profile=d['profile'],foot=d['foot'],
+        event = dict(v=2,id=self.sequence,type=kind,device_id=d['id'],profile=d['profile'],device_kind=d['kind'],foot=d['foot'],
                      placement=d['placement'],placement_label=d['placement_label'],
                      connection=d['connection'],source=d['source'],receipt_monotonic_ms=receipt,
                      receipt_epoch_ms=time.time()*1000 if epoch is None else epoch,
@@ -342,11 +385,11 @@ class Capture:
             if frame.get('values') is not None:
                 d['samples'].append(frame)
                 self.history.append(frame)
-            mapping = slot_map(d['foot'],d['topology'])
-            if d['profile'] == 'insole':
+            if d['has_pressure']:
+                mapping = slot_map(d['foot'],d['topology'])
                 frame['pressure'] = [frame['pressure_sparse'][slot] for slot in mapping]
             self.recorder.put('frame',dict(schema_version='capture_frames.v2',session_id=self.recorder.session_id,
-                device_id=key,profile=d['profile'],foot=d['foot'],placement=d['placement'],placement_label=d['placement_label'],
+                device_id=key,profile=d['profile'],device_kind=d['kind'],foot=d['foot'],placement=d['placement'],placement_label=d['placement_label'],
                 connection=d['connection'],source=d['source'],
                 event_id=e['id'],frame_index=index,receipt_monotonic_ms=receipt,receipt_epoch_ms=epoch,
                 source_receipt_ms=e['source_receipt_ms'],source_time_domain=e['source_time_domain'],
@@ -356,7 +399,7 @@ class Capture:
                 pressure_observed_slots=frame.get('pressure_observed_slots',[]),pressure_output_format=d['format'],
                 sensor_topology=d['topology'],gyro_temperature_celsius=frame.get('temperature'),
                 frame_kind=frame['kind'],raw_packet_sha256=frame['raw_packet_sha256'],raw_frame_hex=frame['raw_frame_hex']))
-            if d['profile'] == 'insole' or frame.get('inference_eligible'):
+            if d['has_pressure'] or frame.get('inference_eligible'):
                 algo_frames.append(frame)
         if algo_frames:
             self.algorithm.offer(dict(profile=d['profile'],foot=d['foot'],bias_key=d['bias_key'],connection=d['connection'],frames=algo_frames,
@@ -551,7 +594,7 @@ class Capture:
                     previous = stamp
                     key = 'replay:'+event['device_id']
                     d = self._device(key,event['device_id'],event['profile'],event['foot'],source='replay',
-                                     placement=event.get('placement'),label=event.get('placement_label'))
+                                     placement=event.get('placement'),label=event.get('placement_label'),kind=event.get('device_kind'))
                     d['connection'] = 'replay:'+event['connection']
                     d['connected'] = event['type'] != 'disconnect'
                     if event['type'] == 'connect':
@@ -598,7 +641,7 @@ class Capture:
         recent = d['recent']
         while recent and recent[0] < now-1000:
             recent.popleft()
-        return {k:d[k] for k in ('id','name','profile','foot','bias_key','address','placement','placement_label','source','connected','reconnecting','connection','frames','bad','last','topology','format','format_status','command_status')} | {'rate':len(recent),'velocity':tracker.snapshot()}
+        return {k:d[k] for k in ('id','name','profile','kind','has_pressure','foot','bias_key','address','placement','placement_label','source','connected','reconnecting','connection','frames','bad','last','topology','format','format_status','command_status')} | {'rate':len(recent),'velocity':tracker.snapshot()}
 
     def snapshot(self):
         return dict(version='2.0.0',source=self.source,devices=[self.public(d) for d in self.devices.values()],

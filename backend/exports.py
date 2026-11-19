@@ -81,8 +81,12 @@ def export_standard(path):
                 clock = r['device_calendar_ms']
                 observed = max(0,int((r['receipt_monotonic_ms']-origin)*1000))
                 side = {'l':'left','r':'right'}.get(r.get('foot'),'unspecified')
-                code = {'leftInstep':'left_instep','rightInstep':'right_instep','leftWrist':'left_wrist','rightWrist':'right_wrist'}
+                code = {'leftInstep':'left_instep','rightInstep':'right_instep','leftWrist':'left_wrist','rightWrist':'right_wrist',
+                        'leftAnkle':'left_ankle','rightAnkle':'right_ankle','leftShank':'left_shank','rightShank':'right_shank',
+                        'leftThigh':'left_thigh','rightThigh':'right_thigh','pelvis':'pelvis'}
                 placement = code.get(r.get('placement'),side+'_instep' if side != 'unspecified' else 'unspecified')
+                # 独立 IMU 没有压力通道：留空并标 absent，不写 70 个 0 冒充实测零压
+                pressureless = r.get('device_kind') == 'imu'
                 frame = dict(schema_id='standard_measurement_frame',schema_version='1.0.0',dataset_id=r['session_id'],
                     frame_identity=r['raw_packet_sha256']+':'+str(r['event_id'])+':'+str(r['frame_index']),product_code='lab',session_id=r['session_id'],
                     processing_input_snapshot_id=r['session_id'],processing_attempt_id='capture-v2',alignment_revision_id='unaligned-v2',
@@ -95,7 +99,7 @@ def export_standard(path):
                     source_time_value=int(clock) if clock is not None else 0,source_time_unit_code='ms',
                     device_time_raw=None,device_time_unit_code='unknown',observed_session_elapsed_us=observed,
                     aligned_session_elapsed_us=None,effective_time_status='unavailable',effective_elapsed_us=None,
-                    pressure_raw_bits=[],pressure_raw_values=raw,pressure_values=[raw[i] for i in slots],
+                    pressure_raw_bits=[],pressure_raw_values=[] if pressureless else raw,pressure_values=[] if pressureless else [raw[i] for i in slots],
                     pressure_raw_unit_code='raw',pressure_value_unit_code='raw',
                     sensor_layout_version=r['sensor_topology'],conversion_version='d56-adc-identity-v2',
                     imu_raw_bits=[],imu_raw_values=r['imu_raw_values'],imu_physical_values=r['imu_physical_values'],
@@ -103,10 +107,10 @@ def export_standard(path):
                     source_asset_ids=[r['device_id']],source_chunk_indices=[0],source_record_indices=[r['event_id']],
                     source_native_sequences=[r['source_frame_number_raw']],source_native_monotonic_ns=[],source_session_elapsed_us=[observed],
                     raw_packet_sha256=r['raw_packet_sha256'],capture_disposition='effective',parse_status='parsed',frame_status='valid',
-                    pressure_status='available',imu_status='available',previous_source_frame_ordinal=index-1 if prev else None,
+                    pressure_status='absent' if pressureless else 'available',imu_status='available',previous_source_frame_ordinal=index-1 if prev else None,
                     source_frame_ordinal_delta=1 if prev else None,effective_elapsed_delta_us=None,
                     continuity_status='boundary_start' if prev is None else 'unverified',
-                    quality_flag_codes=['cross_clock_alignment_unverified','sequence_gap_not_equated_to_imu_loss'],
+                    quality_flag_codes=['cross_clock_alignment_unverified','sequence_gap_not_equated_to_imu_loss']+(['pressure_channel_absent'] if pressureless else []),
                     placement_code=placement,gyro_temperature_celsius=r['gyro_temperature_celsius'],device_date='',device_time='',dropped_frames_before=None)
                 rows.append(frame)
                 previous[key] = r

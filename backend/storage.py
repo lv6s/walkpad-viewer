@@ -14,7 +14,7 @@ import pyarrow.parquet as pq
 
 FRAME_SCHEMA = pa.schema([
     ('schema_version',pa.string()),('session_id',pa.string()),('device_id',pa.string()),
-    ('profile',pa.string()),('foot',pa.string()),('placement',pa.string()),('placement_label',pa.string()),
+    ('profile',pa.string()),('device_kind',pa.string()),('foot',pa.string()),('placement',pa.string()),('placement_label',pa.string()),
     ('connection',pa.string()),('source',pa.string()),
     ('event_id',pa.int64()),('frame_index',pa.int32()),('receipt_monotonic_ms',pa.float64()),
     ('receipt_epoch_ms',pa.float64()),('source_receipt_ms',pa.float64()),('source_time_domain',pa.string()),
