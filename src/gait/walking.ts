@@ -5,7 +5,13 @@ import type {GaitMeasures} from './walking-imu.ts';
 
 type Side = 'left' | 'right';
 type Interval = {start_ms: number; end_ms: number};
-export interface GaitStep extends GaitMeasures {
+type PitchFields = 'ic_pitch_deg' | 'to_pitch_deg' | 'icIssue' | 'toIssue';
+export interface GaitStep extends Omit<GaitMeasures, PitchFields> {
+  ic_pitch_deg: number | null;
+  to_pitch_deg: number | null;
+  icIssue: 'app_pitch_missing' | null;
+  toIssue: 'app_pitch_missing' | 'no_to' | 'to_outside' | null;
+  footPitch: Pick<GaitMeasures, PitchFields>;
   step_index: number;
   side: Side;
   ic_ms: number;
@@ -112,11 +118,18 @@ export function gaitReport(segments: ActivitySegment[], sides: GaitSideInput[], 
       countable_intervals.push({start_ms: start, end_ms: end});
       for (let j = firstAfter(events, start, (e, t) => e.ic_ms < t); j < events.length && events[j].ic_ms < end; j++) {
         const {side, ic_ms, icRow, toRow, to_ms} = events[j], usableTo = to_ms !== null && to_ms < end_ms;
-        const measures = imu[side](icRow, toRow, b), angles = bySide[side]?.deviceAngles;
-        steps.push({side, ic_ms, step_index: steps.length + 1, to_ms: usableTo ? to_ms : null,
-          ...measures, to_pitch_deg: usableTo ? measures.to_pitch_deg : null,
-          toIssue: to_ms !== null && !usableTo ? 'to_outside' : measures.toIssue,
-          ...(angles && {deviceAngles: {ic: deviceAngle(angles, icRow), to: deviceAngle(angles, usableTo ? toRow : null)}})});
+        const {ic_pitch_deg, to_pitch_deg, icIssue, toIssue, ...impact} = imu[side](icRow, toRow, b);
+        const angles = bySide[side]?.deviceAngles;
+        const deviceAngles = angles && {ic: deviceAngle(angles, icRow), to: deviceAngle(angles, usableTo ? toRow : null)};
+        const icPitch = Number.isFinite(deviceAngles?.ic?.pitch) ? deviceAngles.ic.pitch : null;
+        const toPitch = Number.isFinite(deviceAngles?.to?.pitch) ? deviceAngles.to.pitch : null;
+        const toUnavailable = to_ms === null ? 'no_to' : usableTo ? null : 'to_outside';
+        steps.push({side, ic_ms, step_index: steps.length + 1, to_ms: usableTo ? to_ms : null, ...impact,
+          ic_pitch_deg: icPitch, to_pitch_deg: toPitch,
+          icIssue: icPitch === null ? 'app_pitch_missing' : null,
+          toIssue: toUnavailable ?? (toPitch === null ? 'app_pitch_missing' : null),
+          footPitch: {ic_pitch_deg, to_pitch_deg: usableTo ? to_pitch_deg : null, icIssue, toIssue: toUnavailable ?? toIssue},
+          ...(deviceAngles && {deviceAngles})});
       }
     }
     return {index, cls, durationMs: end_ms - start_ms, countable_intervals, steps};

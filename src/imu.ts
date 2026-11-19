@@ -634,7 +634,7 @@ function drawImu(entry) {
     g.font = 'bold 11px system-ui,sans-serif'; g.textAlign = 'left';
     for (const [t, label, color, dy, uncertain] of [[focus.ic, focus.icUncertain ? 'IC 待确认' : 'IC', SEG_C[1], 13, focus.icUncertain],
       [focus.to, 'TO', SEG_C[0], 27, false], [focus.nextIc, focus.nextIcUncertain ? '下一 IC 待确认' : '下一 IC', SEG_C[1], 13, focus.nextIcUncertain],
-      [focus.peak, '垂向峰', '#a45ce4', 41, false]] as const) {
+      [focus.peak, '三轴合量峰', '#a45ce4', 41, false]] as const) {
       if (!(t >= A && t <= B)) continue;
       const x = padL + (t - A) / span * plotW;
       g.strokeStyle = color; g.fillStyle = color; g.lineWidth = 2; g.setLineDash(uncertain ? [4, 3] : []);

@@ -7,7 +7,7 @@ type Vec = number[];
 type Quiet = {row: number; up: Vec; gyro: Vec; spread: number};
 export type PoseIssue = 'no_anchor' | 'pose_path' | 'pose_conflict' | 'no_axis';
 type ToIssue = PoseIssue | 'no_to' | 'to_outside';
-type ImpactIssue = PoseIssue | 'window_short' | 'window_gap' | 'rail' | 'no_positive_peak';
+type ImpactIssue = 'window_short' | 'window_gap' | 'rail' | 'acc_missing';
 export type GaitMeasures = {ic_pitch_deg: number | null; to_pitch_deg: number | null; impact_peak_g: number | null; impact_peak_ms: number | null;
   icIssue: PoseIssue | null; toIssue: ToIssue | null; impactIssue: ImpactIssue | null};
 export const emptyGaitImu = (): GaitMeasures => ({ic_pitch_deg: null, to_pitch_deg: null, impact_peak_g: null, impact_peak_ms: null,
@@ -123,20 +123,18 @@ export function gaitImu(side: GaitSideInput, groups: Int32Array, segments: Activ
     const fail = (issue: ImpactIssue) => ({...m, impactIssue: issue});
     const end = time(ic) + IMPACT_WINDOW;
     if (end > segmentEnd + 1e-9 || (to !== null && end > time(to) + 1e-9)) return fail('window_short');
-    let i = ic, peak = 0, at = -1;
-    // Only native samples from the uninterrupted impact window are eligible.
+    let i = ic, peak = -Infinity, at = ic;
+    // Compare native samples only; a tie keeps the first peak time.
     for (; i <= cal.hi && time(i) < end - 1e-9; i++) {
       if (i > ic && (time(i) - time(i - 1) > MAX_DT || time(i) - time(i - 1) < .00001)) return fail('window_gap');
       const a = vec(i, 0);
+      if (!a.every(Number.isFinite)) return fail('acc_missing');
       if (accAtRail?.[i] || a.some((v, j) => Math.abs(v) >= 15.98 || (i > ic &&
         [2, 4, 8].some(rail => Math.abs(Math.abs(v) - rail) < .018) && Math.abs(v - inp.ax[(i - 1) * 6 + j]) < .0001))) return fail('rail');
-      const up = upAt(i, cal);
-      if (typeof up === 'string') return fail(up);
-      const projected = dot(a, up) - 1;
-      if (projected > peak) { peak = projected; at = i; }
+      const resultant = len(a);
+      if (resultant > peak) { peak = resultant; at = i; }
     }
     if (i - ic < 3 || i > cal.hi || time(i) - time(i - 1) > MAX_DT) return fail('window_gap');
-    if (at < 0) return fail('no_positive_peak');
     m.impact_peak_g = peak; m.impact_peak_ms = Math.round(time(at) * 1000);
     return m;
   };

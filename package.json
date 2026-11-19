@@ -1,6 +1,6 @@
 {
   "name": "walkpad-insole-viewer",
-  "version": "3.13.1",
+  "version": "3.14.0",
   "private": true,
   "description": "鞋垫数据查看器：本地 zip / parquet / 维特 TXT 的压力与 IMU 波形分析",
   "type": "module",

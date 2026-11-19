@@ -122,7 +122,9 @@ assert.deepEqual(example[0].steps.map(e => [e.step_index, e.side, e.ic_ms, e.to_
 const lab = reportSummary([example[0]]);
 assert.deepEqual([lab.durationMs, lab.countableMs, lab.steps, lab.cadence], [1200, 1200, 2, 100]);
 assert.equal(metricMean(lab, 'left', 'contact'), 620); assert.equal(metricMean(lab, 'right', 'contact'), 630);
-assert.equal(metricMean(lab, 'right', 'impact'), 1); assert.ok(Number.isNaN(metricMean(lab, 'left', 'impact')));
+assert.equal(metricMean(lab, 'right', 'impact'), 2); assert.equal(example[0].steps[0].impactIssue, 'rail');
+assert.ok(Number.isNaN(metricMean(lab, 'left', 'impact')));
+assert.ok(Number.isNaN(metricMean(lab, 'left', 'ic')));
 assert.deepEqual(reportSummary(gaitReport([seg(1, 2.2, 1)], labFeet)), lab);
 assert.equal(gaitReport([seg(1, 2.2, 2)], labFeet)[0], null);
 assert.equal(gaitReport([seg(1, 2.2)], labFeet, true)[0], null);
@@ -151,8 +153,18 @@ assert.deepEqual(anglesReport[0].steps.map(s => s.deviceAngles), [
 ]);
 assert.deepEqual(anglesReport[2].steps.map(s => s.deviceAngles?.to), [null, null]);
 assert.ok(example[0].steps.every(s => s.deviceAngles === undefined));
-assert.deepEqual(reportSummary(anglesReport), reportSummary(example));
-console.log('PASS device angles use native same-foot IC/TO rows, preserve missing values and leave metrics unchanged');
+assert.deepEqual(anglesReport[0].steps.map(s => [s.ic_pitch_deg, s.to_pitch_deg]), [[0, 82], [178, 210]]);
+assert.equal(metricMean(reportSummary(anglesReport), 'left', 'ic'), 80);
+assert.equal(metricMean(reportSummary(anglesReport), 'right', 'to'), 210);
+assert.deepEqual(anglesReport[2].steps.map(s => s.to_pitch_deg), [null, null]);
+const missingPitch = {...angleFeet[0], deviceAngles: {pitch: angleFeet[0].deviceAngles.pitch.slice(), sideTilt: angleFeet[0].deviceAngles.sideTilt.slice()}};
+missingPitch.deviceAngles.pitch[51] = NaN; missingPitch.deviceAngles.sideTilt[51] = 9;
+missingPitch.deviceAngles.pitch[52] = 18;
+const missing = gaitReport([seg(1, 2.2)], [missingPitch, labFeet[1]])[0].steps;
+assert.deepEqual(missing[0].deviceAngles.ic, {pitch: NaN, sideTilt: 9});
+assert.deepEqual(missing.map(s => [s.ic_pitch_deg, s.icIssue]), [[null, 'app_pitch_missing'], [null, 'app_pitch_missing']]);
+assert.equal(metricMean(reportSummary([anglesReport[0]]), 'right', 'impact'), metricMean(lab, 'right', 'impact'));
+console.log('PASS report uses native same-foot App pitch, preserves zero and missing values, and never fills from neighbors or foot estimates');
 assert.ok(Number.isNaN(reportSummary([example[3]]).cadence));
 assert.ok(Number.isNaN(reportSummary(gaitReport([seg(1, 2.2)], [labFeet[0]])).steps));
 const center = gaitReport([seg(1, 1.56), seg(1.56, 2.2)], labFeet);
@@ -200,7 +212,8 @@ const checkImu = (s, ic = 235, to = 270, end = 8, cls = 0) => gaitImu(s, groupsO
 for (const mount of [0, 37, -46]) {
   const s = incline(mount), clean = checkImu(s);
   eps(clean.ic_pitch_deg, 20, 1); eps(clean.to_pitch_deg, pitchAt(.7), 1);
-  eps(clean.impact_peak_g, 2.2, .02); assert.equal(clean.impact_peak_ms, 2390);
+  eps(clean.impact_peak_g, Math.hypot(3.2, .85 * Math.sin(2 * Math.PI * (.39 - .2) / .6)), 1e-12);
+  assert.equal(clean.impact_peak_ms, 2390);
   assert.deepEqual(checkImu(s, 235, 270, 8, 1), clean);
   assert.equal(checkImu(s, 235, null).to_pitch_deg, null);
   assert.equal(checkImu(s, 235, null).toIssue, 'no_to');
@@ -214,11 +227,18 @@ for (const mount of [0, 37, -46]) {
 }
 const noAnchor = incline(37);
 for (let i = 0; i < noAnchor.inp.n; i++) for (let j = 0; j < 3; j++) noAnchor.inp.ax[i*6+j] *= 2;
-assert.deepEqual(checkImu(noAnchor), {ic_pitch_deg: null, to_pitch_deg: null, impact_peak_g: null, impact_peak_ms: null,
-  icIssue: 'no_anchor', toIssue: 'no_anchor', impactIssue: 'no_anchor'});
+const dynamic = checkImu(noAnchor);
+assert.equal(dynamic.icIssue, 'no_anchor'); assert.equal(dynamic.toIssue, 'no_anchor');
+assert.equal(dynamic.impact_peak_ms, 2390); eps(dynamic.impact_peak_g, 2 * checkImu(incline(37)).impact_peak_g, 1e-12);
+const tied = incline(37);
+tied.inp.ax.copyWithin(240 * 6, 239 * 6, 239 * 6 + 3);
+assert.equal(checkImu(tied).impact_peak_ms, 2390);
+tied.inp.ax[240 * 6] = NaN;
+assert.equal(checkImu(tied).impactIssue, 'acc_missing');
 const noAxis = gaitImu(incline(37), groupsOf(incline(37).inp), [])(235, 270, 8);
-assert.equal(noAxis.icIssue, 'no_axis'); assert.equal(noAxis.toIssue, 'no_axis'); eps(noAxis.impact_peak_g, 2.2, .02);
-console.log('PASS native-rate pitch and impact: sensor tilt, gyro bias, peak time, gaps, raw clipping, missing anchors and truncated windows');
+assert.equal(noAxis.icIssue, 'no_axis'); assert.equal(noAxis.toIssue, 'no_axis');
+assert.equal(noAxis.impact_peak_g, checkImu(incline(37)).impact_peak_g);
+console.log('PASS native-rate resultant is independent of attitude; validates first tie, gaps, clipping and window boundaries');
 
 // ---------------------------------------------------------------- 2. 真实数据
 const fixture = new URL('./.activity-fixtures/wt_dev_walk_frames.json', import.meta.url);
@@ -266,6 +286,6 @@ for (const [file, data] of Object.entries(fx)) {
     if (s.impact_peak_ms !== null) assert.ok(s.impact_peak_ms >= s.ic_ms && s.impact_peak_ms - s.ic_ms <= 100);
     if (s.to_ms === null) assert.equal(s.to_pitch_deg, null);
   }
-  console.log(`${file} · ${summary.steps} 步 / ${(summary.countableMs / 1000).toFixed(2)} s · ${summary.cadence.toFixed(1)} 步/分 · 有触地角 ${steps.filter(s => s.ic_pitch_deg !== null).length} / 离地角 ${steps.filter(s => s.to_pitch_deg !== null).length} / 垂向峰 ${summary.feet.left.impact.n + summary.feet.right.impact.n}`);
+  console.log(`${file} · ${summary.steps} 步 / ${(summary.countableMs / 1000).toFixed(2)} s · ${summary.cadence.toFixed(1)} 步/分 · 有触地角 ${steps.filter(s => s.ic_pitch_deg !== null).length} / 离地角 ${steps.filter(s => s.to_pitch_deg !== null).length} / 三轴合量峰 ${summary.feet.left.impact.n + summary.feet.right.impact.n}`);
 }
 console.log('PASS 真实 WT 通知批次时间重建、B1Q 分段、IMU 周期统计');

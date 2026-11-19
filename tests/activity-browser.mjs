@@ -167,11 +167,11 @@ try {
     assert.match(await page.locator('#gaitTitle').textContent(), /步行/);
     const metricText = await page.locator('#gaitMetricRows').textContent();
     assert.match(metricText, /接地均值[（(]ms[）)]/);
-    assert.match(metricText, /平均垂向加速度峰值[（(]g[）)]/);
+    assert.match(metricText, /平均三轴加速度合量峰值[（(]g[）)]/);
     const contact = await page.locator('#gaitMetricRows tr').filter({hasText: /接地均值/}).locator('td, th').allTextContents();
     assert.ok(contact.slice(1).some(v => /\d/.test(v)), `接地均值缺少数值：${contact}`);
     assert.ok(contact.slice(1).every(v => /\d/.test(v) || /—|未提供/.test(v)), `接地均值列应为数值或未提供：${contact}`);
-    const impact = await page.locator('#gaitMetricRows tr').filter({hasText: /平均垂向加速度峰值/}).locator('.gait-sample').allTextContents();
+    const impact = await page.locator('#gaitMetricRows tr').filter({hasText: /平均三轴加速度合量峰值/}).locator('.gait-sample').allTextContents();
     assert.ok(impact.some(v => /^[1-9]\d* \/ \d+ 步$/.test(v)), `实际步行应有可报告的均值：${impact}`);
     await page.locator('#gaitCoverage summary').click();
     assert.ok(await page.locator('#gaitCountable').isVisible());
@@ -182,7 +182,7 @@ try {
     assert.equal(stepHeads.length, 9);
     assert.equal(await page.locator('#gaitSteps [data-gait-device]:visible').count(), 0);
     assert.match(stepHeads[0], /序号|步次/);
-    for (const token of ['脚', 'IC', 'TO', '接地', '触地俯仰', '离地俯仰', '垂向加速度', '峰值时刻']) assert.ok(stepHeads.join('|').includes(token), `逐步明细缺少「${token}」列：${stepHeads}`);
+    for (const token of ['脚', 'IC', 'TO', '接地', '触地俯仰', '离地俯仰', '三轴加速度合量', '峰值时刻']) assert.ok(stepHeads.join('|').includes(token), `逐步明细缺少「${token}」列：${stepHeads}`);
     assert.doesNotMatch(stepHeads.join('|'), /COP/);
     const steps = page.locator('#gaitStepRows tr');
     await steps.first().waitFor({state: 'visible'});
@@ -206,7 +206,7 @@ try {
       const peak = r.cells[8].querySelector('button'), value = r.cells[7].textContent.trim();
       return peak ? Number(value) >= 0 && Number(peak.textContent) >= Number(r.cells[2].textContent) &&
         Number(peak.textContent) - Number(r.cells[2].textContent) <= 100 : value.startsWith('— ');
-    })), '垂向峰与峰时必须成对，且处于触地窗口');
+    })), '三轴合量峰与峰时必须成对，且处于触地窗口');
     const icMs = Number((await cells.nth(2).locator('button').textContent()).replace(/[^\d.]/g, '')); assert.ok(icMs > 0);
     await cells.nth(2).locator('button').click();
     assert.ok(await page.locator('#viewImu').isVisible());
@@ -227,11 +227,11 @@ try {
     await page.locator('#gaitWaveClear').click(); assert.ok(await page.locator('#gaitWaveFocus').isHidden());
     await page.locator('[data-tab="activity"]').click();
     const peakButton = steps.locator('td:nth-child(9) button').first();
-    assert.ok(await peakButton.count(), '步行应有可定位的垂向峰');
+    assert.ok(await peakButton.count(), '步行应有可定位的三轴合量峰');
     const peakMs = Number(await peakButton.textContent());
     await peakButton.click();
     assert.ok(await page.locator('#viewImu').isVisible());
-    assert.match(await page.locator('#gaitWaveNote').textContent(), /垂向加速度峰值/);
+    assert.match(await page.locator('#gaitWaveNote').textContent(), /三轴加速度合量峰值/);
     assert.ok(Math.abs(Number(await page.locator('#tA').inputValue()) - (peakMs / 1000 - .45)) < .12);
     await page.locator('#gaitWaveClear').click(); await page.locator('[data-tab="activity"]').click();
     const before = {
@@ -294,7 +294,7 @@ try {
     assert.ok(await page.locator('#gaitMetrics').isVisible());
     assert.match(await page.locator('#gaitNote').textContent(), /原版 IC\/TO/);
     const metrics = page.locator('#gaitMetricRows');
-    for (const label of ['接地均值', '触地俯仰', '离地俯仰', '垂向加速度', '峰值延迟']) assert.ok((await metrics.innerText()).includes(label));
+    for (const label of ['接地均值', '触地设备俯仰', '离地设备俯仰', '三轴加速度合量', '峰值延迟']) assert.ok((await metrics.innerText()).includes(label));
     const legacyStats = await metrics.innerText();
     await page.locator('#gaitSteps summary').click();
     const runSteps = page.locator('#gaitStepRows tr');
@@ -455,11 +455,31 @@ try {
     assert.ok(await source.isVisible());
     assert.equal(await source.inputValue(), 'device');
     assert.equal((await heads()).length, 9);
-    assert.match((await heads())[5], /触地设备角/);
-    assert.match((await heads())[6], /离地设备角/);
+    assert.match((await heads())[5], /触地设备俯仰/);
+    assert.match((await heads())[6], /离地设备俯仰/);
     const device = await snapshot();
-    assert.ok(device.length && device.every(r => r.length === 9 && [5, 6].every(i => /^-?\d+\.\d \/ -?\d+\.\d$/.test(r[i]))));
+    assert.ok(device.length && device.every(r => r.length === 9 && [5, 6, 7].every(i => /^-?\d+\.\d+$/.test(r[i]))));
+    if (process.env.APP_GAIT_REFERENCE) {
+      const {recordings} = JSON.parse(fs.readFileSync(process.env.APP_GAIT_REFERENCE, 'utf8'));
+      const ref = recordings.find(r => r.sample === (cls === '步行' ? 'walking' : 'running'));
+      const actual = [...device], next = page.locator('#gaitStepNext'), prev = page.locator('#gaitStepPrev');
+      while (!(await next.isDisabled())) { await next.click(); actual.push(...await snapshot()); }
+      while (!(await prev.isDisabled())) await prev.click();
+      assert.deepEqual(actual, ref.result.segments[0].steps.map(x => [String(x.step_index), x.side === 'left' ? '左脚' : '右脚',
+        String(x.ic_ms), String(x.to_ms), String(x.to_ms - x.ic_ms), x.ic_pitch_deg.toFixed(1), x.to_pitch_deg.toFixed(1),
+        x.impact_peak_g.toFixed(2), String(x.impact_peak_ms)]));
+      for (const [key, label, digits] of [['ic_pitch_deg', '触地设备俯仰', 1], ['to_pitch_deg', '离地设备俯仰', 1], ['impact_peak_g', '平均三轴加速度合量峰值', 2]]) {
+        const values = page.locator('#gaitMetricRows tr').filter({hasText: label}).locator('td');
+        for (const [i, side] of ['left', 'right'].entries()) {
+          const {mean, valid_steps: n} = ref.summaries[0][side][key];
+          assert.equal(await values.nth(i).textContent(), `${mean.toFixed(digits)}${n} / ${n} 步`);
+        }
+      }
+    }
     const metrics = await page.locator('#gaitMetricRows').textContent();
+    await source.selectOption('sideTilt');
+    assert.match((await heads())[5], /触地设备侧倾/);
+    assert.ok((await snapshot()).every(r => /^-?\d+\.\d$/.test(r[5])));
     const status = await page.locator('#activityStatus').textContent();
     await source.selectOption('foot');
     const foot = await snapshot();
