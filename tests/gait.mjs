@@ -147,6 +147,19 @@ assert.deepEqual(gapWalk.steps.map(e => [e.ic_ms, e.to_ms]), [[1020, null]]);
 assert.ok(Number.isNaN(metricMean(reportSummary([gapWalk]), 'left', 'contact')));
 console.log('PASS shared walking/running metrics: 2 steps / 1.2 s = 100 spm, 620/630 ms, coverage, missing TO, gaps and half-open boundaries');
 
+const markedFeet = () => labFeet.map((s, i) => {
+  const ok = s.inp.ok.slice();
+  ok.fill(0, 0, 5 + i); ok.fill(0, n - 5 - i);
+  return {...s, inp: {...s.inp, ok}};
+});
+const validWindow = [seg(1, 2.2), seg(3, 3.99, 1)];
+assert.deepEqual(gaitReport(validWindow, markedFeet()), gaitReport(validWindow, labFeet));
+const reversedFeet = markedFeet(), reversed = reversedFeet[0].inp;
+reversed.tUs = reversed.tUs.map((t, i) => i < 120 ? t : t - 40000);
+const reversedReport = gaitReport(validWindow, reversedFeet);
+assert.ok(reversedReport.every(s => !s.countable_intervals.length && !s.steps.length));
+console.log('PASS invalid start/end rows preserve reports; overlapping clock blocks still reject coverage');
+
 const eps = (a, b, d) => assert.ok(Number.isFinite(a) && Math.abs(a - b) < d, `${a} vs ${b}`);
 const rotateY = (v, deg) => {
   const c = Math.cos(deg * Math.PI / 180), s = Math.sin(deg * Math.PI / 180);

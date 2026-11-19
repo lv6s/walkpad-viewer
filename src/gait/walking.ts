@@ -54,13 +54,17 @@ function prepare(s: GaitSideInput, side: Side, segments: ActivitySegment[]) {
   if (!s?.inp || !s.rec) return {support, steps, imu: null};
   const {inp, rec} = s, origin = s.t0 / 1e6, groups = groupsOf(inp);
   const bounds: {a: number; b: number}[] = [];
+  let previousEnd = -Infinity;
   for (let i = 0; i < groups.length; i++) {
     const g = groups[i]; if (g < 0) continue;
     const t = inp.tUs[i] / 1e6 - origin;
-    if (!bounds[g]) bounds[g] = {a: t, b: t}; else bounds[g].b = t;
+    if (!bounds[g]) {
+      // Compare actual blocks without assuming group IDs start at zero.
+      if (t <= previousEnd) return {support, steps, imu: null};
+      bounds[g] = {a: t, b: t};
+    } else bounds[g].b = t;
+    previousEnd = t;
   }
-  // Clock reversals that reuse session time cannot identify unique steps or coverage.
-  if (bounds.some((b, i) => i > 0 && b.a <= bounds[i - 1].b)) return {support, steps, imu: null};
   const cycles = new Map(rec.cycles?.map(c => [c.cycle, c]));
   const ics = new Map<number, Candidate>(), tos = new Map<number, Candidate>();
   for (const e of rec.events) {
