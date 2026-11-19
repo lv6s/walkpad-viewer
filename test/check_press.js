@@ -87,7 +87,7 @@ const chk = (n, c, extra) => ok.push((c ? 'PASS ' : 'FAIL ') + n + (extra === un
 
 /* app 导出的 standard_measurement_frames 全部列名（顺序照真文件抄，
    取自 Downloads/0001-standard_measurement_frames-*.parquet）。
-   网页导出必须与它逐列同名同序，只在末尾多 4 个自定义列。 */
+   网页导出必须与它逐列同名同序，只在末尾多 5 个自定义列。 */
 const APP_COLS = `schema_id schema_version dataset_id frame_identity product_code session_id
 processing_input_snapshot_id processing_attempt_id alignment_revision_id capture_stream_id
 assigned_side capture_period_id stream_segment_id connection_epoch source_frame_ordinal
@@ -924,12 +924,19 @@ chk('旧 ACK 尾巴不影响后续测量帧', W.ir.bad === 0, W.ir.bad);
     const at = (k) => col.cols[names.indexOf(k)].data;
     const leaf = (nm) => col.schema.find((s) => s.name === nm) || {};
 
-    chk('列数 = app 62 + 自定义 4', names.length === 66 && APP_COLS.length === 62, names.length);
+    chk('列数 = app 62 + 自定义 5', names.length === 67 && APP_COLS.length === 62, names.length);
     chk('前 62 列与 app 同名同序', JSON.stringify(names.slice(0, 62)) === JSON.stringify(APP_COLS),
       names.slice(0, 62).filter((v, i) => v !== APP_COLS[i]).join(',') || 'ok');
     chk('自定义列排在末尾', JSON.stringify(names.slice(62)) === JSON.stringify(
-      ['temperature_c', 'device_date', 'device_time', 'dropped_frames_before']), names.slice(62).join(','));
-    chk('schema 项数 = 1 + 53 标量 + 13 列表 × 3', col.schema.length === 93, col.schema.length);
+      ['placement_code', 'gyro_temperature_celsius', 'device_date', 'device_time', 'dropped_frames_before']),
+      names.slice(62).join(','));
+    /* 侧别两列都写：app 5.x 的下游按 placement_code 筛左右，只认 assigned_side 的照样能用 */
+    chk('placement_code 写 left_instep', at('placement_code').every((v) => v === 'left_instep'),
+      at('placement_code')[0]);
+    /* 温度列名照 app 5.x，值是帧里 0.01 ℃ 的 int16 / 100；测试帧默认 2796 */
+    chk('gyro_temperature_celsius = tempRaw/100', at('gyro_temperature_celsius')[0] === 27.96
+      && leaf('gyro_temperature_celsius').type === 'DOUBLE', String(at('gyro_temperature_celsius')[0]));
+    chk('schema 项数 = 1 + 54 标量 + 13 列表 × 3', col.schema.length === 94, col.schema.length);
     chk('connection_epoch 是 UINT_64', leaf('connection_epoch').type === 'INT64'
       && leaf('connection_epoch').converted_type === 'UINT_64', JSON.stringify(leaf('connection_epoch')));
     chk('source_frame_ordinal 是无符号转换的 INT64', leaf('source_frame_ordinal').type === 'INT64'

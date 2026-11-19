@@ -1,8 +1,9 @@
 /* 帧导出：把两脚录到的帧写成与 app 同构的 parquet。
    列名、顺序、类型、码值全部照 app 导出的 standard_measurement_frames 抄；
-   末尾 4 列（temperature_c / device_date / device_time / dropped_frames_before）
-   是网页侧新增的，app 不写 —— 读 app 数据的下游按列名取列不受影响，按名单
-   严格比对的会多这 4 列。 */
+   末尾 5 列（placement_code / gyro_temperature_celsius / device_date / device_time /
+   dropped_frames_before）是网页侧写的，app 这一版不写 —— 前两个沿用 app 的列名，
+   按列名取值的下游能直接读到；按名单严格比对的会多这 5 列（kvMetadata 里
+   walkpad.extra_columns 有登记）。 */
 
 const FR_MEASUREMENT_CONTRACT = 'd56-measurement-v3';
 const FR_ENVELOPE_CONTRACT = 'ble_notify_raw.v3';
@@ -183,8 +184,11 @@ function irParquetColumns() {
   put('continuity_status', 'str', rows.map((r) => r.cont));
   put('quality_flag_codes', 'list.str', rows.map((r) => r.flags));
 
-  /* 网页侧新增，app 没有 */
-  put('temperature_c', 'dbl', rows.map((r) => r.f.tempRaw / 100));
+  /* app 5.x 把侧别从 assigned_side 挪到了 placement_code；两列都给，只看其中一列的下游都能取到 */
+  put('placement_code', 'str', rows.map((r) => (r.side === 'left' ? 'left_instep' : 'right_instep')));
+
+  /* 网页侧写的，app 这一版没有；列名照 app 5.x 用 gyro_temperature_celsius（0.01 ℃ 量化） */
+  put('gyro_temperature_celsius', 'dbl', rows.map((r) => r.f.tempRaw / 100));
   put('device_date', 'str', rows.map((r) => (r.f.clk ? r.f.clk.date : '')));
   put('device_time', 'str', rows.map((r) => (r.f.clk ? r.f.clk.time : '')));
   put('dropped_frames_before', 'i32?', rows.map((r) => r.drop));
@@ -213,13 +217,15 @@ function irParquetBuffer() {
       { key: 'walkpad.processing_attempt_id', value: FR_PROC.attempt },
       { key: 'walkpad.alignment_revision_id', value: FR_PROC.align },
       { key: 'walkpad.writer_name', value: 'walkpad_imu_tools_web' },
-      { key: 'walkpad.writer_version', value: '1.0.0' },
+      { key: 'walkpad.writer_version', value: '1.1.0' },
+      { key: 'walkpad.extra_columns',
+        value: 'placement_code,gyro_temperature_celsius,device_date,device_time,dropped_frames_before' },
       { key: 'walkpad.created_at_utc', value: new Date().toISOString() },
       { key: 'walkpad.sort_order', value: 'effective_elapsed_us,assigned_side' },
       { key: 'walkpad.frame_time_basis', value: c.clk },
       { key: 'walkpad.dropped_frames', value: String(c.drop) },
     ],
-    createdBy: 'walkpad_imu_tools_web 1.0.0',
+    createdBy: 'walkpad_imu_tools_web 1.1.0',
   });
   return { buf, n: c.n, nl: c.nl, drop: c.drop };
 }

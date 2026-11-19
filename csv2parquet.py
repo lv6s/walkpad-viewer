@@ -7,7 +7,7 @@
 
 CSV 里数组列用分号分隔（网页为了不进 CSV 引号），这里还原成 list<double>，
 列名、单位码、契约 id 与 app 导出的 standard_measurement_frames 保持一致；
-temperature_c 是网页新增的列（app 目前不写温度）。
+温度列按 app 5.x 的列名 gyro_temperature_celsius 写出（老 CSV 的 temperature_c 也认）。
 """
 import argparse
 import datetime as _dt
@@ -35,7 +35,9 @@ def _lists(df, col, cast=float, width=None):
 
 def convert(csv_path, out_path=None):
     df = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
-    need = ['assigned_side', 'source_frame_number_raw', 'effective_elapsed_us', 'temperature_c',
+    tcol = ('gyro_temperature_celsius' if 'gyro_temperature_celsius' in df.columns
+            else 'temperature_c')
+    need = ['assigned_side', 'source_frame_number_raw', 'effective_elapsed_us', tcol,
             'pressure_raw_values', 'pressure_values', 'imu_raw_values', 'imu_physical_values']
     missing = [c for c in need if c not in df.columns]
     if missing:
@@ -57,7 +59,7 @@ def convert(csv_path, out_path=None):
     side = [df['assigned_side'].tolist()[i] for i in order]
     frame_no = [int(df['source_frame_number_raw'].tolist()[i]) for i in order]
     elapsed = [int(df['effective_elapsed_us'].tolist()[i]) for i in order]
-    tempc = [float(df['temperature_c'].tolist()[i]) for i in order]
+    tempc = [float(df[tcol].tolist()[i]) for i in order]
     topo = pick(df['sensor_topology_id'].tolist()) if 'sensor_topology_id' in df.columns else [''] * n
 
     dataset_id = uuid.uuid4().hex.upper()[:26]
@@ -76,7 +78,7 @@ def convert(csv_path, out_path=None):
         'measurement_contract_id': pa.array(['d56-measurement-v3'] * n, pa.string()),
         'sensor_topology_id': pa.array(list(topo), pa.string()),
         'effective_elapsed_us': pa.array(elapsed, pa.int64()),
-        'temperature_c': pa.array(tempc, pa.float64()),
+        'gyro_temperature_celsius': pa.array(tempc, pa.float64()),
         'pressure_raw_values': pa.array(pick(raw), pa.list_(pa.float64())),
         'pressure_values': pa.array(pick(val), pa.list_(pa.float64())),
         'pressure_raw_unit_code': pa.array(['raw'] * n, pa.string()),
