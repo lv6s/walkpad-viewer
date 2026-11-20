@@ -18,21 +18,20 @@ import {dragRef, endDrag, onDragMove} from './interact';
 import {parse} from './parse';
 import {bindScrub} from './scrub';
 import {redrawWave, resetWin} from './timewin';
+import {bindHelp} from './help';
+import {bindVideo} from './video';
 
 /* ------------------------------------------------------------------ 纵轴快捷按钮 */
-function markY(which: string | null): void {
-  document.querySelectorAll('[data-y]').forEach((b: HTMLElement) => {
-    if (which === 'auto') b.classList.toggle('on', b.dataset.y === 'auto');
-    else b.classList.toggle('on', state.auto ? b.dataset.y === 'auto' : +b.dataset.y === state.ymax);
-  });
+function markY(): void {
+  document.querySelectorAll('[data-y="auto"]').forEach((b: HTMLElement) => b.classList.toggle('on', state.auto));
 }
 
 function bindYButtons(): void {
   document.querySelectorAll('[data-y]').forEach((b: HTMLElement) => b.addEventListener('click', () => {
-    if (b.dataset.y === 'auto') { state.auto = true; state.ymax = niceMax(state.gmax); }
-    else { state.auto = false; state.ymax = +b.dataset.y; }
+    state.auto = true;
+    state.ymax = niceMax(state.gmax);
     el.ymax.value = Math.round(state.ymax);
-    markY(b.dataset.y === 'auto' ? 'auto' : null);
+    markY();
     redrawWave();
   }));
 }
@@ -134,6 +133,15 @@ function bindViewer(): void {
   el.imuYauto.addEventListener('click', () => imuAuto(false));
   el.imuYfit.addEventListener('click', () => imuAuto(true));
 
+  // 窄带开关：温度、设备角度各一条，关掉只是不画（数据仍在，CSV 导出不受影响）
+  for (const [btn, key] of [[el.imuTempOn, 'imuTemp'], [el.imuAngOn, 'imuAng']] as const) {
+    btn.addEventListener('click', () => {
+      state[key] = !state[key];
+      btn.classList.toggle('on', state[key]);
+      if (state.tab === 'imu') redrawImu();
+    });
+  }
+
   // IMU 页的状态底色：分析整段走分段页同一份结果，只在这里铺色；关掉即回到原始波形
   el.imuRun.addEventListener('click', () => { void analyzeActivity(); });
   el.imuSegOn.addEventListener('click', () => {
@@ -154,6 +162,7 @@ function bindViewer(): void {
   el.scrub.after(el.imuOvBar);
   bindOverview();
   bindScrub();
+  bindVideo();
 
   // 轴向推断页：区间与静止判据都只影响本页，改完就地重算
   el.axisTools.addEventListener('click', (e: MouseEvent) => {
@@ -206,7 +215,7 @@ function bindViewer(): void {
   // 纵轴只影响波形与详情图，不必连带重算 COP / 零值率
   el.ymax.addEventListener('change', () => {
     const v = +el.ymax.value;
-    if (v > 0) { state.auto = false; state.ymax = v; markY(null); redrawWave(); }
+    if (v > 0) { state.auto = false; state.ymax = v; markY(); redrawWave(); }
   });
   bindYButtons();
 
@@ -225,7 +234,7 @@ function bindViewer(): void {
 
   document.addEventListener('keydown', (ev: KeyboardEvent) => {
     const tag = (ev.target && (ev.target as HTMLElement).tagName) || '';
-    if (/^(INPUT|TEXTAREA|SELECT|BUTTON|A)$/.test(tag) || (ev.target as HTMLElement)?.isContentEditable) return;
+    if (/^(INPUT|TEXTAREA|SELECT|BUTTON|A|VIDEO)$/.test(tag) || (ev.target as HTMLElement)?.isContentEditable) return;
     if (ev.key === 'Escape') { if (state.detail) closeDetail(); return; }
     if (ev.key === '0') { resetWin(); return; }
     // COP 页：空格播放/暂停，[ ] 换段，←/→ 逐帧（Shift 十帧）
@@ -279,6 +288,7 @@ function bindViewer(): void {
 /* ------------------------------------------------------------------ 启动 */
 function boot(): void {
   if (el.ver) el.ver.textContent = 'v' + APP_VER;
+  bindHelp();
   if (document.body.dataset.page === 'axis') initAxisPage();
   else bindViewer();
 }

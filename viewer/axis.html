@@ -4,22 +4,26 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>IMU 轴向推断</title>
-<link rel="stylesheet" href="css/app.css?v=3.2.0">
-<link rel="stylesheet" href="css/axis.css?v=3.2.0">
+<link rel="stylesheet" href="css/app.css?v=3.25.0">
+<link rel="stylesheet" href="css/axis.css?v=3.25.0">
 </head>
 <body data-page="axis">
 
 <header>
-  <h1>IMU 轴向推断</h1>
-  <p class="sub">拖入维特 WT901 / JY901 导出的 TXT，或含 <code>imu_physical_values</code> 的 parquet，反推传感器 x / y / z 各自的解剖语义与正方向。
-    多份文件可以一起拖：落地冲击最清楚的那一份自动当<b>参考</b>，只提供时间锚点与动作边界，其余各自推断——贴的部位不同，坐标系就不同，结论不互相搬。全部在本地解析，不上传。</p>
+  <div class="hd-row">
+    <h1>IMU 轴向推断</h1>
+    <div class="hd-act">
+      <button class="ghost" id="helpBtn" type="button" title="推断方法与已知边界">说明</button>
+      <a class="entry" href="index.html">波形查看器 →</a>
+    </div>
+  </div>
+  <p class="sub">拖入维特 <code>.txt</code> 或含 <code>imu_physical_values</code> 的 parquet，反推传感器 x / y / z 的解剖语义与正方向。全部在本地解析，不上传。</p>
 </header>
 
 <main>
   <div class="dropzone" id="drop">
     <div class="big">把 IMU 文件拖进来</div>
-    <div class="hint">同一次录制的多份文件一起拖（另一台设备 / 另一只脚），靠一次跳跃或重落地对齐时间戳<br>
-      单份文件也能用：它自己切动作段（走动 / 原地动作 / 静止），每段单独推断</div>
+    <div class="hint">同一次录制的多份文件一起拖（另一台设备 / 另一只脚），靠一次跳跃或重落地对齐时间戳</div>
     <button class="pick" id="pick" type="button">选择文件（可多选）</button>
     <input type="file" id="file" accept=".parquet,.txt,.csv" multiple hidden>
   </div>
@@ -44,26 +48,37 @@
   <div id="axSummary"></div>
   <div class="axcards" id="axCards"></div>
 
-  <details class="note">
-    <summary>推断方法与它的边界</summary>
-    <p><b>① 垂直轴</b>：找加速度模长稳定的静止段，静止时的加速度方向即重力反方向。
-      <b>② 内外侧轴</b>：扣掉零偏后，在重力系里对非静止帧角速度做 PCA，第一主成分就是内外侧轴（肢体摆动时绕它转），符号不定；零偏取「角速度稳」的静止帧逐轴中位数，支撑相脚不移动但踝在滚动，不算零速样本。
-      <b>③ 前向符号</b>：三项独立判据投票 —— 相邻支撑中点之间的双积分位移（步幅）、支撑末到支撑初的双积分位移（摆动）、以及「若 z 轴是脚背外法线则其水平投影朝脚尖」的几何关系。三项同向才判「高」。<br>
-      边界：<b>没有行走段就没有前向符号</b>（纯深蹲只能给垂直轴与内外侧轴）；几何判据只对脚背贴法成立，贴大腿外侧时 z 轴的水平投影指向「外侧」，硬套会把外侧当成前；
-      倒走会让双积分两项整体反向；采样率低或零偏大时位移被低估，前向只能到「中」。<br>
-      <b>分段为什么必要</b>：全段一次做 PCA，只要掺进一段转身，绕垂直轴的能量就压过前后摆动，内外侧轴直接定不出来。参考数据贴地时加速度几乎完全静止、落地时有 3 g 以上的尖锐冲击，
-      这两个特征比肢体侧的平滑起伏清楚得多，用来切动作段最可靠。<br>
-      <b>自动分工</b>：每份文件按「冲击峰值 + 冲击次数 + 贴地静止占比」打分，最高的一份当参考。实测脚背 16.6 g、大腿 8 g，脚背会被自动挑出来。点角色徽章可以手动改。</p>
-  </details>
-
-  <footer>只认 <code>imu_physical_values</code>：<code>imu_raw_values</code> 的通道序与物理轴相差一次置换与变号，不是解剖轴，推出来的 x/y/z 没有意义。
-    维特 TXT 的时间戳只到毫秒、同一毫秒里常压着多帧，时间轴是把同一时间戳的帧均匀摊开后重建的。
-    拖动三维图旋转视角（各设备共用同一视角）、滚轮缩放、双击复位。</footer>
+  <footer>只认 <code>imu_physical_values</code>；<code>imu_raw_values</code> 的通道序与物理轴相差一次置换与变号，推出来的 x/y/z 没有解剖意义。<button class="lnk" id="helpFoot" type="button">推断方法与边界</button></footer>
 </main>
+
+<div class="help" id="help" hidden>
+  <div class="help-mask" id="helpMask"></div>
+  <aside class="help-panel" role="dialog" aria-modal="true" aria-label="说明">
+    <div class="help-head">
+      <h2>说明</h2>
+      <button class="x" id="helpClose" type="button" title="关闭（Esc）">×</button>
+    </div>
+    <div class="help-body">
+      <nav class="help-nav" id="helpNav"></nav>
+      <div class="help-text" id="helpText">
+        <section data-help="axis" data-title="轴向推断">
+          <h3>推断方法与边界</h3>
+          <p><b>① 垂直轴</b>：找加速度模长稳定的静止段，静止时的加速度方向即重力反方向。<b>② 内外侧轴</b>：扣掉零偏后，在重力系里对非静止帧角速度做 PCA，第一主成分就是内外侧轴（肢体摆动时绕它转），符号不定；零偏取「角速度稳」的静止帧逐轴中位数 —— 支撑相脚不移动但踝在滚动，不算零速样本。<b>③ 前向符号</b>：三项独立判据投票 —— 相邻支撑中点之间的双积分位移（步幅）、支撑末到支撑初的双积分位移（摆动）、以及「若 z 轴是脚背外法线则其水平投影朝脚尖」的几何关系。三项同向才判「高」。</p>
+          <p><b>边界</b>：没有行走段就没有前向符号（纯深蹲只能给垂直轴与内外侧轴）；几何判据只对脚背贴法成立，贴大腿外侧时 z 轴的水平投影指向「外侧」，硬套会把外侧当成前；倒走会让双积分两项整体反向；采样率低或零偏大时位移被低估，前向只能到「中」。</p>
+          <p><b>分段为什么必要</b>：全段一次做 PCA，只要掺进一段转身，绕垂直轴的能量就压过前后摆动，内外侧轴直接定不出来。参考数据贴地时加速度几乎完全静止、落地时有 3 g 以上的尖锐冲击，这两个特征比肢体侧的平滑起伏清楚得多，用来切动作段最可靠。</p>
+          <p><b>自动分工</b>：每份文件按「冲击峰值 + 冲击次数 + 贴地静止占比」打分，最高的一份当参考。实测脚背 16.6 g、大腿 8 g，脚背会被自动挑出来。点角色徽章可以手动改；「重新分工」回到自动结果。</p>
+          <p><b>只认物理量</b>：<code>imu_raw_values</code> 的通道序与物理轴相差一次置换与变号，不是解剖轴，推出来的 x / y / z 没有意义。维特 TXT 的时间戳只到毫秒、同一毫秒里常压着多帧，时间轴是把同一时间戳的帧均匀摊开后重建的。</p>
+          <p>三维图拖动旋转视角（各设备共用同一视角）、滚轮缩放、双击复位。</p>
+        </section>
+      </div>
+    </div>
+  </aside>
+</div>
+
 
 <div class="busy" id="busy" hidden>解析中…</div>
 
-<script src="dist/app.js?v=3.2.0"></script>
+<script src="dist/app.js?v=3.25.0"></script>
 
 </body>
 </html>

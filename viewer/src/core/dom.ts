@@ -17,6 +17,7 @@ export const el: Record<string, any> = {
   imuUa: $('#imuUa'), imuUg: $('#imuUg'), imuKindLbl: $('#imuKindLbl'),
   imuGap: $('#imuGap'), imuGapMs: $('#imuGapMs'),
   imuRun: $('#imuRun'), imuSegOn: $('#imuSegOn'), imuSegNote: $('#imuSegNote'),
+  imuTempOn: $('#imuTempOn'), imuAngOn: $('#imuAngOn'),
   winBar: $('#winBar'), winText: $('#winText'), winReset: $('#winReset'), winKeys: $('#winKeys'),
   rateSel: $('#rateSel'),
   tA: $('#tA'), tB: $('#tB'), tGo: $('#tGo'),
@@ -26,5 +27,8 @@ export const el: Record<string, any> = {
   axisRef: $('#axisRef'), axisRefFile: $('#axisRefFile'), axisRefName: $('#axisRefName'),
   ictoOn: $('#ictoOn'), ictoList: $('#ictoList'), ictoRe: $('#ictoRe'), ictoNote: $('#ictoNote'),
   ictoBox: $('#ictoBox'), ictoCsvEv: $('#ictoCsvEv'), ictoCsvCy: $('#ictoCsvCy'),
-  busy: $('#busy'), ver: $('#ver')
+  busy: $('#busy'), ver: $('#ver'),
+  vidPanel: $('#vidPanel'), vidHead: $('#vidHead'), vid: $('#vid'), vidName: $('#vidName'),
+  vidToggle: $('#vidToggle'), vidClose: $('#vidClose'), vidOff: $('#vidOff'), vidAuto: $('#vidAuto'),
+  vidJump: $('#vidJump'), vidNow: $('#vidNow'), vidNote: $('#vidNote')
 };

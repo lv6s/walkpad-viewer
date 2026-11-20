@@ -219,6 +219,7 @@ function renderZero() {
   const row = document.createElement('div');
   row.className = 'zerorow';
   for (const s of state.sides) {
+    if (!(s.nch > 0)) continue;         // 无压力通道的流（专用 IMU 设备）没有零值率可言
     const st = zeroStat(s);
     const rev = REV[s.side] || {};      // 侧别不在 d56 布局里时只有足形与数值，不铺矩阵
     const sec = document.createElement('section');

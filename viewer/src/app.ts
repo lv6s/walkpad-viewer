@@ -22,13 +22,13 @@ import {applyZeroFilter, drawZero, renderZero} from './zero';
 function placeWinBar(name) {
   el.winBar.hidden = !state.sides.length;
   if (el.winKeys) el.winKeys.textContent = name === 'activity'
-    ? '点击状态色块 / 表格行定位 · 起止时间框缩放 · 复位全段 · 可切换 IMU 核对'
+    ? '点色块定位 · 时间框缩放'
     : name === 'axis'
-    ? '时间段用于「当前时间窗」推断；三维图拖动旋转、滚轮缩放'
+    ? '时间段只影响「当前时间窗」推断'
     : name === 'action'
-    ? '框选一段动作再分析；时间窗内的数据才参与估速'
-    : 'Shift+拖动 框选放大 · 拖动 平移 · Ctrl+滚轮 缩放 · 双击 复位'
-      + (name === 'wave' ? ' · 点格子 看单通道' : '');
+    ? '框选一段动作再分析'
+    : 'Shift+拖动 框选 · 滚轮 缩放 · 双击 复位'
+      + (name === 'wave' ? ' · 点格子看单通道' : '');
   updateWinBar();
 }
 
@@ -92,8 +92,17 @@ function updateChips() {
   if (!state.sides.length) return;
   const hasP = state.hasP;
   const totalFrames = state.sides.reduce((a, s) => a + s.n, 0);
-  const maxDur = Math.max(...state.sides.map(s => s.dur));
+  // 报「录了多久」用 span（末帧−首帧）：时间轴起点被先出流的那台设备拉到 0 之后，
+  // 后开始录的流 t[n−1] 会明显大于它自己的录制长度
+  const maxDur = Math.max(...state.sides.map(s => s.span || s.dur));
+  const starts = state.sides.map(s => s.t[0]);
   const nImu = state.sides.filter(s => s.imu).length;
+  // 一包里可能混着不同采样率的设备：只报第一条流的记录率会让人以为另一条也是这个数
+  const rates = [...new Set(state.sides.map(s => s.fs).filter(v => isFinite(v)).map(v => v.toFixed(2)))];
+  const rateTxt = rates.length > 1
+    ? state.sides.filter(s => isFinite(s.fs)).map(s => `${SIDE_CN[s.side] || s.side} ${s.fs.toFixed(1)}`).join(' · ')
+    : rates.length ? rates[0] + ' Hz' : '—';
+  const nchMax = Math.max(...state.sides.map(s => s.nch));
   // 角速度口径：有扣偏结果的帧用扣偏值，其余回落原始换算值（逐帧判定，可能两种都有）
   const calReady = state.sides.reduce((a, s) => a + ((s.cal && s.cal.ready) || 0), 0);
   const calRaw = state.sides.reduce((a, s) => a + ((s.cal && s.cal.raw) || 0), 0);
@@ -103,20 +112,27 @@ function updateChips() {
   const tHi = tSides.length ? Math.max(...tSides.map(s => s.tHi)) : NaN;
   // 有效帧时间缺失、退回到达时刻也拿不到的帧被丢掉了，数量大到值得提一句
   const nUnmapped = state.sides.reduce((a, s) => a + (s.nT || 0), 0);
-  el.chips.innerHTML = [
+  // 文件条只放能一眼定性的几项；完整摘要（格式、起点、角速度口径、温度）挂在文件名上，悬停即见
+  const rows: [string, string][] = [
     ['侧别', state.sides.map(s => SIDE_CN[s.side] || s.side).join(' / ')],
-    ...(state.src && state.src.ver
-      ? [['格式', state.src.ver + (state.src.ncols ? ' · ' + state.src.ncols + ' 列' : '')]] : []),
     ['帧数', fmt(totalFrames)],
     ['最长', maxDur.toFixed(1) + ' s'],
-    ['均记录率', isFinite(state.sides[0].fs) ? state.sides[0].fs.toFixed(2) + ' Hz' : '—'],
-    ...(hasP ? [['通道', state.sides[0].nch], ['全段最大', fmt(state.gmax) + ' ADC']] : []),
-    ...(nImu ? [['IMU', `${nImu} 侧 × 6 轴`]] : []),
-    ...(nImu ? [['角速度', calReady && calRaw ? `扣偏 ${fmt(calReady)} / 原始 ${fmt(calRaw)} 帧`
-      : calReady ? '已扣偏' : '原始换算（无扣偏结果）']] : []),
-    ...(tSides.length && Number.isFinite(tLo) ? [['温度', `${tLo.toFixed(2)}–${tHi.toFixed(2)} ℃`]] : []),
-    ...(nUnmapped ? [['时间未映射', nUnmapped + ' 帧']] : [])
-  ].map(([k, v]) => `<span class="chip">${k} <b>${v}</b></span>`).join('');
+    ['均记录率', rateTxt],
+    ...(hasP ? [['通道', nchMax + ' · 最大 ' + fmt(state.gmax) + ' ADC'] as [string, string]] : []),
+    ...(nImu ? [['IMU', nImu + ' 侧 × 6 轴'] as [string, string]] : []),
+    ...(nUnmapped ? [['时间未映射', nUnmapped + ' 帧'] as [string, string]] : [])
+  ];
+  el.chips.innerHTML = rows.map(([k, v]) => `<span class="chip">${k} <b>${v}</b></span>`).join('');
+  el.fname.title = [
+    state.name,
+    ...(state.src && state.src.ver ? ['格式 ' + state.src.ver + (state.src.ncols ? ' · ' + state.src.ncols + ' 列' : '')] : []),
+    ...(starts.some(v => v > 0.05)
+      ? ['起点 ' + state.sides.map((s, i) => `${SIDE_CN[s.side] || s.side} ${starts[i].toFixed(1)} s`).join(' · ')]
+      : []),
+    ...(nImu ? ['角速度 ' + (calReady && calRaw ? `扣偏 ${fmt(calReady)} / 原始 ${fmt(calRaw)} 帧`
+      : calReady ? '已扣偏' : '原始换算（无扣偏结果）')] : []),
+    ...(tSides.length && Number.isFinite(tLo) ? ['温度 ' + `${tLo.toFixed(2)}–${tHi.toFixed(2)} ℃`] : [])
+  ].join('\n');
 }
 
 function renderAll() {
@@ -161,6 +177,7 @@ function renderAll() {
   renderAxis();
 
   if (hasP) for (const s of state.sides) {
+    if (!(s.nch > 0)) continue;          // 纯 IMU 的设备（如专用 IMU 节点、腕带）没有压力面板
     const sec = document.createElement('section');
     sec.className = 'side';
     const head = document.createElement('div');

@@ -26,9 +26,48 @@ const IMU_SRC = {
 };
 const AX_C = {X: '#2E86D6', Y: '#DE7024', Z: '#3A9E62'};
 const TEMP_C = '#B5793A';
+const PITCH_C = '#7A5CC4', TILT_C = '#2A8F83';
+const TEMP_H = 62, ANG_H = 54, BAND_H = 128;
 
 function activeKinds() { return IMU_KINDS.filter(kd => state.imuKinds.has(kd.k)); }
 function activeAxes() { return IMU_AX.filter(a => state.imuAxes.has(a)); }
+
+// 窄带（温度 / 俯仰角 / 侧倾角）：这些列不是 IMU 轴，各占一条独立量程的窄带。
+// 列存在但整段都是 null 的包（维特的 pitchDeg）不该留一条空白带，所以按有限值个数决定画不画。
+function bandRange(arr) {
+  if (!arr) return null;
+  let lo = Infinity, hi = -Infinity, n = 0;
+  for (let i = 0; i < arr.length; i++) {
+    const v = arr[i];
+    if (Number.isFinite(v)) { n++; if (v < lo) lo = v; if (v > hi) hi = v; }
+  }
+  return n > 1 ? {lo, hi} : null;
+}
+
+// 角度带的范围只能按当前块算：懒加载的长包只有窗口块、全段抽样（LOD）根本没有角度列。
+// 返回「这一侧真有数据的窄带」与「开关允许画的」，两者不同才是「有但被隐藏」。
+function narrowBands(s) {
+  const out = [];
+  if (s.temp) {
+    out.push({key: 'temp', title: '温度 (℃)', sub: (state.src && state.src.tempCol) || '逐帧温度',
+      arr: s.temp, color: TEMP_C, lo: s.tLo, hi: s.tHi});
+  }
+  const ang = s.deviceAngles;
+  if (ang) {
+    if (ang.pitch) out.push({key: 'pitch', title: '俯仰角 pitchDeg (°)', sub: '设备俯仰，不是足部对地角',
+      arr: ang.pitch, color: PITCH_C});
+    if (ang.sideTilt) out.push({key: 'tilt', title: '侧倾角 sideTiltDeg (°)', sub: '设备侧倾，正负按导出定义',
+      arr: ang.sideTilt, color: TILT_C});
+  }
+  const all = [];
+  for (const b of out) {
+    if (Number.isFinite(b.lo) && Number.isFinite(b.hi) && b.hi >= b.lo) { all.push(b); continue; }
+    const r = bandRange(b.arr);
+    if (r) all.push({...b, lo: r.lo, hi: r.hi});
+  }
+  const shown = all.filter(b => b.key === 'temp' ? state.imuTemp : state.imuAng);
+  return {all, shown};
+}
 // 某侧实际可用的数据源：文件可能只有 raw 没有 physical，反之亦然
 function srcOf(s) {
   const im = s.imu;
@@ -486,13 +525,12 @@ function drawImu(entry) {
   const hz = hzOf(entry.s, s);
   const step = stepOf(span * hz, span, plotW, hz);
   const kinds = activeKinds(), axes = activeAxes();
-  const bandH = 128;
-  // 温度不是 IMU 轴：单独一条窄带贴在六轴下面，量程按全段 min–max 定（温度都正值，
-  // 按 ±max 居中会把它压成一条直线，看不出漂移）
-  const hasT = !!s.temp;
-  const TEMP_H = 62;
-  const H = padT + kinds.length * bandH + Math.max(0, kinds.length - 1) * bandGap
-    + (hasT ? bandGap + TEMP_H : 0) + padB;
+  const bandH = BAND_H;
+  // 窄带贴在六轴下面：温度、俯仰角、侧倾角各占一条，量程各按自己的 min–max
+  // （温度都是正值，按 ±max 居中会压成一条直线；设备的俯仰角也带安装偏置，同理不居中）
+  const nb = narrowBands(s), narrow = nb.shown;
+  let H = padT + kinds.length * bandH + Math.max(0, kinds.length - 1) * bandGap + padB;
+  for (const nb of narrow) H += bandGap + (nb.key === 'temp' ? TEMP_H : ANG_H);
 
   cv.style.height = H + 'px';
   cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
@@ -507,8 +545,8 @@ function drawImu(entry) {
   g.font = '11px system-ui,"Microsoft YaHei",sans-serif';
 
   const bands = [];
-  entry.geo = {W, H, dpr, padL, padT, plotW, bands, tempBand: null,
-               gridX0: padL, gridX1: padL + plotW, a: A, b: B};
+  entry.geo = {W, H, dpr, padL, padT, plotW, bands, narrow: [],
+               bandTop: padT, bandBot: padT, gridX0: padL, gridX1: padL + plotW, a: A, b: B};
 
   if (!kinds.length || !axes.length) {
     g.fillStyle = cMuted; g.textAlign = 'center';
@@ -572,52 +610,55 @@ function drawImu(entry) {
     }
   });
 
-  // 温度带：与六轴同一条时间轴（共用窗口），只是量程换成温度自己的 min–max
-  if (hasT) {
-    const y0 = padT + kinds.length * (bandH + bandGap);
-    const pad = Math.max(0.05, (s.tHi - s.tLo) * 0.15);
-    const tMin = s.tLo - pad, tMax = s.tHi + pad;
-    const ty = v => y0 + 2 + (tMax - v) / (tMax - tMin) * (TEMP_H - 4);
-    entry.geo.tempBand = {y0, h: TEMP_H, tMin, tMax};
+  // 窄带：与六轴共用同一条时间轴与窗口，量程换成本列自己的 min–max
+  let ny = padT + kinds.length * bandH + Math.max(0, kinds.length - 1) * bandGap;
+  for (const nb of narrow) {
+    const h = nb.key === 'temp' ? TEMP_H : ANG_H;
+    const y0 = ny + bandGap;
+    ny = y0 + h;
+    const pad = Math.max(h > 60 ? 0.05 : 0.4, (nb.hi - nb.lo) * 0.15);
+    const lo = nb.lo - pad, hi = nb.hi + pad;
+    const yOf = v => y0 + 2 + (hi - v) / (hi - lo) * (h - 4);
+    entry.geo.narrow.push({key: nb.key, y0, h, lo, hi, arr: nb.arr, color: nb.color,
+      title: nb.title, sub: nb.sub});
 
     g.fillStyle = cGrid; g.globalAlpha = .3;
-    g.fillRect(padL, y0, plotW, TEMP_H); g.globalAlpha = 1;
-    paintSegments(g, padL, y0, plotW, TEMP_H, A, B);
-    if (gapOn() && !s._lod) paintGaps(g, s, padL, y0, plotW, TEMP_H, A, B);
+    g.fillRect(padL, y0, plotW, h); g.globalAlpha = 1;
+    paintSegments(g, padL, y0, plotW, h, A, B);
+    if (gapOn() && !s._lod) paintGaps(g, s, padL, y0, plotW, h, A, B);
     g.strokeStyle = cLine; g.lineWidth = 1;
-    g.beginPath(); g.moveTo(padL + .5, y0); g.lineTo(padL + .5, y0 + TEMP_H); g.stroke();
-    g.strokeRect(padL + .5, y0 + .5, plotW - 1, TEMP_H - 1);
+    g.beginPath(); g.moveTo(padL + .5, y0); g.lineTo(padL + .5, y0 + h); g.stroke();
+    g.strokeRect(padL + .5, y0 + .5, plotW - 1, h - 1);
 
     g.fillStyle = cFaint; g.textAlign = 'right';
-    for (const [v, yy] of [[tMax, y0 + 8], [(tMin + tMax) / 2, y0 + TEMP_H / 2], [tMin, y0 + TEMP_H - 8]]) {
+    for (const [v, yy] of [[hi, y0 + 8], [(lo + hi) / 2, y0 + h / 2], [lo, y0 + h - 8]]) {
       g.beginPath(); g.moveTo(padL - 5, yy); g.lineTo(padL - 1, yy); g.stroke();
       g.fillText(v.toFixed(2), padL - 8, yy);
     }
 
     g.textAlign = 'left'; g.fillStyle = cInk;
-    const ttl = '温度 (℃)';
-    g.fillText(ttl, padL + 2, y0 - 9);
-    let lx = padL + 2 + g.measureText(ttl).width + 12;
-    g.strokeStyle = TEMP_C; g.lineWidth = 2;
+    g.fillText(nb.title, padL + 2, y0 - 9);
+    let lx = padL + 2 + g.measureText(nb.title).width + 12;
+    g.strokeStyle = nb.color; g.lineWidth = 2;
     g.beginPath(); g.moveTo(lx, y0 - 9); g.lineTo(lx + 12, y0 - 9); g.stroke();
     lx += 17;
     g.font = '10.5px system-ui,"Microsoft YaHei",sans-serif';
     g.fillStyle = cMuted;
-    g.fillText(state.src && state.src.tempCol ? state.src.tempCol : '逐帧温度', lx, y0 - 9);
+    g.fillText(nb.sub, lx, y0 - 9);
     g.font = '11px system-ui,"Microsoft YaHei",sans-serif';
 
-    const {i0: t0i, i1: t1i} = visRange(s, A, B);
-    if (t1i >= t0i) {
+    const {i0: n0, i1: n1} = visRange(s, A, B);
+    if (n1 >= n0) {
       g.save();
-      g.beginPath(); g.rect(padL, y0, plotW, TEMP_H); g.clip();
-      g.strokeStyle = TEMP_C; g.lineWidth = 1.5; g.lineJoin = 'round';
+      g.beginPath(); g.rect(padL, y0, plotW, h); g.clip();
+      g.strokeStyle = nb.color; g.lineWidth = 1.5; g.lineJoin = 'round';
       g.beginPath();
       let pen = false;
-      for (let k = t0i; k <= t1i; k += step) {
-        const v = s.temp[k];
+      for (let k = n0; k <= n1; k += step) {
+        const v = nb.arr[k];
         if (!Number.isFinite(v)) { pen = false; continue; }
         const x = padL + (s.t[k] - A) / span * plotW;
-        if (pen) g.lineTo(x, ty(v)); else { g.moveTo(x, ty(v)); pen = true; }
+        if (pen) g.lineTo(x, yOf(v)); else { g.moveTo(x, yOf(v)); pen = true; }
       }
       g.stroke();
       g.restore();
@@ -625,8 +666,11 @@ function drawImu(entry) {
   }
 
   // IC/TO 候选画在底图上：PNG 导出取的是这张离屏图，画进叠加层就导不出来
-  const bandBot = hasT ? padT + kinds.length * (bandH + bandGap) + TEMP_H
+  const bandBot = narrow.length
+    ? entry.geo.narrow[entry.geo.narrow.length - 1].y0 + entry.geo.narrow[entry.geo.narrow.length - 1].h
     : padT + kinds.length * bandH + Math.max(0, kinds.length - 1) * bandGap;
+  entry.geo.bandTop = padT;
+  entry.geo.bandBot = bandBot;
   const focus = state.gaitFocus;
   if (!focus) ictoPaint(g, s, {x0: padL, x1: padL + plotW, top: padT, bot: bandBot, a: A, b: B});
   else if (focus.side === s.side) {
@@ -645,8 +689,7 @@ function drawImu(entry) {
   }
 
   // 横轴只在最后一栏下方画一次，刻度跟窗口走
-  const yAx = (hasT ? padT + kinds.length * (bandH + bandGap) + TEMP_H
-    : padT + kinds.length * bandH + Math.max(0, kinds.length - 1) * bandGap) + 10;
+  const yAx = bandBot + 10;
   g.strokeStyle = cLine; g.lineWidth = 1;
   g.beginPath(); g.moveTo(padL, yAx + .5); g.lineTo(padL + plotW, yAx + .5); g.stroke();
   g.fillStyle = cFaint; g.font = '10px system-ui,sans-serif'; g.textAlign = 'center';
@@ -662,12 +705,18 @@ function drawImu(entry) {
     const src = srcOf(s);
     const note = src === 'raw' ? 'imu_raw_values（硬件 LSB 计数，通道序 r1..r6）' : 'imu_physical_values（加速度 g / 角速度 °/s；角速度优先用扣偏值）';
     const gs = gapOn() && !s._lod ? gapSpans(s, state.imuGapMs) : null;
-    entry.metaEl.textContent = `全段 ${s.dur.toFixed(1)} s · 均记录率 ${isFinite(s.fs) ? s.fs.toFixed(2) : '—'} Hz`
+    entry.metaEl.textContent = `录制 ${(s.span || s.dur).toFixed(1)} s`
+      + (s.t[0] > 0.05 ? `（会话 ${s.t[0].toFixed(1)}–${s.dur.toFixed(1)} s）` : '')
+      + ` · 均记录率 ${isFinite(s.fs) ? s.fs.toFixed(2) : '—'} Hz`
       + ` · ${fmt(entry.s.n)} 帧　|　数据源 ${note}`
       + (step > 1 ? `　|　按 ${(hz / step).toFixed(2)} Hz 抽样绘制（放大后自动加密）` : '')
-      + (s.temp
+      + (nb.all.some(b => b.key === 'temp') && state.imuTemp
           ? `　|　温度 ${s.tLo.toFixed(2)}–${s.tHi.toFixed(2)} ℃（${(state.src && state.src.tempCol) || '逐帧温度'}）`
           : '')
+      + (() => {
+        const ang = nb.all.filter(b => b.key === 'pitch' || b.key === 'tilt').map(b => b.key === 'pitch' ? '俯仰' : '侧倾');
+        return ang.length ? `　|　设备角 ${ang.join('+')}${state.imuAng ? '' : '（已隐藏）'}` : '';
+      })()
       + (s.imu.nPart ? `　|　${s.imu.nPart} 帧单位未确认（加速度为空）` : '')
       + (gs ? (gs.list.length
           ? `　|　间隔 > ${state.imuGapMs} ms 的区段 ${fmt(gs.list.length)} 处，共 ${gs.total.toFixed(3)} s`
@@ -678,6 +727,36 @@ function drawImu(entry) {
   imuBlit(entry, null);
 }
 
+// 视频游标：视频播放时在每一栏上跑一条竖线，位置取视频当前时刻对应的会话时间。
+// 窗口比视频短时它会跑出画面，这时贴边画个三角指向那一侧，而不是让游标凭空消失。
+function paintCursor(ctx, geo) {
+  const t = state.videoT;
+  if (t == null || !(geo.bandBot > geo.bandTop)) return;
+  const cWarn = css('--warn');
+  const span = (geo.b - geo.a) || 1;
+  const inside = t >= geo.a && t <= geo.b;
+  const x = inside ? geo.padL + (t - geo.a) / span * geo.plotW
+    : (t < geo.a ? geo.padL + 1 : geo.padL + geo.plotW - 1);
+  ctx.save();
+  ctx.strokeStyle = cWarn; ctx.lineWidth = 2; ctx.globalAlpha = inside ? .85 : .45;
+  ctx.beginPath(); ctx.moveTo(x + .5, geo.bandTop); ctx.lineTo(x + .5, geo.bandBot); ctx.stroke();
+  if (!inside) {
+    const d = t < geo.a ? 1 : -1, y0 = geo.bandTop + 5;
+    ctx.fillStyle = cWarn; ctx.globalAlpha = .9;
+    ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x + 7 * d, y0 + 5); ctx.lineTo(x, y0 + 10); ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+}
+
+/** 视频时刻变了：只重贴叠加层，不重算底图 */
+function paintVideoCursor(): void {
+  if (state.tab !== 'imu') return;
+  for (const e of imuView.values()) {
+    if (!e.geo) continue;
+    imuBlit(e, e.hover || null);
+  }
+}
+
 function imuBlit(entry, hover) {
   const {cv, off, geo} = entry;
   const ctx = cv.getContext('2d');
@@ -686,11 +765,13 @@ function imuBlit(entry, hover) {
   ctx.drawImage(off, 0, 0, geo.W, geo.H);
   const cAcc = css('--accent');
 
+  // 视频游标先画：它在最底下，框选/hover 的竖线要压在上面
+  paintCursor(ctx, geo);
+
   if (entry.sel) {
     const bs = geo.bands;
     const top = geo.padT - 4;
-    const bot = geo.tempBand ? geo.tempBand.y0 + geo.tempBand.h
-      : (bs.length ? bs[bs.length - 1].y0 + bs[bs.length - 1].h : geo.H - 34);
+    const bot = geo.bandBot || (bs.length ? bs[bs.length - 1].y0 + bs[bs.length - 1].h : geo.H - 34);
     const x0 = Math.min(entry.sel.x0, entry.sel.x1), x1 = Math.max(entry.sel.x0, entry.sel.x1);
     ctx.save();
     ctx.fillStyle = cAcc; ctx.globalAlpha = .12;
@@ -706,9 +787,8 @@ function imuBlit(entry, hover) {
   for (const b of geo.bands) {
     ctx.beginPath(); ctx.moveTo(hover.x + .5, b.y0); ctx.lineTo(hover.x + .5, b.y0 + b.h); ctx.stroke();
   }
-  if (geo.tempBand) {
-    ctx.beginPath(); ctx.moveTo(hover.x + .5, geo.tempBand.y0);
-    ctx.lineTo(hover.x + .5, geo.tempBand.y0 + geo.tempBand.h); ctx.stroke();
+  for (const nb of geo.narrow) {
+    ctx.beginPath(); ctx.moveTo(hover.x + .5, nb.y0); ctx.lineTo(hover.x + .5, nb.y0 + nb.h); ctx.stroke();
   }
   for (const p of hover.pts) {
     ctx.beginPath(); ctx.arc(hover.x, p.y, 2.8, 0, Math.PI * 2);
@@ -742,13 +822,13 @@ function onImuHover(entry, ev) {
       rows.push(['　' + b.kd.nm + ' ' + axLabel(b.kd, ax), v.toFixed(srcMeta().dec) + ' ' + unitOf(b.kd), AX_C[ax]]);
     }
   }
-  if (geo.tempBand && bs.temp) {
-    const v = bs.temp[idx], b = geo.tempBand;
-    if (Number.isFinite(v)) {
-      const fr = (b.tMax - v) / (b.tMax - b.tMin);
-      pts.push({y: b.y0 + 2 + Math.max(0, Math.min(1, fr)) * (b.h - 4), c: TEMP_C});
-      rows.push(['　温度', v.toFixed(2) + ' ℃', TEMP_C]);
-    }
+  for (const nb of geo.narrow) {
+    const v = nb.arr[idx];
+    if (!Number.isFinite(v)) continue;
+    const fr = (nb.hi - v) / (nb.hi - nb.lo);
+    pts.push({y: nb.y0 + 2 + Math.max(0, Math.min(1, fr)) * (nb.h - 4), c: nb.color});
+    rows.push(['　' + nb.title.replace(/ \(.*$/, ''), v.toFixed(2) + ' ' + (nb.title.match(/\((.+)\)/) || [])[1],
+      nb.color]);
   }
   entry.hover = {x: geo.padL + frac * geo.plotW, pts};
   imuBlit(entry, entry.hover);
@@ -811,11 +891,12 @@ function syncImuSrcUi() {
   const noSrc = im.filter(s => !s.imu[state.imuSrc]).map(s => SIDE_CN[s.side] || s.side);
   el.imuNote.textContent = (missing.length ? missing.join('、') + ' 无 IMU　·　' : '')
     + (noSrc.length ? noSrc.join('、') + ` 无 ${raw ? 'raw' : 'physical'} 列　·　` : '')
-    + (raw ? 'imu_raw_values：硬件 LSB 计数，未换算，通道序 r1..r6'
-           : state.mode === 'imu' ? '维特 TXT：加速度 g、角速度 °/s（上位机已换算）'
-           : 'imu_physical_values：加速度 g、角速度 °/s，已换算；角速度优先用扣偏值')
-    + (state.lazy ? '；纵轴「全段」档使用已载入段最大 |值|' : '；纵轴默认按全段最大 |值| 定')
-    + '，缩放后可用「按窗口」，0 居中';
+    + (raw ? '原始计数 · 通道序 r1..r6'
+           : state.mode === 'imu' ? '维特 TXT · 上位机已换算'
+           : '物理量 · 角速度优先用扣偏值');
+  el.imuNote.title = (raw ? 'imu_raw_values：硬件 LSB 计数，未换算。' : 'imu_physical_values：加速度 g、角速度 °/s。')
+    + (state.lazy ? '纵轴「全段」档使用已载入段的最大 |值|。' : '纵轴默认按全段最大 |值| 定。')
+    + '缩放后可用「按窗口」，所有通道 0 居中。';
 }
 
 function renderImu() {
@@ -883,4 +964,4 @@ function redrawImu() {
   el.tip.style.display = 'none';
 }
 
-export {bindOverview, drawImu, redrawImu, renderImu, srcOf, syncImuSrcUi, updateOverview};
+export {bindOverview, drawImu, paintVideoCursor, redrawImu, renderImu, srcOf, syncImuSrcUi, updateOverview};

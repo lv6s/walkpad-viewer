@@ -1091,7 +1091,7 @@
 	}
 	var metricMean = (s, side, key) => s.feet[side][key].sum / s.feet[side][key].n;
 	// src/core/constants.ts
-	var APP_VER = "3.20.0";
+	var APP_VER = "3.25.0";
 	var GRID = {
 		left: {
 			1: [13, 2],
@@ -1571,6 +1571,10 @@
 		axisRange: "all",
 		axisSens: "auto",
 		ref: null,
+		video: null,
+		videoT: null,
+		imuTemp: true,
+		imuAng: true,
 		gaitFocus: null,
 		icto: null,
 		ictoOn: false,
@@ -6907,6 +6911,8 @@
 		imuRun: $$3("#imuRun"),
 		imuSegOn: $$3("#imuSegOn"),
 		imuSegNote: $$3("#imuSegNote"),
+		imuTempOn: $$3("#imuTempOn"),
+		imuAngOn: $$3("#imuAngOn"),
 		winBar: $$3("#winBar"),
 		winText: $$3("#winText"),
 		winReset: $$3("#winReset"),
@@ -6936,7 +6942,18 @@
 		ictoCsvEv: $$3("#ictoCsvEv"),
 		ictoCsvCy: $$3("#ictoCsvCy"),
 		busy: $$3("#busy"),
-		ver: $$3("#ver")
+		ver: $$3("#ver"),
+		vidPanel: $$3("#vidPanel"),
+		vidHead: $$3("#vidHead"),
+		vid: $$3("#vid"),
+		vidName: $$3("#vidName"),
+		vidToggle: $$3("#vidToggle"),
+		vidClose: $$3("#vidClose"),
+		vidOff: $$3("#vidOff"),
+		vidAuto: $$3("#vidAuto"),
+		vidJump: $$3("#vidJump"),
+		vidNow: $$3("#vidNow"),
+		vidNote: $$3("#vidNote")
 	};
 	// src/core/util.ts
 	var css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
@@ -10010,11 +10027,78 @@
 		Z: "#3A9E62"
 	};
 	var TEMP_C = "#B5793A";
+	var PITCH_C = "#7A5CC4";
+	var TILT_C = "#2A8F83";
+	var TEMP_H = 62;
+	var ANG_H = 54;
+	var BAND_H = 128;
 	function activeKinds() {
 		return IMU_KINDS.filter((kd) => state.imuKinds.has(kd.k));
 	}
 	function activeAxes() {
 		return IMU_AX.filter((a) => state.imuAxes.has(a));
+	}
+	function bandRange(arr) {
+		if (!arr) return null;
+		let lo = Infinity, hi = -Infinity, n = 0;
+		for (let i = 0; i < arr.length; i++) {
+			const v = arr[i];
+			if (Number.isFinite(v)) {
+				n++;
+				if (v < lo) lo = v;
+				if (v > hi) hi = v;
+			}
+		}
+		return n > 1 ? {
+			lo,
+			hi
+		} : null;
+	}
+	function narrowBands(s) {
+		const out = [];
+		if (s.temp) out.push({
+			key: "temp",
+			title: "温度 (℃)",
+			sub: state.src && state.src.tempCol || "逐帧温度",
+			arr: s.temp,
+			color: TEMP_C,
+			lo: s.tLo,
+			hi: s.tHi
+		});
+		const ang = s.deviceAngles;
+		if (ang) {
+			if (ang.pitch) out.push({
+				key: "pitch",
+				title: "俯仰角 pitchDeg (°)",
+				sub: "设备俯仰，不是足部对地角",
+				arr: ang.pitch,
+				color: PITCH_C
+			});
+			if (ang.sideTilt) out.push({
+				key: "tilt",
+				title: "侧倾角 sideTiltDeg (°)",
+				sub: "设备侧倾，正负按导出定义",
+				arr: ang.sideTilt,
+				color: TILT_C
+			});
+		}
+		const all = [];
+		for (const b of out) {
+			if (Number.isFinite(b.lo) && Number.isFinite(b.hi) && b.hi >= b.lo) {
+				all.push(b);
+				continue;
+			}
+			const r = bandRange(b.arr);
+			if (r) all.push({
+				...b,
+				lo: r.lo,
+				hi: r.hi
+			});
+		}
+		return {
+			all,
+			shown: all.filter((b) => b.key === "temp" ? state.imuTemp : state.imuAng)
+		};
 	}
 	function srcOf(s) {
 		const im = s.imu;
@@ -10529,10 +10613,10 @@
 		const hz = hzOf(entry.s, s);
 		const step = stepOf(span * hz, span, plotW, hz);
 		const kinds = activeKinds(), axes = activeAxes();
-		const bandH = 128;
-		const hasT = !!s.temp;
-		const TEMP_H = 62;
-		const H = padT + kinds.length * bandH + Math.max(0, kinds.length - 1) * bandGap + (hasT ? 76 : 0) + padB;
+		const bandH = BAND_H;
+		const nb = narrowBands(s), narrow = nb.shown;
+		let H = padT + kinds.length * bandH + Math.max(0, kinds.length - 1) * bandGap + padB;
+		for (const nb of narrow) H += bandGap + (nb.key === "temp" ? TEMP_H : ANG_H);
 		cv.style.height = H + "px";
 		cv.width = Math.round(W * dpr);
 		cv.height = Math.round(H * dpr);
@@ -10553,7 +10637,9 @@
 			padT,
 			plotW,
 			bands,
-			tempBand: null,
+			narrow: [],
+			bandTop: padT,
+			bandBot: padT,
 			gridX0: padL,
 			gridX1: padL + plotW,
 			a: A,
@@ -10648,36 +10734,44 @@
 				g.fillText("纵轴按窗口", padL + plotW - 2, y0 - 9);
 			}
 		});
-		if (hasT) {
-			const y0 = padT + kinds.length * 142;
-			const pad = Math.max(.05, (s.tHi - s.tLo) * .15);
-			const tMin = s.tLo - pad, tMax = s.tHi + pad;
-			const ty = (v) => y0 + 2 + (tMax - v) / (tMax - tMin) * 58;
-			entry.geo.tempBand = {
+		let ny = padT + kinds.length * bandH + Math.max(0, kinds.length - 1) * bandGap;
+		for (const nb of narrow) {
+			const h = nb.key === "temp" ? TEMP_H : ANG_H;
+			const y0 = ny + bandGap;
+			ny = y0 + h;
+			const pad = Math.max(h > 60 ? .05 : .4, (nb.hi - nb.lo) * .15);
+			const lo = nb.lo - pad, hi = nb.hi + pad;
+			const yOf = (v) => y0 + 2 + (hi - v) / (hi - lo) * (h - 4);
+			entry.geo.narrow.push({
+				key: nb.key,
 				y0,
-				h: TEMP_H,
-				tMin,
-				tMax
-			};
+				h,
+				lo,
+				hi,
+				arr: nb.arr,
+				color: nb.color,
+				title: nb.title,
+				sub: nb.sub
+			});
 			g.fillStyle = cGrid;
 			g.globalAlpha = .3;
-			g.fillRect(padL, y0, plotW, TEMP_H);
+			g.fillRect(padL, y0, plotW, h);
 			g.globalAlpha = 1;
-			paintSegments(g, padL, y0, plotW, TEMP_H, A, B);
-			if (gapOn() && !s._lod) paintGaps(g, s, padL, y0, plotW, TEMP_H, A, B);
+			paintSegments(g, padL, y0, plotW, h, A, B);
+			if (gapOn() && !s._lod) paintGaps(g, s, padL, y0, plotW, h, A, B);
 			g.strokeStyle = cLine;
 			g.lineWidth = 1;
 			g.beginPath();
 			g.moveTo(62.5, y0);
-			g.lineTo(62.5, y0 + TEMP_H);
+			g.lineTo(62.5, y0 + h);
 			g.stroke();
-			g.strokeRect(62.5, y0 + .5, plotW - 1, 61);
+			g.strokeRect(62.5, y0 + .5, plotW - 1, h - 1);
 			g.fillStyle = cFaint;
 			g.textAlign = "right";
 			for (const [v, yy] of [
-				[tMax, y0 + 8],
-				[(tMin + tMax) / 2, y0 + TEMP_H / 2],
-				[tMin, y0 + TEMP_H - 8]
+				[hi, y0 + 8],
+				[(lo + hi) / 2, y0 + h / 2],
+				[lo, y0 + h - 8]
 			]) {
 				g.beginPath();
 				g.moveTo(57, yy);
@@ -10687,10 +10781,9 @@
 			}
 			g.textAlign = "left";
 			g.fillStyle = cInk;
-			const ttl = "温度 (℃)";
-			g.fillText(ttl, 64, y0 - 9);
-			let lx = 64 + g.measureText(ttl).width + 12;
-			g.strokeStyle = TEMP_C;
+			g.fillText(nb.title, 64, y0 - 9);
+			let lx = 64 + g.measureText(nb.title).width + 12;
+			g.strokeStyle = nb.color;
 			g.lineWidth = 2;
 			g.beginPath();
 			g.moveTo(lx, y0 - 9);
@@ -10699,29 +10792,29 @@
 			lx += 17;
 			g.font = "10.5px system-ui,\"Microsoft YaHei\",sans-serif";
 			g.fillStyle = cMuted;
-			g.fillText(state.src && state.src.tempCol ? state.src.tempCol : "逐帧温度", lx, y0 - 9);
+			g.fillText(nb.sub, lx, y0 - 9);
 			g.font = "11px system-ui,\"Microsoft YaHei\",sans-serif";
-			const { i0: t0i, i1: t1i } = visRange(s, A, B);
-			if (t1i >= t0i) {
+			const { i0: n0, i1: n1 } = visRange(s, A, B);
+			if (n1 >= n0) {
 				g.save();
 				g.beginPath();
-				g.rect(padL, y0, plotW, TEMP_H);
+				g.rect(padL, y0, plotW, h);
 				g.clip();
-				g.strokeStyle = TEMP_C;
+				g.strokeStyle = nb.color;
 				g.lineWidth = 1.5;
 				g.lineJoin = "round";
 				g.beginPath();
 				let pen = false;
-				for (let k = t0i; k <= t1i; k += step) {
-					const v = s.temp[k];
+				for (let k = n0; k <= n1; k += step) {
+					const v = nb.arr[k];
 					if (!Number.isFinite(v)) {
 						pen = false;
 						continue;
 					}
 					const x = padL + (s.t[k] - A) / span * plotW;
-					if (pen) g.lineTo(x, ty(v));
+					if (pen) g.lineTo(x, yOf(v));
 					else {
-						g.moveTo(x, ty(v));
+						g.moveTo(x, yOf(v));
 						pen = true;
 					}
 				}
@@ -10729,7 +10822,9 @@
 				g.restore();
 			}
 		}
-		const bandBot = hasT ? padT + kinds.length * 142 + TEMP_H : padT + kinds.length * bandH + Math.max(0, kinds.length - 1) * bandGap;
+		const bandBot = narrow.length ? entry.geo.narrow[entry.geo.narrow.length - 1].y0 + entry.geo.narrow[entry.geo.narrow.length - 1].h : padT + kinds.length * bandH + Math.max(0, kinds.length - 1) * bandGap;
+		entry.geo.bandTop = padT;
+		entry.geo.bandBot = bandBot;
 		const focus = state.gaitFocus;
 		if (!focus) paint(g, s, {
 			x0: padL,
@@ -10790,7 +10885,7 @@
 			}
 			g.restore();
 		}
-		const yAx = (hasT ? padT + kinds.length * 142 + TEMP_H : padT + kinds.length * bandH + Math.max(0, kinds.length - 1) * bandGap) + 10;
+		const yAx = bandBot + 10;
 		g.strokeStyle = cLine;
 		g.lineWidth = 1;
 		g.beginPath();
@@ -10813,9 +10908,48 @@
 		if (entry.metaEl) {
 			const note = srcOf(s) === "raw" ? "imu_raw_values（硬件 LSB 计数，通道序 r1..r6）" : "imu_physical_values（加速度 g / 角速度 °/s；角速度优先用扣偏值）";
 			const gs = gapOn() && !s._lod ? gapSpans(s, state.imuGapMs) : null;
-			entry.metaEl.textContent = `全段 ${s.dur.toFixed(1)} s · 均记录率 ${isFinite(s.fs) ? s.fs.toFixed(2) : "—"} Hz · ${fmt(entry.s.n)} 帧　|　数据源 ${note}` + (step > 1 ? `　|　按 ${(hz / step).toFixed(2)} Hz 抽样绘制（放大后自动加密）` : "") + (s.temp ? `　|　温度 ${s.tLo.toFixed(2)}–${s.tHi.toFixed(2)} ℃（${state.src && state.src.tempCol || "逐帧温度"}）` : "") + (s.imu.nPart ? `　|　${s.imu.nPart} 帧单位未确认（加速度为空）` : "") + (gs ? gs.list.length ? `　|　间隔 > ${state.imuGapMs} ms 的区段 ${fmt(gs.list.length)} 处，共 ${gs.total.toFixed(3)} s` : `　|　没有间隔 > ${state.imuGapMs} ms 的区段` : "") + (gs && state.mode === "imu" ? "（维特 TXT：标的是写盘节奏抖动，不是真实丢帧）" : "");
+			entry.metaEl.textContent = `录制 ${(s.span || s.dur).toFixed(1)} s` + (s.t[0] > .05 ? `（会话 ${s.t[0].toFixed(1)}–${s.dur.toFixed(1)} s）` : "") + ` · 均记录率 ${isFinite(s.fs) ? s.fs.toFixed(2) : "—"} Hz · ${fmt(entry.s.n)} 帧　|　数据源 ${note}` + (step > 1 ? `　|　按 ${(hz / step).toFixed(2)} Hz 抽样绘制（放大后自动加密）` : "") + (nb.all.some((b) => b.key === "temp") && state.imuTemp ? `　|　温度 ${s.tLo.toFixed(2)}–${s.tHi.toFixed(2)} ℃（${state.src && state.src.tempCol || "逐帧温度"}）` : "") + (() => {
+				const ang = nb.all.filter((b) => b.key === "pitch" || b.key === "tilt").map((b) => b.key === "pitch" ? "俯仰" : "侧倾");
+				return ang.length ? `　|　设备角 ${ang.join("+")}${state.imuAng ? "" : "（已隐藏）"}` : "";
+			})() + (s.imu.nPart ? `　|　${s.imu.nPart} 帧单位未确认（加速度为空）` : "") + (gs ? gs.list.length ? `　|　间隔 > ${state.imuGapMs} ms 的区段 ${fmt(gs.list.length)} 处，共 ${gs.total.toFixed(3)} s` : `　|　没有间隔 > ${state.imuGapMs} ms 的区段` : "") + (gs && state.mode === "imu" ? "（维特 TXT：标的是写盘节奏抖动，不是真实丢帧）" : "");
 		}
 		imuBlit(entry, null);
+	}
+	function paintCursor(ctx, geo) {
+		const t = state.videoT;
+		if (t == null || !(geo.bandBot > geo.bandTop)) return;
+		const cWarn = css("--warn");
+		const span = geo.b - geo.a || 1;
+		const inside = t >= geo.a && t <= geo.b;
+		const x = inside ? geo.padL + (t - geo.a) / span * geo.plotW : t < geo.a ? geo.padL + 1 : geo.padL + geo.plotW - 1;
+		ctx.save();
+		ctx.strokeStyle = cWarn;
+		ctx.lineWidth = 2;
+		ctx.globalAlpha = inside ? .85 : .45;
+		ctx.beginPath();
+		ctx.moveTo(x + .5, geo.bandTop);
+		ctx.lineTo(x + .5, geo.bandBot);
+		ctx.stroke();
+		if (!inside) {
+			const d = t < geo.a ? 1 : -1, y0 = geo.bandTop + 5;
+			ctx.fillStyle = cWarn;
+			ctx.globalAlpha = .9;
+			ctx.beginPath();
+			ctx.moveTo(x, y0);
+			ctx.lineTo(x + 7 * d, y0 + 5);
+			ctx.lineTo(x, y0 + 10);
+			ctx.closePath();
+			ctx.fill();
+		}
+		ctx.restore();
+	}
+	/** 视频时刻变了：只重贴叠加层，不重算底图 */
+	function paintVideoCursor() {
+		if (state.tab !== "imu") return;
+		for (const e of imuView.values()) {
+			if (!e.geo) continue;
+			imuBlit(e, e.hover || null);
+		}
 	}
 	function imuBlit(entry, hover) {
 		const { cv, off, geo } = entry;
@@ -10824,10 +10958,11 @@
 		ctx.clearRect(0, 0, geo.W, geo.H);
 		ctx.drawImage(off, 0, 0, geo.W, geo.H);
 		const cAcc = css("--accent");
+		paintCursor(ctx, geo);
 		if (entry.sel) {
 			const bs = geo.bands;
 			const top = geo.padT - 4;
-			const bot = geo.tempBand ? geo.tempBand.y0 + geo.tempBand.h : bs.length ? bs[bs.length - 1].y0 + bs[bs.length - 1].h : geo.H - 34;
+			const bot = geo.bandBot || (bs.length ? bs[bs.length - 1].y0 + bs[bs.length - 1].h : geo.H - 34);
 			const x0 = Math.min(entry.sel.x0, entry.sel.x1), x1 = Math.max(entry.sel.x0, entry.sel.x1);
 			ctx.save();
 			ctx.fillStyle = cAcc;
@@ -10850,10 +10985,10 @@
 			ctx.lineTo(hover.x + .5, b.y0 + b.h);
 			ctx.stroke();
 		}
-		if (geo.tempBand) {
+		for (const nb of geo.narrow) {
 			ctx.beginPath();
-			ctx.moveTo(hover.x + .5, geo.tempBand.y0);
-			ctx.lineTo(hover.x + .5, geo.tempBand.y0 + geo.tempBand.h);
+			ctx.moveTo(hover.x + .5, nb.y0);
+			ctx.lineTo(hover.x + .5, nb.y0 + nb.h);
 			ctx.stroke();
 		}
 		for (const p of hover.pts) {
@@ -10900,20 +11035,19 @@
 				]);
 			}
 		}
-		if (geo.tempBand && bs.temp) {
-			const v = bs.temp[idx], b = geo.tempBand;
-			if (Number.isFinite(v)) {
-				const fr = (b.tMax - v) / (b.tMax - b.tMin);
-				pts.push({
-					y: b.y0 + 2 + Math.max(0, Math.min(1, fr)) * (b.h - 4),
-					c: TEMP_C
-				});
-				rows.push([
-					"　温度",
-					v.toFixed(2) + " ℃",
-					TEMP_C
-				]);
-			}
+		for (const nb of geo.narrow) {
+			const v = nb.arr[idx];
+			if (!Number.isFinite(v)) continue;
+			const fr = (nb.hi - v) / (nb.hi - nb.lo);
+			pts.push({
+				y: nb.y0 + 2 + Math.max(0, Math.min(1, fr)) * (nb.h - 4),
+				c: nb.color
+			});
+			rows.push([
+				"　" + nb.title.replace(/ \(.*$/, ""),
+				v.toFixed(2) + " " + (nb.title.match(/\((.+)\)/) || [])[1],
+				nb.color
+			]);
 		}
 		entry.hover = {
 			x: geo.padL + frac * geo.plotW,
@@ -10963,7 +11097,8 @@
 		}
 		const missing = state.sides.filter((s) => !s.imu).map((s) => SIDE_CN[s.side] || s.side);
 		const noSrc = im.filter((s) => !s.imu[state.imuSrc]).map((s) => SIDE_CN[s.side] || s.side);
-		el$1.imuNote.textContent = (missing.length ? missing.join("、") + " 无 IMU　·　" : "") + (noSrc.length ? noSrc.join("、") + ` 无 ${raw ? "raw" : "physical"} 列　·　` : "") + (raw ? "imu_raw_values：硬件 LSB 计数，未换算，通道序 r1..r6" : state.mode === "imu" ? "维特 TXT：加速度 g、角速度 °/s（上位机已换算）" : "imu_physical_values：加速度 g、角速度 °/s，已换算；角速度优先用扣偏值") + (state.lazy ? "；纵轴「全段」档使用已载入段最大 |值|" : "；纵轴默认按全段最大 |值| 定") + "，缩放后可用「按窗口」，0 居中";
+		el$1.imuNote.textContent = (missing.length ? missing.join("、") + " 无 IMU　·　" : "") + (noSrc.length ? noSrc.join("、") + ` 无 ${raw ? "raw" : "physical"} 列　·　` : "") + (raw ? "原始计数 · 通道序 r1..r6" : state.mode === "imu" ? "维特 TXT · 上位机已换算" : "物理量 · 角速度优先用扣偏值");
+		el$1.imuNote.title = (raw ? "imu_raw_values：硬件 LSB 计数，未换算。" : "imu_physical_values：加速度 g、角速度 °/s。") + (state.lazy ? "纵轴「全段」档使用已载入段的最大 |值|。" : "纵轴默认按全段最大 |值| 定。") + "缩放后可用「按窗口」，所有通道 0 居中。";
 	}
 	function renderImu() {
 		el$1.imu.innerHTML = "";
@@ -14073,6 +14208,7 @@
 		const row = document.createElement("div");
 		row.className = "zerorow";
 		for (const s of state.sides) {
+			if (!(s.nch > 0)) continue;
 			const st = zeroStat(s);
 			const rev = REV[s.side] || {};
 			const sec = document.createElement("section");
@@ -14228,7 +14364,7 @@
 	// src/app.ts
 	function placeWinBar(name) {
 		el$1.winBar.hidden = !state.sides.length;
-		if (el$1.winKeys) el$1.winKeys.textContent = name === "activity" ? "点击状态色块 / 表格行定位 · 起止时间框缩放 · 复位全段 · 可切换 IMU 核对" : name === "axis" ? "时间段用于「当前时间窗」推断；三维图拖动旋转、滚轮缩放" : name === "action" ? "框选一段动作再分析；时间窗内的数据才参与估速" : "Shift+拖动 框选放大 · 拖动 平移 · Ctrl+滚轮 缩放 · 双击 复位" + (name === "wave" ? " · 点格子 看单通道" : "");
+		if (el$1.winKeys) el$1.winKeys.textContent = name === "activity" ? "点色块定位 · 时间框缩放" : name === "axis" ? "时间段只影响「当前时间窗」推断" : name === "action" ? "框选一段动作再分析" : "Shift+拖动 框选 · 滚轮 缩放 · 双击 复位" + (name === "wave" ? " · 点格子看单通道" : "");
 		updateWinBar();
 	}
 	function setTab(name) {
@@ -14287,26 +14423,35 @@
 		if (!state.sides.length) return;
 		const hasP = state.hasP;
 		const totalFrames = state.sides.reduce((a, s) => a + s.n, 0);
-		const maxDur = Math.max(...state.sides.map((s) => s.dur));
+		const maxDur = Math.max(...state.sides.map((s) => s.span || s.dur));
+		const starts = state.sides.map((s) => s.t[0]);
 		const nImu = state.sides.filter((s) => s.imu).length;
+		const rates = [...new Set(state.sides.map((s) => s.fs).filter((v) => isFinite(v)).map((v) => v.toFixed(2)))];
+		const rateTxt = rates.length > 1 ? state.sides.filter((s) => isFinite(s.fs)).map((s) => `${SIDE_CN[s.side] || s.side} ${s.fs.toFixed(1)}`).join(" · ") : rates.length ? rates[0] + " Hz" : "—";
+		const nchMax = Math.max(...state.sides.map((s) => s.nch));
 		const calReady = state.sides.reduce((a, s) => a + (s.cal && s.cal.ready || 0), 0);
 		const calRaw = state.sides.reduce((a, s) => a + (s.cal && s.cal.raw || 0), 0);
 		const tSides = state.sides.filter((s) => s.temp || Number.isFinite(s.tLo));
 		const tLo = tSides.length ? Math.min(...tSides.map((s) => s.tLo)) : NaN;
 		const tHi = tSides.length ? Math.max(...tSides.map((s) => s.tHi)) : NaN;
 		const nUnmapped = state.sides.reduce((a, s) => a + (s.nT || 0), 0);
-		el$1.chips.innerHTML = [
+		const rows = [
 			["侧别", state.sides.map((s) => SIDE_CN[s.side] || s.side).join(" / ")],
-			...state.src && state.src.ver ? [["格式", state.src.ver + (state.src.ncols ? " · " + state.src.ncols + " 列" : "")]] : [],
 			["帧数", fmt(totalFrames)],
 			["最长", maxDur.toFixed(1) + " s"],
-			["均记录率", isFinite(state.sides[0].fs) ? state.sides[0].fs.toFixed(2) + " Hz" : "—"],
-			...hasP ? [["通道", state.sides[0].nch], ["全段最大", fmt(state.gmax) + " ADC"]] : [],
-			...nImu ? [["IMU", `${nImu} 侧 × 6 轴`]] : [],
-			...nImu ? [["角速度", calReady && calRaw ? `扣偏 ${fmt(calReady)} / 原始 ${fmt(calRaw)} 帧` : calReady ? "已扣偏" : "原始换算（无扣偏结果）"]] : [],
-			...tSides.length && Number.isFinite(tLo) ? [["温度", `${tLo.toFixed(2)}–${tHi.toFixed(2)} ℃`]] : [],
+			["均记录率", rateTxt],
+			...hasP ? [["通道", nchMax + " · 最大 " + fmt(state.gmax) + " ADC"]] : [],
+			...nImu ? [["IMU", nImu + " 侧 × 6 轴"]] : [],
 			...nUnmapped ? [["时间未映射", nUnmapped + " 帧"]] : []
-		].map(([k, v]) => `<span class="chip">${k} <b>${v}</b></span>`).join("");
+		];
+		el$1.chips.innerHTML = rows.map(([k, v]) => `<span class="chip">${k} <b>${v}</b></span>`).join("");
+		el$1.fname.title = [
+			state.name,
+			...state.src && state.src.ver ? ["格式 " + state.src.ver + (state.src.ncols ? " · " + state.src.ncols + " 列" : "")] : [],
+			...starts.some((v) => v > .05) ? ["起点 " + state.sides.map((s, i) => `${SIDE_CN[s.side] || s.side} ${starts[i].toFixed(1)} s`).join(" · ")] : [],
+			...nImu ? ["角速度 " + (calReady && calRaw ? `扣偏 ${fmt(calReady)} / 原始 ${fmt(calRaw)} 帧` : calReady ? "已扣偏" : "原始换算（无扣偏结果）")] : [],
+			...tSides.length && Number.isFinite(tLo) ? [`温度 ${tLo.toFixed(2)}–${tHi.toFixed(2)} ℃`] : []
+		].join("\n");
 	}
 	function renderAll() {
 		if (!el$1.bar) return;
@@ -14349,6 +14494,7 @@
 		renderImu();
 		renderAxis();
 		if (hasP) for (const s of state.sides) {
+			if (!(s.nch > 0)) continue;
 			const sec = document.createElement("section");
 			sec.className = "side";
 			const head = document.createElement("div");
@@ -14392,6 +14538,172 @@
 		updateWinBar();
 		setTab(state.tab);
 	}
+	// src/video.ts
+	var MIME = {
+		mp4: "video/mp4",
+		m4v: "video/mp4",
+		mov: "video/quicktime",
+		webm: "video/webm"
+	};
+	var s2 = (v) => Number.isFinite(v) ? v.toFixed(2) : "—";
+	var sessionDur = () => state.sides.length ? Math.max(...state.sides.map((s) => s.dur)) : 0;
+	function attachVideo(u8, name, total = 1) {
+		clearVideo();
+		const ext = (name.split(".").pop() || "").toLowerCase();
+		const ab = u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
+		const url = URL.createObjectURL(new Blob([ab], { type: MIME[ext] || "video/mp4" }));
+		state.video = {
+			url,
+			name,
+			bytes: u8.byteLength,
+			offset: 0,
+			auto: true,
+			dur: NaN,
+			total
+		};
+		if (el$1.vidToggle) el$1.vidToggle.hidden = false;
+		if (el$1.vid) el$1.vid.src = url;
+		if (el$1.vidPanel) el$1.vidPanel.hidden = false;
+		renderVideo();
+	}
+	function clearVideo() {
+		const old = state.video;
+		if (old) URL.revokeObjectURL(old.url);
+		state.video = null;
+		state.videoT = null;
+		paintVideoCursor();
+		if (el$1.vidToggle) el$1.vidToggle.hidden = true;
+		if (el$1.vidPanel) el$1.vidPanel.hidden = true;
+		if (el$1.vid) {
+			el$1.vid.pause();
+			el$1.vid.removeAttribute("src");
+			el$1.vid.load();
+		}
+	}
+	/** 起点推定：录制在停止时收尾，视频结束大致就是会话结束，据此反推视频 0 s 落在哪 */
+	function guessOffset() {
+		const vid = state.video;
+		if (!vid) return 0;
+		const D = sessionDur();
+		if (!Number.isFinite(vid.dur) || !(D > 0)) return 0;
+		return Math.max(0, Math.round((D - vid.dur) * 100) / 100);
+	}
+	function syncTime() {
+		const vid = state.video;
+		state.videoT = vid && el$1.vid ? (el$1.vid.currentTime || 0) + vid.offset : null;
+		paintVideoCursor();
+	}
+	function nowText() {
+		const vid = state.video;
+		if (!vid || !el$1.vid) return "";
+		const t = el$1.vid.currentTime || 0;
+		return `视频 ${s2(t)} s → 会话 ${s2(t + vid.offset)} s`;
+	}
+	function renderVideo() {
+		const vid = state.video;
+		if (!vid || !el$1.vidPanel) return;
+		el$1.vidName.textContent = `${vid.name} · ${s2(vid.dur)} s` + (vid.total > 1 ? `（包内共 ${vid.total} 段，只载入第一段）` : "");
+		if (document.activeElement !== el$1.vidOff) el$1.vidOff.value = vid.auto ? vid.offset.toFixed(2) : String(vid.offset);
+		el$1.vidNote.textContent = vid.auto ? "起点为推定值（视频结束 ≈ 录制结束）" : "起点为手动给定";
+		el$1.vidNote.title = "会话时刻 = 视频时刻 + 起点；「跳到会话」只接受视频覆盖到的区间，越界会提示而不会贴边。";
+		el$1.vidNow.textContent = nowText();
+		syncTime();
+	}
+	function setOffset(v, auto = false) {
+		const vid = state.video;
+		if (!vid || !Number.isFinite(v)) return;
+		vid.offset = v;
+		vid.auto = auto;
+		renderVideo();
+	}
+	function seekSession(t) {
+		const vid = state.video;
+		if (!vid || !el$1.vid || !Number.isFinite(t)) return;
+		const vt = t - vid.offset;
+		if (!(vt >= 0) || Number.isFinite(vid.dur) && vt > vid.dur) {
+			el$1.vidJump.setCustomValidity(`视频只覆盖会话 ${s2(vid.offset)}–${s2(vid.offset + (vid.dur || 0))} s。`);
+			el$1.vidJump.reportValidity();
+			return;
+		}
+		el$1.vidJump.setCustomValidity("");
+		el$1.vid.currentTime = vt;
+		el$1.vidNow.textContent = nowText();
+		syncTime();
+	}
+	function fitPanel() {
+		const v = el$1.vid;
+		if (!el$1.vidPanel || !v || !v.videoWidth || !v.videoHeight) return;
+		const ar = v.videoWidth / v.videoHeight;
+		const maxH = window.innerHeight * .4;
+		const w = ar < 1 ? Math.min(maxH * ar, 340) : 340;
+		el$1.vidPanel.style.width = Math.round(Math.max(240, Math.min(440, w))) + "px";
+	}
+	function toggleVideoPanel(show) {
+		if (!el$1.vidPanel || !state.video) return;
+		el$1.vidPanel.hidden = show == null ? !el$1.vidPanel.hidden : !show;
+		state.videoT = el$1.vidPanel.hidden ? null : (el$1.vid.currentTime || 0) + state.video.offset;
+		paintVideoCursor();
+	}
+	function bindDrag() {
+		let drag = null;
+		el$1.vidHead.addEventListener("pointerdown", (ev) => {
+			if (ev.button !== 0 || ev.target.closest("button")) return;
+			const r = el$1.vidPanel.getBoundingClientRect();
+			drag = {
+				dx: ev.clientX - r.left,
+				dy: ev.clientY - r.top
+			};
+			el$1.vidPanel.style.right = "auto";
+			el$1.vidPanel.style.bottom = "auto";
+			el$1.vidPanel.style.left = r.left + "px";
+			el$1.vidPanel.style.top = r.top + "px";
+			el$1.vidHead.setPointerCapture(ev.pointerId);
+		});
+		el$1.vidHead.addEventListener("pointermove", (ev) => {
+			if (!drag) return;
+			const w = el$1.vidPanel.offsetWidth, h = el$1.vidPanel.offsetHeight;
+			el$1.vidPanel.style.left = Math.max(0, Math.min(window.innerWidth - w, ev.clientX - drag.dx)) + "px";
+			el$1.vidPanel.style.top = Math.max(0, Math.min(window.innerHeight - h, ev.clientY - drag.dy)) + "px";
+		});
+		el$1.vidHead.addEventListener("pointerup", () => {
+			drag = null;
+		});
+		el$1.vidHead.addEventListener("pointercancel", () => {
+			drag = null;
+		});
+	}
+	function bindVideo() {
+		if (!el$1.vidPanel) return;
+		bindDrag();
+		el$1.vidToggle.addEventListener("click", () => toggleVideoPanel());
+		el$1.vidClose.addEventListener("click", () => toggleVideoPanel(false));
+		el$1.vid.addEventListener("loadedmetadata", () => {
+			const vid = state.video;
+			if (!vid) return;
+			vid.dur = el$1.vid.duration;
+			if (vid.auto) vid.offset = guessOffset();
+			fitPanel();
+			renderVideo();
+		});
+		el$1.vid.addEventListener("timeupdate", () => {
+			el$1.vidNow.textContent = nowText();
+			syncTime();
+		});
+		el$1.vid.addEventListener("seeking", () => {
+			el$1.vidNow.textContent = nowText();
+			syncTime();
+		});
+		el$1.vidOff.addEventListener("input", () => {
+			const v = parseFloat(el$1.vidOff.value);
+			if (Number.isFinite(v)) setOffset(v);
+		});
+		el$1.vidAuto.addEventListener("click", () => setOffset(guessOffset(), true));
+		el$1.vidJump.addEventListener("keydown", (ev) => {
+			if (ev.key !== "Enter") return;
+			ev.preventDefault();
+			seekSession(parseFloat(el$1.vidJump.value));
+		});
+	}
 	// src/parse.ts
 	var asRef = false;
 	function errLoc(e) {
@@ -14405,6 +14717,7 @@
 	async function parse(file, opt) {
 		asRef = !!(opt && opt.asRef);
 		el$1.busy.hidden = false;
+		if (!asRef) clearVideo();
 		await new Promise((r) => setTimeout(r, 30));
 		try {
 			await parseFile(file);
@@ -14695,6 +15008,7 @@
 				nT: nDrop,
 				cal: g.cal,
 				dur: t[n - 1],
+				span: t[n - 1],
 				fs: n > 1 ? 1 / (dt / (n - 1)) : NaN,
 				blk: {
 					n,
@@ -14704,7 +15018,8 @@
 					temp,
 					ictoIn,
 					a: t[0],
-					b: t[n - 1]
+					b: t[n - 1],
+					deviceAngles: deviceAngleArrays(g.deviceAngles)
 				}
 			});
 		}
@@ -14782,11 +15097,38 @@
 		deviceQuaternion: 1
 	};
 	var isSignalType = (ft) => !ft || !SKIP_TYPE[ft];
+	var FOOT_PLACE = /(insole|ankle|foot|instep|shoe)/;
+	var PLACE_CN = {
+		insole: "鞋垫",
+		ankle: "踝",
+		foot: "足",
+		instep: "足背",
+		shoe: "鞋",
+		wrist: "腕",
+		hand: "手",
+		arm: "臂",
+		waist: "腰",
+		hip: "髋",
+		chest: "胸",
+		back: "背",
+		thigh: "大腿",
+		knee: "膝",
+		shank: "小腿",
+		calf: "小腿",
+		head: "头"
+	};
 	function sideOfPlacement(p) {
 		const k = String(p || "").toLowerCase();
-		if (k.indexOf("left") === 0) return "left";
-		if (k.indexOf("right") === 0) return "right";
-		return "unknown";
+		if (FOOT_PLACE.test(k)) return k.startsWith("right") ? "right" : k.startsWith("left") ? "left" : "unknown";
+		return k || "unknown";
+	}
+	function registerSideLabel(key, src) {
+		if (key === "left" || key === "right") return;
+		if (SIDE_CN[key]) return;
+		const k = String(src.placement || "").toLowerCase();
+		const seg = Object.keys(PLACE_CN).find((x) => k.indexOf(x) >= 0);
+		const side = k.startsWith("left") ? "左" : k.startsWith("right") ? "右" : "";
+		SIDE_CN[key] = seg ? side + PLACE_CN[seg] : src.bluetoothName || k || "未标注位置";
 	}
 	async function unzip(ab) {
 		const dv = new DataView(ab), u8 = new Uint8Array(ab), n = ab.byteLength;
@@ -14882,6 +15224,18 @@
 		} : r.angularVelocityDps;
 	};
 	var phys6 = (r) => struct6(r.accelerationG, gyroOf(r));
+	var VIDEO_RE = /\.(mp4|m4v|mov|webm)$/i;
+	async function packageVideo(zf, manifest) {
+		const declared = (manifest.outputs || []).map((o) => o && o.path).filter((p) => p && VIDEO_RE.test(p));
+		const all = declared.length ? declared : [...zf.keys()].filter((p) => VIDEO_RE.test(p));
+		if (!all.length) return null;
+		const u8 = await unzipBytes(zf.get(all[0]));
+		return u8 && u8.byteLength ? {
+			u8,
+			name: all[0].split("/").pop(),
+			total: all.length
+		} : null;
+	}
 	async function parsePackage(file) {
 		if (typeof DecompressionStream !== "function") {
 			fail("这个浏览器不支持页面内解压（DecompressionStream），请改用 Edge / Chrome。");
@@ -14901,6 +15255,12 @@
 		} catch (e) {
 			fail("读取压缩包失败：" + (e && e.message || e));
 			return;
+		}
+		let media = null;
+		try {
+			media = await packageVideo(zf, manifest);
+		} catch {
+			media = null;
 		}
 		const srcs = Array.isArray(manifest.sources) ? manifest.sources : [];
 		if (!srcs.length) {
@@ -14926,9 +15286,12 @@
 					fail("manifest 里的 source " + src.sourceId + " 没有对应的 frames/*.parquet。");
 					return;
 				}
+				const side = sideOfPlacement(src.placement);
+				registerSideLabel(side, src);
 				const job = {
-					side: sideOfPlacement(src.placement),
+					side,
 					sourceId: src.sourceId,
+					placement: src.placement,
 					nch: Number(src.pressureChannelCount) || 0,
 					files: [],
 					nAll: 0
@@ -14978,7 +15341,7 @@
 		const seen = /* @__PURE__ */ new Map();
 		for (const job of jobs) {
 			if (seen.has(job.side)) {
-				fail(`压缩包里有两只来源都标成「${job.side}」（${seen.get(job.side)} 与 ${job.sourceId}）：查看器按侧组织面板，两条流不能合成一条；请把它们分到两个包里分别导入。`);
+				fail(`压缩包里有两只来源都标成「${SIDE_CN[job.side] || job.side}」（${seen.get(job.side)} 与 ${job.sourceId}）：查看器按侧组织面板，两条流不能合成一条；请把它们分到两个包里分别导入。`);
 				return;
 			}
 			seen.set(job.side, job.sourceId);
@@ -15002,6 +15365,9 @@
 			rebuilt: false,
 			src: srcInfo
 		});
+		if (media) try {
+			attachVideo(media.u8, media.name, media.total);
+		} catch {}
 		if (state.lazy) {
 			const gen = dataGen;
 			for (const s of sides) if (s.lazy) scanStats(s, gen);
@@ -15094,6 +15460,7 @@
 			row: rr,
 			t0,
 			dur: tt[n - 1],
+			span: tt[n - 1],
 			fs: n > 1 ? 1 / ((tt[n - 1] - tt[0]) / (n - 1)) : NaN,
 			nT: job.nAll - n,
 			ch: null,
@@ -15209,6 +15576,8 @@
 		const ph = six(), rw = six();
 		const phMax = /* @__PURE__ */ new Float32Array(6), rwMax = /* @__PURE__ */ new Float32Array(6);
 		const tp = new Float64Array(n).fill(NaN);
+		const pit = new Float32Array(n).fill(NaN), tlt = new Float32Array(n).fill(NaN);
+		let nPit = 0, nTlt = 0;
 		let hasPhys = false, hasRaw = false, tLo = Infinity, tHi = -Infinity;
 		for (let k = 0; k < n; k++) {
 			const r = rows[k];
@@ -15239,6 +15608,15 @@
 				if (c < tLo) tLo = c;
 				if (c > tHi) tHi = c;
 			}
+			const pv2 = numOrNaN(r.pitchDeg), tv2 = numOrNaN(r.sideTiltDeg);
+			if (Number.isFinite(pv2)) {
+				pit[k] = pv2;
+				nPit++;
+			}
+			if (Number.isFinite(tv2)) {
+				tlt[k] = tv2;
+				nTlt++;
+			}
 		}
 		const imu = hasPhys || hasRaw ? {
 			nch: 6,
@@ -15253,6 +15631,10 @@
 			ch,
 			imu,
 			temp: tHi >= tLo ? tp : null,
+			deviceAngles: nPit || nTlt ? {
+				pitch: nPit ? pit : null,
+				sideTilt: nTlt ? tlt : null
+			} : null,
 			ictoIn: null,
 			a: t[0],
 			b: t[n - 1],
@@ -15577,6 +15959,7 @@
 				ictoIn: null,
 				nT: 0,
 				dur: t[n - 1],
+				span: t[n - 1],
 				fs: n > 1 ? (n - 1) / (t[n - 1] - t[0]) : NaN,
 				activityIn: {
 					t,
@@ -15768,6 +16151,7 @@
 				fno: null,
 				wit,
 				dur: t[n - 1],
+				span: t[n - 1],
 				fs: dt > 0 ? 1 / dt : NaN
 			});
 		}
@@ -16806,24 +17190,96 @@
 	function initAxisPage() {
 		bind();
 	}
-	// src/main.ts
-	function markY(which) {
-		document.querySelectorAll("[data-y]").forEach((b) => {
-			if (which === "auto") b.classList.toggle("on", b.dataset.y === "auto");
-			else b.classList.toggle("on", state.auto ? b.dataset.y === "auto" : +b.dataset.y === state.ymax);
+	// src/help.ts
+	var TAB_SEC = {
+		wave: "wave",
+		cop: "cop",
+		zero: "zero",
+		gap: "gap",
+		imu: "imu",
+		axis: "axis",
+		activity: "activity",
+		action: "action"
+	};
+	var opener = null;
+	function box() {
+		return document.getElementById("help");
+	}
+	function opened() {
+		return !!box() && !box().hidden;
+	}
+	function sections() {
+		return [...document.querySelectorAll("[data-help]")];
+	}
+	function mark(active) {
+		const id = active?.dataset.help;
+		document.querySelectorAll("#helpNav a").forEach((a) => a.classList.toggle("on", a.dataset.sec === id));
+	}
+	function buildNav(nav) {
+		nav.innerHTML = "";
+		for (const s of sections()) {
+			const a = document.createElement("a");
+			a.href = "#";
+			a.dataset.sec = s.dataset.help;
+			a.textContent = s.dataset.title || s.dataset.help;
+			a.addEventListener("click", (ev) => {
+				ev.preventDefault();
+				const text = document.getElementById("helpText");
+				if (text) text.scrollTop = s.offsetTop - text.offsetTop;
+				mark(s);
+			});
+			nav.appendChild(a);
+		}
+	}
+	function openHelp(id) {
+		const b = box();
+		if (!b) return;
+		b.hidden = false;
+		document.body.classList.add("help-open");
+		const nav = document.getElementById("helpNav");
+		if (nav && !nav.childElementCount) buildNav(nav);
+		const key = id || TAB_SEC[state.tab] || (document.body.dataset.page === "axis" ? "axis" : "file");
+		const target = document.querySelector(`[data-help="${key}"]`) || document.querySelector("[data-help=\"file\"]");
+		const text = document.getElementById("helpText");
+		if (text) text.scrollTop = target ? target.offsetTop - text.offsetTop : 0;
+		mark(target);
+		document.getElementById("helpClose")?.focus();
+	}
+	function closeHelp() {
+		const b = box();
+		if (!b || b.hidden) return;
+		b.hidden = true;
+		document.body.classList.remove("help-open");
+		if (opener) opener.focus();
+	}
+	function bindHelp() {
+		const btn = document.getElementById("helpBtn");
+		if (!btn) return;
+		opener = btn;
+		btn.addEventListener("click", () => openHelp());
+		document.getElementById("helpClose")?.addEventListener("click", closeHelp);
+		document.getElementById("helpMask")?.addEventListener("click", closeHelp);
+		document.getElementById("helpFoot")?.addEventListener("click", () => {
+			opener = document.getElementById("helpFoot");
+			openHelp("file");
 		});
+		window.addEventListener("keydown", (ev) => {
+			if (ev.key === "Escape" && opened()) {
+				ev.stopPropagation();
+				closeHelp();
+			}
+		}, true);
+	}
+	// src/main.ts
+	function markY() {
+		document.querySelectorAll("[data-y=\"auto\"]").forEach((b) => b.classList.toggle("on", state.auto));
 	}
 	function bindYButtons() {
 		document.querySelectorAll("[data-y]").forEach((b) => b.addEventListener("click", () => {
-			if (b.dataset.y === "auto") {
-				state.auto = true;
-				state.ymax = niceMax(state.gmax);
-			} else {
-				state.auto = false;
-				state.ymax = +b.dataset.y;
-			}
+			state.auto = true;
+			state.ymax = niceMax(state.gmax);
 			el$1.ymax.value = Math.round(state.ymax);
-			markY(b.dataset.y === "auto" ? "auto" : null);
+			markY();
 			redrawWave();
 		}));
 	}
@@ -16921,6 +17377,11 @@
 		};
 		el$1.imuYauto.addEventListener("click", () => imuAuto(false));
 		el$1.imuYfit.addEventListener("click", () => imuAuto(true));
+		for (const [btn, key] of [[el$1.imuTempOn, "imuTemp"], [el$1.imuAngOn, "imuAng"]]) btn.addEventListener("click", () => {
+			state[key] = !state[key];
+			btn.classList.toggle("on", state[key]);
+			if (state.tab === "imu") redrawImu();
+		});
 		el$1.imuRun.addEventListener("click", () => {
 			analyzeActivity();
 		});
@@ -16941,6 +17402,7 @@
 		el$1.scrub.after(el$1.imuOvBar);
 		bindOverview();
 		bindScrub();
+		bindVideo();
 		el$1.axisTools.addEventListener("click", (e) => {
 			const b = e.target.closest("button[data-range],button[data-sens]");
 			if (!b || b.disabled) return;
@@ -16994,7 +17456,7 @@
 			if (v > 0) {
 				state.auto = false;
 				state.ymax = v;
-				markY(null);
+				markY();
 				redrawWave();
 			}
 		});
@@ -17014,7 +17476,7 @@
 		});
 		document.addEventListener("keydown", (ev) => {
 			const tag = ev.target && ev.target.tagName || "";
-			if (/^(INPUT|TEXTAREA|SELECT|BUTTON|A)$/.test(tag) || ev.target?.isContentEditable) return;
+			if (/^(INPUT|TEXTAREA|SELECT|BUTTON|A|VIDEO)$/.test(tag) || ev.target?.isContentEditable) return;
 			if (ev.key === "Escape") {
 				if (state.detail) closeDetail();
 				return;
@@ -17080,6 +17542,7 @@
 	}
 	function boot() {
 		if (el$1.ver) el$1.ver.textContent = "v" + APP_VER;
+		bindHelp();
 		if (document.body.dataset.page === "axis") initAxisPage();
 		else bindViewer();
 	}

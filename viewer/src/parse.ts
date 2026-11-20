@@ -4,7 +4,7 @@ import {ParquetHQ} from './data/parquet';
 import {spreadNotified} from './data/notification-time';
 import {renderAll, setTab, updateChips} from './app';
 import {renderAxis} from './axis';
-import {NCH} from './core/constants';
+import {NCH, SIDE_CN} from './core/constants';
 import {el} from './core/dom';
 import {state} from './core/state';
 import {blkOf, clearErr, fail, niceMax} from './core/util';
@@ -13,6 +13,7 @@ import {clearOvCache, redrawImu} from './imu';
 import {lodDone, lodFeed, lodInit, useLod} from './lod';
 import {drawScrub, ovFeed, ovInitAll} from './scrub';
 import {redrawWave, updateWinBar} from './timewin';
+import {attachVideo, clearVideo} from './video';
 
 // ---------------------------------------------------------------- 解析
 // 本次解析的结果存成参考数据而不是主数据：只用来给轴向页对齐时间戳、切动作段
@@ -31,6 +32,8 @@ function errLoc(e) {
 async function parse(file: File, opt?: {asRef?: boolean}) {
   asRef = !!(opt && opt.asRef);
   el.busy.hidden = false;
+  // 上一份文件的视频不能留到这一份：解析失败时更要收掉
+  if (!asRef) clearVideo();
   await new Promise(r => setTimeout(r, 30));
   try { await parseFile(file); }
   // 解析里的意外异常（而不是显式 fail）也得让人看见：否则页面只是「什么都没发生」
@@ -275,10 +278,11 @@ function expandSides(groups) {
       axes: Array.from({length: 6}, (_, j) => Float32Array.from(g.iph, ph => numOrNaN(ph?.[j])))};
     const temp = tHi >= tLo ? tp : null;
     sides.push({ activityIn, side, n, nch, t, ch, mx, mn, zc, miss, imu, fno: hasSeq ? fno : null,
-                 temp, tLo, tHi, t0, ictoIn, nT: nDrop, cal: g.cal, dur: t[n - 1],
+                 temp, tLo, tHi, t0, ictoIn, nT: nDrop, cal: g.cal, dur: t[n - 1], span: t[n - 1],
                  fs: n > 1 ? 1 / (dt / (n - 1)) : NaN,
                  // 绘图一律读 blk：整段载入时与上面是同一批数组，懒加载时只含窗口内的帧
-                 blk: {n, t, ch, imu, temp, ictoIn, a: t[0], b: t[n - 1]} });
+                 blk: {n, t, ch, imu, temp, ictoIn, a: t[0], b: t[n - 1],
+                       deviceAngles: deviceAngleArrays(g.deviceAngles)} });
   }
   sides.sort((a, b) => a.side.localeCompare(b.side));
   return sides;
@@ -335,12 +339,28 @@ const IMU_COLS = ['accelerationG', 'angularVelocityDps', 'accelerationRaw', 'ang
 const SKIP_TYPE = {magnetic: 1, deviceQuaternion: 1};
 const isSignalType = ft => !ft || !SKIP_TYPE[ft];
 
-// 摆放位置 -> 侧别：新包只在 manifest 的 placement 里写 leftInsole / rightInsole
+// 摆放位置 -> 侧别键。压力页、步态对比都按「脚」组织，所以足部两个位置仍归一成 left / right；
+// 其余位置（腕 / 腰 / 胸…）各占一个键，用位置原词。早先只按 left/right 前缀归一，
+// 一包同时带右踝和右腕时两条流会抢同一个 right，被下面的判重当成「右踝重复导入」直接拒收。
+const FOOT_PLACE = /(insole|ankle|foot|instep|shoe)/;
+const PLACE_CN = {insole: '鞋垫', ankle: '踝', foot: '足', instep: '足背', shoe: '鞋',
+  wrist: '腕', hand: '手', arm: '臂', waist: '腰', hip: '髋', chest: '胸', back: '背',
+  thigh: '大腿', knee: '膝', shank: '小腿', calf: '小腿', head: '头'};
 function sideOfPlacement(p) {
   const k = String(p || '').toLowerCase();
-  if (k.indexOf('left') === 0) return 'left';
-  if (k.indexOf('right') === 0) return 'right';
-  return 'unknown';
+  if (FOOT_PLACE.test(k)) return k.startsWith('right') ? 'right' : k.startsWith('left') ? 'left' : 'unknown';
+  return k || 'unknown';
+}
+
+// 非足部位置的显示名：manifest 里只有 leftWrist 这种驼峰英文，面板标题直接印英文不便于现场核对。
+// 名字注册进 SIDE_CN，各处仍只读 SIDE_CN，不必逐处判断流是不是脚。
+function registerSideLabel(key, src) {
+  if (key === 'left' || key === 'right') return;
+  if (SIDE_CN[key]) return;
+  const k = String(src.placement || '').toLowerCase();
+  const seg = Object.keys(PLACE_CN).find(x => k.indexOf(x) >= 0);
+  const side = k.startsWith('left') ? '左' : k.startsWith('right') ? '右' : '';
+  SIDE_CN[key] = seg ? side + PLACE_CN[seg] : (src.bluetoothName || k || '未标注位置');
 }
 
 // 极简 zip 读取：只认 store / deflate，解压交给浏览器自带的 DecompressionStream（file:// 下也可用）。
@@ -445,6 +465,17 @@ const gyroOf = r => {
 };
 const phys6 = r => struct6(r.accelerationG, gyroOf(r));
 
+// 测量包可以带一段现场视频：优先按 manifest 里声明的 videos/*，没有再扫包里的同名后缀。
+// 视频坏了不该连波形一起废掉，所以这里只返回 null，错误不外抛。
+const VIDEO_RE = /\.(mp4|m4v|mov|webm)$/i;
+async function packageVideo(zf, manifest) {
+  const declared = (manifest.outputs || []).map(o => o && o.path).filter(p => p && VIDEO_RE.test(p));
+  const all = declared.length ? declared : [...zf.keys()].filter(p => VIDEO_RE.test(p));
+  if (!all.length) return null;
+  const u8 = await unzipBytes(zf.get(all[0]));
+  return u8 && u8.byteLength ? {u8, name: all[0].split('/').pop(), total: all.length} : null;
+}
+
 async function parsePackage(file) {
   if (typeof DecompressionStream !== 'function') {
     fail('这个浏览器不支持页面内解压（DecompressionStream），请改用 Edge / Chrome。');
@@ -462,6 +493,9 @@ async function parsePackage(file) {
     }
     manifest = JSON.parse(new TextDecoder('utf-8').decode(m));
   } catch (e) { fail('读取压缩包失败：' + ((e && e.message) || e)); return; }
+
+  let media = null;
+  try { media = await packageVideo(zf, manifest); } catch { media = null; }
 
   const srcs = Array.isArray(manifest.sources) ? manifest.sources : [];
   if (!srcs.length) { fail('manifest 里没有 sources 段，判断不了每份帧文件属于哪只脚。'); return; }
@@ -482,7 +516,9 @@ async function parsePackage(file) {
     for (const src of srcs) {
       const paths = (bySrc.get(src.sourceId) || []).sort();   // frame-00001… 序号补零，字符串序即 part 序
       if (!paths.length) { fail('manifest 里的 source ' + src.sourceId + ' 没有对应的 frames/*.parquet。'); return; }
-      const job = {side: sideOfPlacement(src.placement), sourceId: src.sourceId,
+      const side = sideOfPlacement(src.placement);
+      registerSideLabel(side, src);
+      const job = {side, sourceId: src.sourceId, placement: src.placement,
         nch: Number(src.pressureChannelCount) || 0, files: [], nAll: 0};
       for (const path of paths) {
         const ab = await parquetBuffer(zf, path);
@@ -511,7 +547,7 @@ async function parsePackage(file) {
   const seen = new Map();      // side -> sourceId：同一侧只能有一条流
   for (const job of jobs) {
     if (seen.has(job.side)) {
-      fail(`压缩包里有两只来源都标成「${job.side}」（${seen.get(job.side)} 与 ${job.sourceId}）：`
+      fail(`压缩包里有两只来源都标成「${SIDE_CN[job.side] || job.side}」（${seen.get(job.side)} 与 ${job.sourceId}）：`
         + '查看器按侧组织面板，两条流不能合成一条；请把它们分到两个包里分别导入。');
       return;
     }
@@ -530,6 +566,7 @@ async function parsePackage(file) {
   rebaseCommon(sides);
   sides.sort((a, b) => a.side.localeCompare(b.side));
   applySides(sides, file.name, 'pressure', {rebuilt: false, src: srcInfo});
+  if (media) { try { attachVideo(media.u8, media.name, media.total); } catch { /* 视频挂不上就只没有视频 */ } }
   // 全段统计放后台跑，不挡住首屏；换文件时代数一变，旧扫描自己退出
   if (state.lazy) {
     const gen = dataGen;
@@ -586,7 +623,7 @@ async function buildLazySide(job) {
   const s = {
     side: job.side, lazy: true, files: job.files, nch,
     n, nAll: job.nAll, t: tt, fno, row: rr, t0,
-    dur: tt[n - 1], fs: n > 1 ? 1 / ((tt[n - 1] - tt[0]) / (n - 1)) : NaN,
+    dur: tt[n - 1], span: tt[n - 1], fs: n > 1 ? 1 / ((tt[n - 1] - tt[0]) / (n - 1)) : NaN,
     nT: job.nAll - n,
     // 全段统计（零值率 / 最大 / 温度范围 / 丢包）要扫一遍全表，扫描完成前留空
     ch: null, mx: null, mn: null, zc: null, miss: null,
@@ -676,6 +713,9 @@ function makeBlock(rows, nch, t0) {
   const ph = six(), rw = six();
   const phMax = new Float32Array(6), rwMax = new Float32Array(6);
   const tp = new Float64Array(n).fill(NaN);
+  // 设备角（pitchDeg / sideTiltDeg）按块读：懒加载的长包只有窗口块可画
+  const pit = new Float32Array(n).fill(NaN), tlt = new Float32Array(n).fill(NaN);
+  let nPit = 0, nTlt = 0;
   let hasPhys = false, hasRaw = false, tLo = Infinity, tHi = -Infinity;
   for (let k = 0; k < n; k++) {
     const r = rows[k];
@@ -688,10 +728,14 @@ function makeBlock(rows, nch, t0) {
     if (b) { hasRaw = true; for (let j = 0; j < 6; j++) { rw[j][k] = b[j]; const q = Math.abs(b[j]); if (q > rwMax[j]) rwMax[j] = q; } }
     const c = numOrNaN(r.temperatureCelsius);
     if (Number.isFinite(c)) { tp[k] = c; if (c < tLo) tLo = c; if (c > tHi) tHi = c; }
+    const pv2 = numOrNaN(r.pitchDeg), tv2 = numOrNaN(r.sideTiltDeg);
+    if (Number.isFinite(pv2)) { pit[k] = pv2; nPit++; }
+    if (Number.isFinite(tv2)) { tlt[k] = tv2; nTlt++; }
   }
   const imu = (hasPhys || hasRaw) ? {nch: 6, phys: hasPhys ? ph : null, raw: hasRaw ? rw : null, n, nPart: 0} : null;
+  const deviceAngles = (nPit || nTlt) ? {pitch: nPit ? pit : null, sideTilt: nTlt ? tlt : null} : null;
   return {
-    n, t, ch, imu, temp: tHi >= tLo ? tp : null, ictoIn: null,
+    n, t, ch, imu, temp: tHi >= tLo ? tp : null, deviceAngles, ictoIn: null,
     a: t[0], b: t[n - 1], tLo, tHi,
     imuMax: imu ? {phys: phMax, raw: rwMax} : null
   };
@@ -882,7 +926,7 @@ function parseWtJournal(bytes, name) {
   const sides = streams.flatMap((s, f) => {
     if (!s.t.length) return [];
     const t = Float64Array.from(s.t), phys = s.axes.map(a => Float32Array.from(a)), n = t.length, imu = {nch: 6, phys, raw: null, n, nPart: 0};
-    return [{side: f ? 'right' : 'left', n, nch: 0, t, ch: [], mx: new Float32Array(0), mn: new Float32Array(0), zc: new Float32Array(0), miss: new Float32Array(0), imu, fno: Float64Array.from(s.seq), temp: null, tLo: NaN, tHi: NaN, t0: 0, ictoIn: null, nT: 0, dur: t[n - 1], fs: n > 1 ? (n - 1) / (t[n - 1] - t[0]) : NaN,
+    return [{side: f ? 'right' : 'left', n, nch: 0, t, ch: [], mx: new Float32Array(0), mn: new Float32Array(0), zc: new Float32Array(0), miss: new Float32Array(0), imu, fno: Float64Array.from(s.seq), temp: null, tLo: NaN, tHi: NaN, t0: 0, ictoIn: null, nT: 0, dur: t[n - 1], span: t[n - 1], fs: n > 1 ? (n - 1) / (t[n - 1] - t[0]) : NaN,
       activityIn: {t, axes: phys, seq: Float64Array.from(s.seq), ok: Uint8Array.from(s.ok)}}];
   });
   if (!sides.length) throw new Error('WT 记录里没有可解码的 0x61 六轴通知');
@@ -1018,7 +1062,7 @@ async function parseWit(file) {
       zc: new Float32Array(0), miss: new Float32Array(0),
       imu: {nch: 6, phys: ch, raw: null, n, nPart: 0},
       temp: tHi >= tLo ? tp : null, tLo, tHi, t0: 0, ictoIn: witBad ? null : inp,
-      fno: null, wit, dur: t[n - 1], fs: dt > 0 ? 1 / dt : NaN
+      fno: null, wit, dur: t[n - 1], span: t[n - 1], fs: dt > 0 ? 1 / dt : NaN
     });
   }
   if (!sides.length) { fail('文件里的设备都没有足够的帧（每台至少 30 帧）。'); return; }

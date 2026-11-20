@@ -34,18 +34,3 @@ button.badge.hi:hover{filter:brightness(.96)}
   gap:14px; align-items:start; margin-top:14px;
 }
 .axcards .side{margin-top:0; min-width:0}
-@media (max-width:560px){
-  .axcards{grid-template-columns:1fr}
-}
-
-/* 主查看器右上角的入口：轴向推断现在有独立页，一眼能看到 */
-header{position:relative}
-header .entry{
-  position:absolute; top:20px; right:24px;
-  font-size:12px; padding:5px 12px; border-radius:8px; text-decoration:none;
-  color:var(--accent); background:var(--accent-soft); border:1px solid var(--line);
-}
-header .entry:hover{border-color:var(--accent)}
-@media (max-width:720px){
-  header .entry{position:static; display:inline-block; margin-top:8px}
-}

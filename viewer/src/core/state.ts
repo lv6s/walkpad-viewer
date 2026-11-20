@@ -1,6 +1,6 @@
 /* 全局状态与各视图的缓存。视图条目的形状由各自的绘图模块决定，这里只标注键。 */
 
-import type {DetailRef, ImuY, Overview, RefData, Side, SideId, SrcInfo, TabName, Win} from '../types';
+import type {DetailRef, ImuY, Overview, RefData, Side, SideId, SrcInfo, TabName, VideoInfo, Win} from '../types';
 
 export interface State {
   name: string;
@@ -48,6 +48,13 @@ export interface State {
   axisRange: string;
   axisSens: string;
   ref: RefData | null;
+  /** 包里带的现场视频；null = 这份文件没有视频 */
+  video: VideoInfo | null;
+  /** 视频当前时刻对应的会话时间（秒），null = 没有视频或已收起；IMU 页据此画游标 */
+  videoT: number | null;
+  /** IMU 页的窄带开关：温度、设备俯仰/侧倾角 */
+  imuTemp: boolean;
+  imuAng: boolean;
   gaitFocus: {side: SideId; ic: number; to: number; nextIc: number; peak?: number; algorithm: string;
     icUncertain?: boolean; nextIcUncertain?: boolean; note?: string} | null;
   icto: Map<SideId, any> | null;
@@ -74,7 +81,7 @@ export const state: State = {
   imuFit: false, imuDraw: 'line', imuGap: true, imuGapMs: 40, imuSeg: true, seg: null,
   axisRange: 'all', axisSens: 'auto',
   // 同一次录制的另一份 IMU：坐标系不同、轴向结论不能搬，但落地冲击时刻能搬，用来对齐和切段
-  ref: null,
+  ref: null, video: null, videoT: null, imuTemp: true, imuAng: true,
   gaitFocus: null, icto: null, ictoOn: false, ictoListOn: false
 };
 

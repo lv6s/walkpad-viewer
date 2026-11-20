@@ -54,6 +54,8 @@ export interface Block {
   ch: Float32Array[];
   imu: ImuData | null;
   temp: Float64Array | null;
+  /** 设备自报俯仰 / 侧倾角（度），列缺失或整段为空时为 null */
+  deviceAngles?: {pitch: Float32Array | null; sideTilt: Float32Array | null} | null;
   ictoIn: IctoInput | null;
   a: number;
   b: number;
@@ -122,7 +124,11 @@ export interface Side {
   nT: number;
   /** 角速度口径计数：ready = 用了包内扣偏值的帧，raw = 回落原始换算值的帧 */
   cal?: {ready: number; raw: number};
+  /** 时间轴末端时刻（秒，会话原点）；图表横轴按它铺，别当录制时长用 */
   dur: number;
+  /** 真实录制时长（末帧 − 首帧，秒）。一包里先出流的那台设备会把其余流的起点推到几秒之后，
+      这时 dur ≠ span —— 报「多久」一律用它。 */
+  span: number;
   /** 全段平均有效记录率 (n-1)/(t[last]-t[0]) */
   fs: number;
   /** 窗口块；整段载入时与上面的字段指向同一批数组 */
@@ -152,6 +158,21 @@ export interface SrcInfo {
   ver: string | null;
   ncols: number | null;
   tempCol: string | null;
+}
+
+/** 测量包里的现场视频。包内没有视频起点字段，offset 是显式口径：会话时刻 = 视频时刻 + offset。 */
+export interface VideoInfo {
+  url: string;
+  name: string;
+  bytes: number;
+  /** 视频 0 s 对应的会话时刻（秒） */
+  offset: number;
+  /** true = offset 还是推定值（视频结束 ≈ 录制结束）；手动改过就为 false */
+  auto: boolean;
+  /** 视频自身时长，元数据到达前是 NaN */
+  dur: number;
+  /** 包里一共几段视频（只播第一段，其余不静默假装存在） */
+  total: number;
 }
 
 export type Win = {a: number; b: number} | null;
