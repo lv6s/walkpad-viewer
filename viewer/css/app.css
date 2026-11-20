@@ -467,6 +467,20 @@
   .activity-warning{color:var(--warn);font-size:12px;border-left:3px solid var(--warn);padding-left:12px}
   .activity-legend{display:flex;gap:18px;flex-wrap:wrap;font-weight:600}
   .activity-card canvas{display:block;width:100%;border:1px solid var(--line);border-radius:6px}
+  #squatTimeline{height:108px;cursor:crosshair}
+  #squatVideoCursor{position:absolute;top:12px;bottom:24px;width:2px;background:var(--warn);pointer-events:none;transform:translateX(-50%);box-shadow:0 0 0 1px var(--bg)}
+  #squatVideoCursor[data-edge]::before{position:absolute;top:-8px;color:var(--warn);font-size:12px;line-height:1}
+  #squatVideoCursor[data-edge="left"]::before{content:'◀';right:3px}
+  #squatVideoCursor[data-edge="right"]::before{content:'▶';left:3px}
+  #squatVideoTime{margin:6px 0 0;color:var(--warn);font-variant-numeric:tabular-nums}
+  #squatRows .lnk{font-variant-numeric:tabular-nums}
+  #vidSeekStatus{color:var(--warn)}
+  .squat-legend{font-size:12px;margin-bottom:8px;color:var(--ink)}
+  .squat-legend span:nth-child(1)::first-letter{color:#74849a}
+  .squat-legend span:nth-child(2)::first-letter{color:#526cdb}
+  .squat-legend span:nth-child(3)::first-letter{color:#b87616}
+  .squat-legend span:nth-child(4)::first-letter{color:#178477}
+  .squat-legend span:nth-child(5)::first-letter{color:#a0a6b0}
   .activity-table{overflow:auto;max-height:480px}
   .activity-table table{border-collapse:collapse;width:100%;white-space:nowrap;font-variant-numeric:tabular-nums}
   .activity-table th,.activity-table td{text-align:left;padding:9px;border-bottom:1px solid var(--line)}
@@ -479,6 +493,7 @@
   #gaitMetrics{max-height:none}
   .gait-overview{margin:14px 0;padding:12px;background:var(--bg);border:1px solid var(--line);border-radius:var(--r-bar)}
   .gait-overview h2{margin-top:0}
+  .gait-overview td:nth-child(-n+4){font-size:16px;font-weight:600;font-variant-numeric:tabular-nums}
   .gait-overview .hint{margin-bottom:0}
   .gait-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(136px,1fr));gap:8px;margin:10px 0}
   .gait-kpis:empty{display:none}

@@ -42,6 +42,24 @@ async function analyze() {
   await page.waitForFunction(() => /分析完成|分析失败|计算失败/.test(document.getElementById('activityStatus').textContent));
   assert.match(await page.locator('#activityStatus').textContent(), /分析完成/);
 }
+async function checkOverview() {
+  const overview = await page.locator('#gaitOverviewRows tr').evaluateAll(rows => rows.map(r => [...r.cells].slice(0, 5).map(c => c.textContent)));
+  const events = await page.locator('#activityRows tr').evaluateAll(rows => rows.map(r => [...r.cells].map(c => c.textContent)));
+  assert.deepEqual(overview.map(row => row[0]), ['步行', '跑步']);
+  for (const [state, duration, steps, cadence, coverage] of overview) {
+    const segments = events.filter(r => r[4] === state);
+    assert.equal(+duration, Math.round(100 * segments.reduce((x, r) => x + Number(r[3]), 0)) / 100);
+    const valid = segments.filter(r => r[7] !== '—');
+    if (!valid.length) assert.deepEqual([steps, cadence], ['—', '—']);
+    else {
+      assert.equal(+steps, valid.reduce((x, r) => x + Number(r[7]), 0));
+      const seconds = Number(coverage.split(' · ')[0]);
+      assert.ok(seconds > 0 && seconds <= +duration);
+      assert.ok(+cadence >= 60 * +steps / (seconds + .005) - .05 && +cadence <= 60 * +steps / (seconds - .005) + .05);
+    }
+  }
+  return overview;
+}
 // 加速度栏整片的平均颜色：底色开关只改背景，不改波形，平均色差就是底色的贡献
 async function imuPatch() {
   return page.evaluate(() => {
@@ -157,12 +175,50 @@ try {
     assert.deepEqual(select('步行'), abnormal ? [] : [[1.7, 14.9], [19, 30.5]]);
     assert.deepEqual(select('跑步'), []);
     assert.ok(rows.some(r => r[4] === '其他' && r[5] === '—' && r[8].includes('摆动偏低')));
+    const overview = await checkOverview();
+    assert.deepEqual(overview[1].slice(1, 4), ['0.00', '—', '—']);
+    if (abnormal) assert.deepEqual(overview[0].slice(1, 4), ['0.00', '—', '—']);
+    else assert.equal(overview[0][1], '24.70');
+    console.log('PASS D56 gait overview', JSON.stringify(overview));
   }
   if (process.env.D56_EXTRACTION_RUN_ZIP) {
     const buffer = fs.readFileSync(process.env.D56_EXTRACTION_RUN_ZIP);
     await importFile({name: 'd56-run.zip', mimeType: 'application/zip', buffer}); await analyze();
     const segments = await page.locator('#activityRows tr').evaluateAll(rows => rows.filter(r => r.cells[4].textContent === '跑步').map(r => Number(r.cells[3].textContent)));
     assert.deepEqual(segments, [60.6]);
+  }
+  if (process.env.D56_COMPLEX_GAIT_ZIP) {
+    const buffer = fs.readFileSync(process.env.D56_COMPLEX_GAIT_ZIP);
+    await importFile({name: 'd56-complex-gait.zip', mimeType: 'application/zip', buffer}); await analyze();
+    const cases = [[3, '步行', 2.5, '支撑'], [15, '跑步', 72.2, '腾空'], [17, '跑步', 84.5, '腾空']];
+    const outputs = [];
+    for (const [index, state, start, metric] of cases) {
+      const event = page.locator('#activityRows tr').nth(index - 1);
+      assert.equal(await event.locator('td').nth(4).textContent(), state);
+      assert.equal(Number(await event.locator('td').nth(1).textContent()), start);
+      await event.click();
+      const cells = await event.locator('td').allTextContents();
+      assert.deepEqual((await page.locator('#gaitCompare strong').allTextContents()).slice(0, 3), [cells[3], cells[7], cells[6]]);
+      const states = await page.locator('#gaitPhaseRows th').allTextContents();
+      assert.deepEqual(states, ['仅左脚支撑', '仅右脚支撑', '双脚支撑', '双脚腾空']);
+      const values = await page.locator('#gaitPhaseRows td').allTextContents();
+      const coverage = await page.locator('#gaitPhaseCoverage').textContent();
+      const known = Number(/双脚可判定 ([\d.]+)/.exec(coverage)[1]);
+      const totals = values.map(v => /^([\d.]+) s · ([\d.]+)%$/.exec(v).slice(1).map(Number));
+      assert.ok(Math.abs(totals.reduce((sum, [s]) => sum + s, 0) - known) <= .026);
+      assert.ok(Math.abs(totals.reduce((sum, [, pct]) => sum + pct, 0) - 100) <= .201);
+      assert.equal(cells[9], `双脚${metric} ${values[metric === '支撑' ? 2 : 3]}`);
+      outputs.push({index, coverage, values});
+    }
+    console.log('PASS D56 complex segment phase estimates', JSON.stringify(outputs));
+    const legacy = await checkOverview();
+    assert.deepEqual(legacy.map(r => r[1]), ['22.20', '21.00']);
+    await page.selectOption('#activityIctoVersion', 'running');
+    const experimental = await checkOverview();
+    assert.deepEqual(experimental[0], legacy[0]);
+    assert.equal(experimental[1][1], legacy[1][1]);
+    await page.selectOption('#activityIctoVersion', 'legacy');
+    console.log('PASS D56 mixed walking/running overview', JSON.stringify(legacy));
   }
   await importFile('dual_gap.zip');
   console.log('PASS raw Moticon TAS and gait extraction options, gap isolation, model-tagged CSV and optional D56 replay');
@@ -225,8 +281,8 @@ try {
   if (fs.existsSync(walk)) {
     await importFile(wtWalkZip(JSON.parse(fs.readFileSync(walk))['64步.zip'])); await analyze();
     const heads = await page.locator('#activityRows').evaluate(tb => [...tb.closest('table').tHead.rows[0].cells].map(c => c.textContent));
-    assert.equal(heads.length, 9);
-    assert.match(heads[6], /平均步频/); assert.match(heads[7], /有效步数/);
+    assert.equal(heads.length, 10);
+    assert.match(heads[6], /平均步频/); assert.match(heads[7], /有效步数/); assert.match(heads[9], /双脚支撑 \/ 腾空/);
     const walkRows = page.locator('#activityRows tr').filter({has: page.getByRole('cell', {name: '步行', exact: true})});
     assert.ok(await walkRows.evaluateAll(rs => rs.some(r => Number(r.cells[6].textContent) > 0 && /^\d+$/.test(r.cells[7].textContent) && Number(r.cells[7].textContent) > 0)), '步行段应显示平均步频与有效步数');
     const overviewText = await page.locator('#activityGaitOverview').textContent();
@@ -240,6 +296,8 @@ try {
     assert.ok(contact.slice(1).every(v => /\d/.test(v) || /—|未提供/.test(v)), `接地均值列应为数值或未提供：${contact}`);
     const impact = await page.locator('#gaitMetricRows tr').filter({hasText: /平均三轴加速度合量峰值/}).locator('.gait-sample').allTextContents();
     assert.ok(impact.some(v => /^[1-9]\d* \/ \d+ 步$/.test(v)), `实际步行应有可报告的均值：${impact}`);
+    assert.match(await page.locator('#gaitPhaseCoverage').textContent(), /双脚只有手机接收时间/);
+    assert.deepEqual(await page.locator('#gaitPhaseRows td').allTextContents(), ['—', '—', '—', '—']);
     await page.locator('#gaitCoverage summary').click();
     assert.ok(await page.locator('#gaitCountable').isVisible());
     assert.match((await page.locator('#gaitCountable').textContent()).trim(), /^可计步区间/);
@@ -344,8 +402,8 @@ try {
     const overview = page.locator('#gaitOverviewRows tr');
     assert.equal(await overview.count(), 2);
     const runCells = overview.nth(1).locator('td');
-    assert.ok(Number(await runCells.nth(2).textContent()) > 0, '跑步概览应有有效步数');
-    assert.ok(Number(await runCells.nth(3).textContent()) > 0, '跑步概览应有平均步频');
+    assert.ok(Number(await runCells.nth(1).textContent()) > 0, '跑步概览应有有效步数');
+    assert.ok(Number(await runCells.nth(2).textContent()) > 0, '跑步概览应有平均步频');
     assert.equal(await overview.locator('progress').count(), 2);
     const overviewWalk = await overview.first().innerText(), overviewRun = await overview.nth(1).innerText();
     const runs = page.locator('#activityRows tr').filter({has: page.getByRole('cell', {name: '跑步', exact: true})});

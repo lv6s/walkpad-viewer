@@ -39,6 +39,19 @@ python launch_workbench.py --legacy # 旧版维特多设备页面
 - 独立 IMU 导出 `pressure_status='absent'`、压力数组留空，不写 70 个 0 冒充实测零压。
 - CSV 转 parquet：`python csv2parquet.py <in.csv> [out.parquet]`。
 
+## 摄像头实时动作识别
+
+在采集工作台勾选「摄像头」，开启设备后选择「ID 识别模型」，再点「实时动作识别」。预览层显示 ID、动作或候选及已完成的深蹲次数。
+
+- **ByteTrack（原版）**：默认模式，使用跟踪器轨迹 ID；离场、遮挡后可能换号。
+- **人体重识别（ReID）**：同一次实时识别内，人员离场再入画时尝试恢复原 ID 和已确认的深蹲次数，不续接未完成动作。特征只留在当前会话内存，不识别人脸、不绑定设备；相似外观、遮挡或角度变化仍可能换号或错配。
+
+切换模型、旋转或镜像需重新开启识别；新识别会话不沿用旧 ID。实时动作规则不等同于离线 v4.9.8；跑步和上下楼只报候选。识别不写入录像、IMU 记录或导出文件。
+
+默认「推理：工作站」：公司局域网双向 TLS 只传识别用的压缩画面帧和结果，帧不在工作站保存；摄像头预览、录像及 IMU 仍在本机。工作站不可用时可手动切换「推理：本机」，不会自动把识别转到其他位置。
+
+两端用原版 `yolo26s-pose.pt`（`runtime/vision/`，启动时校验 SHA-256），视觉依赖可置于 `runtime/vision/deps/`。ReID 使用 [Open Model Zoo 的 person-reidentification-retail-0288](https://docs.openvino.ai/2023.3/omz_models_model_person_reidentification_retail_0288.html)（FP32 `.xml`/`.bin` 同置于 `runtime/vision/`），在 CPU 上运行；OpenVINO 依赖可置于 `runtime/vision/reid-deps/`。工作站以 `python -m backend.vision_workstation --host <内网地址> --port 18843` 启动，只允许单会话并选择一张空闲 GPU。本机 `runtime/vision/workstation.json` 配置 `host`、`port`。两端 `runtime/vision/tls/` 各自保存私有 CA 签发的本端证书和密钥及 `ca.crt`；权重、证书、密钥和本地配置不入库。
+
 ## 目录
 
 ```

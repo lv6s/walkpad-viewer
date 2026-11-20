@@ -160,15 +160,15 @@ export interface SrcInfo {
   tempCol: string | null;
 }
 
-/** 测量包里的现场视频。包内没有视频起点字段，offset 是显式口径：会话时刻 = 视频时刻 + offset。 */
+/** 会话时刻 = 视频时刻 + offset。 */
 export interface VideoInfo {
   url: string;
+  blob: Blob;
   name: string;
   bytes: number;
-  /** 视频 0 s 对应的会话时刻（秒） */
   offset: number;
-  /** true = offset 还是推定值（视频结束 ≈ 录制结束）；手动改过就为 false */
-  auto: boolean;
+  offsetSource: 'estimate' | 'verified' | 'firstBottom' | 'motion' | 'manual';
+  verifiedOffset?: number;
   /** 视频自身时长，元数据到达前是 NaN */
   dur: number;
   /** 包里一共几段视频（只播第一段，其余不静默假装存在） */
@@ -177,7 +177,7 @@ export interface VideoInfo {
 
 export type Win = {a: number; b: number} | null;
 
-export type TabName = 'wave' | 'cop' | 'zero' | 'gap' | 'imu' | 'axis' | 'activity' | 'action';
+export type TabName = 'wave' | 'cop' | 'zero' | 'gap' | 'imu' | 'axis' | 'activity' | 'squat';
 
 export interface DetailRef {
   side: SideId;

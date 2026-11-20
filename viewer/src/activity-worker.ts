@@ -38,7 +38,7 @@ const dispatch = (contract, inputs, duration, progress) =>
   contract.kind === 'moticon-tas' ? analyzeMoticonTas(engine, inputs, duration, progress)
     : contract.kind === 'gait-window' ? analyzeGaitWindow(engine, contract.id, inputs, duration, progress, contract.reviewGait)
     : engine.analyze(contract, inputs, duration, progress);
-self.onmessage = async ({data: {contract, inputs, duration}}) => {
+self.onmessage = async ({data: {contract, inputs, duration, receiptTiming}}) => {
   try {
     const progress = (value: number) => self.postMessage({progress: value});
     let result;
@@ -62,7 +62,7 @@ self.onmessage = async ({data: {contract, inputs, duration}}) => {
           return {side, t0: 0, inp, accAtRail: s.accAtRail, deviceAngles: s.deviceAngles, rec: ictoDetectRows(inp, side, 'activity')};
         } catch { failed.push(side); return {side, t0: 0, inp: null, rec: null}; }
       });
-      try { report = gaitReport(segments, sides); } catch { reportError = true; }
+      try { report = gaitReport(segments, sides, false, !receiptTiming); } catch { reportError = true; }
       const runs = segments.map((s, i) => s.cls === 1 ? i : -1).filter(i => i >= 0);
       const runSegments = runs.map(i => segments[i]);
       const diagnostics = (events: GaitSideInput[]) => {
@@ -75,7 +75,7 @@ self.onmessage = async ({data: {contract, inputs, duration}}) => {
         try {
           const refined = sides.map(s => refineRunning(s, runSegments));
           if (refined.some((s, i) => s !== sides[i])) {
-            const newReport = gaitReport(segments, refined, true);
+            const newReport = gaitReport(segments, refined, true, !receiptTiming);
             try { runningGait = diagnostics(refined); } catch { debugError = true; }
             refinedRunReport = newReport;
           }

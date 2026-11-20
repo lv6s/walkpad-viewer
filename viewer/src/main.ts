@@ -3,7 +3,7 @@
    区别只在渲染与接线，所以打成一个 bundle，按 body[data-page] 分派。 */
 
 import {analyzeActivity, initActivity, onActivityChange} from './activity';
-import {initAction} from './action';
+import {initSquat} from './squat';
 import {setTab} from './app';
 import {drawAxis, syncAxisUi} from './axis';
 import {initAxisPage} from './axis/page';
@@ -39,7 +39,7 @@ function bindYButtons(): void {
 /* ------------------------------------------------------------------ 主查看器 */
 function bindViewer(): void {
   initActivity();
-  initAction();
+  initSquat();
   el.tabs.addEventListener('click', (e: MouseEvent) => {
     const b = (e.target as HTMLElement).closest('.tab') as HTMLElement | null;
     if (b && !(b as HTMLButtonElement).disabled && b.dataset.tab !== state.tab) setTab(b.dataset.tab);

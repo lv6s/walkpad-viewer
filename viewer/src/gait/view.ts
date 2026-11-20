@@ -1,11 +1,14 @@
 import {ACTIVITY_STILL, SEG_CN, SIDE_CN} from '../core/constants';
 import type {ActivitySegment, GaitSegment} from './core';
 import {metricMean, reportSummary} from './walking';
-import type {FootMetric, GaitReportSegment, GaitStep, ReportSummary} from './walking';
+import type {FootMetric, GaitPhase, GaitPhaseTotals, GaitReportSegment, GaitStep, ReportSummary} from './walking';
 
 const $ = (id: string) => document.getElementById(id);
 const details = (id: string) => $(id) as HTMLDetailsElement;
 export const gaitFormat = (v: number, digits = 3) => Number.isFinite(v) ? v.toFixed(digits) : '—';
+const phaseLabels: Record<GaitPhase, string> = {leftOnlyMs: '仅左脚支撑', rightOnlyMs: '仅右脚支撑', doubleSupportMs: '双脚支撑', flightMs: '双脚腾空'};
+export const phaseValue = (p: GaitPhaseTotals | undefined, key: GaitPhase) => p?.knownMs
+  ? `${gaitFormat(p[key] / 1000, 2)} s · ${gaitFormat(100 * p[key] / p.knownMs, 1)}%` : '—';
 const PAGE_SIZE = 25;
 interface Focus {side: string; ic: number; to: number; nextIc?: number; peak?: number; at: number; icUncertain?: boolean; nextIcUncertain?: boolean; note?: string}
 let detail: GaitSegment, report: GaitReportSegment, current: ActivitySegment, page = 0, stepPage = 0, locate: (focus: Focus) => void;
@@ -32,9 +35,9 @@ function coverageCell(m: ReportSummary, numeric = true) {
 }
 export function renderGaitOverview(summaries: ReportSummary[], note: string) {
   const body = $('gaitOverviewRows'); body.replaceChildren();
-  summaries.forEach((m, cls) => row(body, [gaitBadge(cls, SEG_CN[cls]), m.durationMs ? gaitFormat(m.durationMs / 1000, 2) : '—', coverageCell(m),
-    gaitFormat(m.steps, 0), gaitFormat(m.cadence, 1), ['left', 'right'].map((side: 'left' | 'right') => gaitFormat(metricMean(m, side, 'contact'), 1)).join(' / ')], true));
-  $('gaitOverviewHint').textContent = ['步数仅统计有效覆盖内的候选事件；「—」表示无可报告值。', note].filter(Boolean).join(' ');
+  summaries.forEach((m, cls) => row(body, [gaitBadge(cls, SEG_CN[cls]), gaitFormat(m.durationMs / 1000, 2), gaitFormat(m.steps, 0),
+    gaitFormat(m.cadence, 1), coverageCell(m), ['left', 'right'].map((side: 'left' | 'right') => gaitFormat(metricMean(m, side, 'contact'), 1)).join(' / ')], true));
+  $('gaitOverviewHint').textContent = ['平均步频 = 60 × 有效步数 ÷ 双脚有效计步秒数。无有效计步覆盖时，步数和步频显示「—」。', note].filter(Boolean).join(' ');
 }
 
 function row(body: HTMLElement, values: (string | HTMLElement)[], head = false) {
@@ -114,7 +117,7 @@ export function initGaitDetail(onLocate: typeof locate) {
   $('gaitRules').textContent = '步行和跑步共用统计口径，按状态分别汇总。有效计步区间取双脚有内部 IC 候选支持的观察窗口交集，按状态段裁切，不跨断流，不含首尾补点。每个有效 IC 计一步；平均步频＝60 × 双脚步数 ÷ 有效计步秒数。接地＝同脚、同一步 TO − IC；缺可信 TO 仍可计步，但不算接地时长和离地角。左右差＝右均值 − 左均值。报告俯仰取同脚 IC、TO 对应帧的 App 设备俯仰，不用邻帧或估计值填空；足部俯仰估计仅供参考。三轴加速度合量峰值取触地后 [0, 100 ms) 内三轴原采样合量的最大值，包含重力，不是垂向加速度或地面反作用力。窗口不完整、断流或疑似削顶时留空，不滤波、不插值。峰时为录制时刻，平均峰值延迟为峰时减 IC。IC/TO 为 IMU 估计，毫秒是单位，不代表精度。';
 }
 
-export function renderGaitDetail(g: GaitSegment, w: GaitReportSegment, s: ActivitySegment, index: number, experimental = false) {
+export function renderGaitDetail(g: GaitSegment, w: GaitReportSegment, s: ActivitySegment, index: number, experimental = false, receiptTiming = false) {
   const panel = $('gaitDetail'), periods = details('gaitPeriods'), steps = details('gaitSteps'), coverage = details('gaitCoverage');
   panel.hidden = !s;
   if (current !== s) {
@@ -133,7 +136,7 @@ export function renderGaitDetail(g: GaitSegment, w: GaitReportSegment, s: Activi
   if (!s) { ($('gaitStepAngleSource') as HTMLSelectElement).value = 'device'; return; }
   const modelStill = s.cls === ACTIVITY_STILL && s.confidence != null, gait = s.cls === 0 || s.cls === 1;
   $('gaitTitle').textContent = `第 ${index + 1} 段 · ${modelStill ? '静止' : SEG_CN[s.cls]} · ${gaitFormat(s.a, 2)}–${gaitFormat(s.b, 2)} s`;
-  $('gaitMetrics').hidden = $('gaitSamples').hidden = !gait;
+  $('gaitMetrics').hidden = $('gaitSamples').hidden = $('gaitPhase').hidden = !gait;
   periods.hidden = s.cls !== 1 || !g?.cells.some(c => c.periods.length);
   steps.hidden = !w?.steps.length;
   coverage.hidden = !w?.countable_intervals.length;
@@ -148,8 +151,16 @@ export function renderGaitDetail(g: GaitSegment, w: GaitReportSegment, s: Activi
   const kpi = (label: string, value: string, extra?: HTMLElement) => {
     const el = text('div', '', 'gait-kpi'); el.append(text('small', label), text('strong', value)); if (extra) el.append(extra); kpis.append(el);
   };
+  kpi('识别时长（s）', gaitFormat(m.durationMs / 1000, 2));
   kpi('有效步数', gaitFormat(m.steps, 0)); kpi('平均步频（步/分）', gaitFormat(m.cadence, 1));
-  kpi('有效计步 / 识别（s）', `${gaitFormat(m.countableMs / 1000, 2)} / ${gaitFormat(m.durationMs / 1000, 2)}`, coverageCell(m, false));
+  kpi('有效计步（s）', gaitFormat(m.countableMs / 1000, 2), coverageCell(m, false));
+  const phase = w?.phaseTotals, phaseBody = $('gaitPhaseRows'); phaseBody.replaceChildren();
+  $('gaitPhaseTitle').textContent = '本段双脚支撑与腾空（IMU 估计）';
+  $('gaitPhaseCoverage').textContent = receiptTiming ? '双脚只有手机接收时间，传输延迟未知，不报告支撑或腾空比例。'
+    : `双脚可判定 ${gaitFormat((phase?.knownMs ?? 0) / 1000, 2)} / 段长 ${gaitFormat(m.durationMs / 1000, 2)} s`;
+  for (const key of Object.keys(phaseLabels) as GaitPhase[]) {
+    row(phaseBody, [phaseLabels[key], phaseValue(phase, key)], true);
+  }
   const stats: [FootMetric, string, number][] = [
     ['contact', '接地均值（ms）', 1], ['ic', '触地设备俯仰均值（°）', 1], ['to', '离地设备俯仰均值（°）', 1],
     ['impact', '平均三轴加速度合量峰值（g）', 2], ['delay', '平均峰值延迟（ms）', 1]

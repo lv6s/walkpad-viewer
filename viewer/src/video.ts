@@ -1,10 +1,41 @@
-/* 测量包里的现场视频：浮窗播放，并用一个显式 offset 挂到会话时间轴上。
-   包内没有视频起点字段（manifest / timeline 都没有），所以起点只能推定或手填，
-   口径固定为「会话时刻 = 视频时刻 + offset」，不做任何隐式对齐。 */
-
 import {el} from './core/dom';
 import {state} from './core/state';
 import {paintVideoCursor} from './imu';
+import {squatInput, squatPackage} from './parse';
+import {paintSquatCursor} from './squat';
+import SquatWorker from './squat-worker?worker&inline';
+import {workstationCalibration} from './video-workstation';
+import type {CalibrationInput} from './squat-worker';
+import type {VideoInfo} from './types';
+
+const verifiedCaptures = new Map<number, [string, number]>([
+  [11216967, ['f900cebccd3ce29b99201189527493699dfdf3de99ac07d01b3960a29906d170', 5.358]],
+  [20155226, ['e3d882d9e37399ab61d7bdae4ee18db31671fb3e6b4d4ecae740afbd62a45b92', .011]],
+]);
+
+export async function verifiedVideoOffset(archive: ArrayBuffer): Promise<number | undefined> {
+  const entry = verifiedCaptures.get(archive.byteLength);
+  if (!entry || !globalThis.crypto?.subtle) return;
+  try {
+    const digest = await crypto.subtle.digest('SHA-256', archive);
+    const hex = Array.from(new Uint8Array(digest), x => x.toString(16).padStart(2, '0')).join('');
+    if (hex === entry[0]) return entry[1];
+  } catch { /* 哈希不可用时不按文件名或大小套用偏移。 */ }
+}
+
+let calibrationJob: AbortController;
+const cancelCalibration = () => calibrationJob?.abort();
+function startCalibration(): AbortController {
+  cancelCalibration();
+  el.vidAuto.disabled = el.vidFirstBottom.disabled = true;
+  return calibrationJob = new AbortController();
+}
+function finishCalibration(job: AbortController): void {
+  job.abort();
+  if (calibrationJob !== job) return;
+  calibrationJob = undefined;
+  el.vidAuto.disabled = el.vidFirstBottom.disabled = false;
+}
 
 const MIME: Record<string, string> = {
   mp4: 'video/mp4', m4v: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm'
@@ -15,13 +46,15 @@ const s2 = (v: number): string => Number.isFinite(v) ? v.toFixed(2) : '—';
 // 会话末端：视频起点推定要拿它当参照，取所有流里最晚的末端
 const sessionDur = (): number => state.sides.length ? Math.max(...state.sides.map(s => s.dur)) : 0;
 
-export function attachVideo(u8: Uint8Array, name: string, total = 1): void {
+export function attachVideo(u8: Uint8Array, name: string, total = 1, verifiedOffset?: number): void {
   clearVideo();
   const ext = (name.split('.').pop() || '').toLowerCase();
   // zip 里的字节是整包 buffer 上的视图，Blob 要独占的 ArrayBuffer 才收
   const ab = u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength) as ArrayBuffer;
-  const url = URL.createObjectURL(new Blob([ab], {type: MIME[ext] || 'video/mp4'}));
-  state.video = {url, name, bytes: u8.byteLength, offset: 0, auto: true, dur: NaN, total};
+  const blob = new Blob([ab], {type: MIME[ext] || 'video/mp4'});
+  const url = URL.createObjectURL(blob);
+  state.video = {url, blob, name, bytes: u8.byteLength, offset: verifiedOffset ?? 0,
+    offsetSource: verifiedOffset == null ? 'estimate' : 'verified', verifiedOffset, dur: NaN, total};
   if (el.vidToggle) el.vidToggle.hidden = false;
   if (el.vid) el.vid.src = url;
   if (el.vidPanel) el.vidPanel.hidden = false;
@@ -33,11 +66,13 @@ export function clearVideo(): void {
   const old = state.video;
   if (old) URL.revokeObjectURL(old.url);
   state.video = null;
-  state.videoT = null;
-  paintVideoCursor();
+  if (calibrationJob) finishCalibration(calibrationJob);
+  seekStatus('');
+  stopCursorLoop();
   if (el.vidToggle) el.vidToggle.hidden = true;
   if (el.vidPanel) el.vidPanel.hidden = true;
   if (el.vid) { el.vid.pause(); el.vid.removeAttribute('src'); el.vid.load(); }
+  syncTime();
 }
 
 /** 起点推定：录制在停止时收尾，视频结束大致就是会话结束，据此反推视频 0 s 落在哪 */
@@ -49,12 +84,32 @@ function guessOffset(): number {
   return Math.max(0, Math.round((D - vid.dur) * 100) / 100);
 }
 
-// 视频时刻 → 会话时刻。IMU 页的游标只读 state.videoT，所以这里写一次就够
-// （暂停时保留最后位置，方便停下来对着波形看）
 function syncTime(): void {
   const vid = state.video;
-  state.videoT = vid && el.vid ? (el.vid.currentTime || 0) + vid.offset : null;
-  paintVideoCursor();
+  const t = vid && el.vid?.readyState >= 1 && !el.vid.error && !el.vidPanel?.hidden ? el.vid.currentTime + vid.offset : null;
+  if (el.vidNow) el.vidNow.textContent = nowText();
+  const changed = state.videoT !== t;
+  state.videoT = t;
+  if (changed) paintVideoCursor();
+  paintSquatCursor();
+}
+
+let cursorFrame = 0;
+function stopCursorLoop(): void {
+  if (cursorFrame) cancelAnimationFrame(cursorFrame);
+  cursorFrame = 0;
+}
+function startCursorLoop(): void {
+  if (cursorFrame || state.tab !== 'squat' || !state.video || el.vidPanel.hidden || el.vid.paused || el.vid.ended) return;
+  cursorFrame = requestAnimationFrame(() => {
+    cursorFrame = 0;
+    syncTime();
+    startCursorLoop();
+  });
+}
+export function syncVideoTab(): void {
+  if (state.tab === 'squat') startCursorLoop();
+  else stopCursorLoop();
 }
 
 function nowText(): string {
@@ -69,33 +124,141 @@ function renderVideo(): void {
   if (!vid || !el.vidPanel) return;
   el.vidName.textContent = `${vid.name} · ${s2(vid.dur)} s`
     + (vid.total > 1 ? `（包内共 ${vid.total} 段，只载入第一段）` : '');
-  if (document.activeElement !== el.vidOff) el.vidOff.value = vid.auto ? vid.offset.toFixed(2) : String(vid.offset);
-  el.vidNote.textContent = vid.auto ? '起点为推定值（视频结束 ≈ 录制结束）' : '起点为手动给定';
+  if (document.activeElement !== el.vidOff) el.vidOff.value = vid.offset.toFixed(3);
+  el.vidNote.textContent = {
+    estimate: '未校准 · 起点仅供定位' + (squatPackage(state.sides) ? '；可按普通深蹲动作自动校准' : ''),
+    verified: '已应用此采集包的落地校准',
+    firstBottom: '已按首次蹲底手动对时 · 单点估计，未校正漂移',
+    motion: '已由工作站 GPU 估计起点 · 非硬件对时',
+    manual: '起点为手动给定',
+  }[vid.offsetSource];
   el.vidNote.title = '会话时刻 = 视频时刻 + 起点；「跳到会话」只接受视频覆盖到的区间，越界会提示而不会贴边。';
-  el.vidNow.textContent = nowText();
   syncTime();
 }
 
-function setOffset(v: number, auto = false): void {
+function setOffset(v: number, source: VideoInfo['offsetSource'] = 'manual'): void {
   const vid = state.video;
   if (!vid || !Number.isFinite(v)) return;
   vid.offset = v;
-  vid.auto = auto;
+  vid.offsetSource = source;
+  cancelCalibration();
+  seekStatus('');
   renderVideo();
 }
 
-function seekSession(t: number): void {
+function runFirstBottom(input: CalibrationInput, signal: AbortSignal): Promise<number> {
+  const worker = new SquatWorker();
+  return new Promise<number>((ok, fail) => {
+    signal.throwIfAborted();
+    const end = (next:()=>void) => { clearTimeout(timer); signal.removeEventListener('abort',abort); next(); };
+    const abort = () => end(()=>fail(signal.reason));
+    const timer = setTimeout(()=>end(()=>fail(new Error('双踝对时计算超时。'))),12000);
+    signal.addEventListener('abort',abort,{once:true});
+    worker.onmessage = ({data}) => end(()=>{
+      if (!Number.isFinite(data.firstBottom)) fail(new Error(data.error || '后台对时没有返回结果。'));
+      else ok(data.firstBottom);
+    });
+    worker.onerror = e => {e.preventDefault(); end(()=>fail(new Error('后台对时无法运行。')));};
+    try { worker.postMessage(input,input.inputs.flatMap(s=>[s.t.buffer,s.receive.buffer,s.elapsed.buffer,s.values.buffer])); }
+    catch (e) { end(()=>fail(e)); }
+  }).finally(()=>worker.terminate());
+}
+
+async function calibrateMotion(): Promise<void> {
+  const vid = state.video, sides = state.sides, files = squatPackage(sides);
+  if (!vid || !Number.isFinite(vid.dur)) {seekStatus('请等视频加载完毕。'); return;}
+  if (vid.dur < 5 || vid.dur > 120) {seekStatus('工作站自动校准支持 5–120 秒的视频。'); return;}
+  if (!files) {seekStatus('自动校准需要同包的左右踝 IMU；不会使用鞋垫 IMU 替代。'); return;}
+  const controller = startCalibration();
+  const alive = () => !controller.signal.aborted && state.video===vid && state.sides===sides;
+  seekStatus('正在准备工作站 GPU 校准…');
+  try {
+    const inputs: CalibrationInput['inputs'] = [await squatInput(files[0], alive), await squatInput(files[1], alive)];
+    if (!alive()) return;
+    seekStatus('正在加密传输数据并等待工作站 GPU 校准…');
+    const timeout = AbortSignal.timeout(120000);
+    const fit = await workstationCalibration(vid.blob,sides[0].t0,inputs,AbortSignal.any([controller.signal,timeout]));
+    if (!alive()) return;
+    if (fit.status === 'rejected') {
+      const {best_candidate_seconds:a, alternative_seconds:b} = fit.diagnostics ?? {};
+      const detail = Number.isFinite(a) && Number.isFinite(b) ? `（${a.toFixed(2)} s 与 ${b.toFixed(2)} s）` : '';
+      const messages = {
+        ambiguous_motion: `工作站 GPU：动作节奏重复，多个偏移都吻合${detail}`,
+        gpu_unavailable: '工作站没有可用的校准 GPU，可能正在被占用或初始化失败',
+        worker_unavailable: '工作站 GPU 校准失败或超时',
+        insufficient_visible_knees_and_ankles: '视频中的膝踝可见性不足',
+        invalid_input: '工作站无法读取视频或双踝数据',
+      };
+      seekStatus(`${Object.hasOwn(messages,fit.reason) ? messages[fit.reason] : '工作站校准证据不足'}，未覆盖原值。`);
+      return;
+    }
+    el.vidOff.blur();
+    setOffset(fit.offset_seconds,'motion');
+    seekStatus(`工作站 GPU 已估计视频起点 ${fit.offset_seconds.toFixed(3)} s；预测结果不变。`);
+  } catch (e) {
+    if (alive()) seekStatus(`${e instanceof DOMException && e.name==='TimeoutError' ? '等待工作站 GPU 超时' : e instanceof Error ? e.message : String(e)}（原偏移保留）`);
+  } finally {
+    finishCalibration(controller);
+  }
+}
+
+async function calibrateFirstBottom(): Promise<void> {
+  const vid = state.video, v = el.vid;
+  if (!vid) return;
+  if (!Number.isFinite(vid.dur) || v.readyState < 2 || v.seeking || v.error) {
+    seekStatus('请等画面加载完成，再暂停在第一次蹲到最低的画面。'); return;
+  }
+  if (!v.paused || v.ended) { seekStatus('请暂停在第一次蹲到最低的画面，再点首次蹲底对时。'); return; }
+  const sides = state.sides, files = squatPackage(sides);
+  if (!files) { seekStatus('首次蹲底对时需要同一个采集包的左踝与右踝 IMU。'); return; }
+  const frame = v.currentTime, controller = startCalibration();
+  const {signal} = controller;
+  const alive = () => !signal.aborted && state.video === vid && state.sides === sides;
+  const moved = () => {
+    if (!alive()) return;
+    controller.abort();
+    seekStatus('视频位置已变化，原偏移保留。');
+  };
+  for (const event of ['seeking', 'play', 'error']) v.addEventListener(event, moved, {signal});
+  seekStatus('正在从整段双踝数据定位第 1 次完整深蹲…');
+  try {
+    const inputs: CalibrationInput['inputs'] = [await squatInput(files[0], alive), await squatInput(files[1], alive)];
+    if (!alive()) return;
+    const t = await runFirstBottom({inputs,origin:sides[0].t0,firstBottom:true},signal);
+    if (!alive()) return;
+    if (!v.paused || v.seeking || v.currentTime !== frame) { moved(); return; }
+    el.vidOff.blur();
+    setOffset(t-frame, 'firstBottom');
+    seekStatus(`视频 ${frame.toFixed(3)} s ↔ 双踝第 1 次蹲底中点 ${t.toFixed(3)} s。`);
+  } catch (e) {
+    if (alive()) seekStatus(`${e instanceof Error ? e.message : String(e)}（原偏移保留）`);
+  } finally {
+    finishCalibration(controller);
+  }
+}
+
+function seekStatus(text: string): void {
+  if (el.vidSeekStatus) {
+    el.vidSeekStatus.hidden = !text;
+    el.vidSeekStatus.textContent = text;
+  }
+}
+
+export function seekVideoSession(t: number, reveal = false): void {
   const vid = state.video;
   if (!vid || !el.vid || !Number.isFinite(t)) return;
-  const vt = t - vid.offset;
-  if (!(vt >= 0) || (Number.isFinite(vid.dur) && vt > vid.dur)) {
-    el.vidJump.setCustomValidity(`视频只覆盖会话 ${s2(vid.offset)}–${s2(vid.offset + (vid.dur || 0))} s。`);
-    el.vidJump.reportValidity();
+  if (reveal) toggleVideoPanel(true);
+  if (!Number.isFinite(vid.dur)) {
+    seekStatus('视频时间轴尚不可用。');
     return;
   }
-  el.vidJump.setCustomValidity('');
-  el.vid.currentTime = vt;
-  el.vidNow.textContent = nowText();
+  const vt = t - vid.offset;
+  if (vt < -1e-8 || vt > vid.dur + 1e-8) {
+    seekStatus(`视频只覆盖会话 ${s2(vid.offset)}–${s2(vid.offset + vid.dur)} s。`);
+    return;
+  }
+  seekStatus('');
+  el.vid.currentTime = Math.max(0, Math.min(vid.dur, vt));
   syncTime();
 }
 
@@ -113,9 +276,9 @@ function fitPanel(): void {
 export function toggleVideoPanel(show?: boolean): void {
   if (!el.vidPanel || !state.video) return;
   el.vidPanel.hidden = show == null ? !el.vidPanel.hidden : !show;
-  // 收起后游标也收掉：看不见视频还留一条线在波形上会让人对不上它是谁的
-  state.videoT = el.vidPanel.hidden ? null : (el.vid.currentTime || 0) + state.video.offset;
-  paintVideoCursor();
+  if (el.vidPanel.hidden) stopCursorLoop();
+  else startCursorLoop();
+  syncTime();
 }
 
 /* 拖动标题栏挪位置：浮窗压在波形上时得能挪开，挪过之后不再回到右下角 */
@@ -150,21 +313,28 @@ export function bindVideo(): void {
     const vid = state.video;
     if (!vid) return;
     vid.dur = el.vid.duration;
-    if (vid.auto) vid.offset = guessOffset();
+    if (vid.offsetSource === 'estimate') vid.offset = guessOffset();
     fitPanel();
     renderVideo();
   });
-  el.vid.addEventListener('timeupdate', () => { el.vidNow.textContent = nowText(); syncTime(); });
-  // 拖动视频进度条时 timeupdate 太稀，游标要跟手
-  el.vid.addEventListener('seeking', () => { el.vidNow.textContent = nowText(); syncTime(); });
+  for (const event of ['timeupdate', 'seeked']) el.vid.addEventListener(event, syncTime);
+  el.vid.addEventListener('seeking', () => { if (!calibrationJob) seekStatus(''); syncTime(); });
+  el.vid.addEventListener('playing', startCursorLoop);
+  for (const event of ['pause', 'ended', 'emptied']) el.vid.addEventListener(event, () => { stopCursorLoop(); syncTime(); });
+  el.vid.addEventListener('error', () => { stopCursorLoop(); syncTime(); seekStatus('视频无法解码或读取。'); });
   el.vidOff.addEventListener('input', () => {
     const v = parseFloat(el.vidOff.value);
     if (Number.isFinite(v)) setOffset(v);
   });
-  el.vidAuto.addEventListener('click', () => setOffset(guessOffset(), true));
+  el.vidAuto.addEventListener('click', () => {
+    const verified = state.video?.verifiedOffset;
+    if (verified != null) setOffset(verified, 'verified');
+    else void calibrateMotion();
+  });
+  el.vidFirstBottom.addEventListener('click', () => void calibrateFirstBottom());
   el.vidJump.addEventListener('keydown', (ev: KeyboardEvent) => {
     if (ev.key !== 'Enter') return;
     ev.preventDefault();
-    seekSession(parseFloat(el.vidJump.value));
+    seekVideoSession(parseFloat(el.vidJump.value));
   });
 }

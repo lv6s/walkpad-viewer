@@ -13,7 +13,8 @@ import {clearOvCache, redrawImu} from './imu';
 import {lodDone, lodFeed, lodInit, useLod} from './lod';
 import {drawScrub, ovFeed, ovInitAll} from './scrub';
 import {redrawWave, updateWinBar} from './timewin';
-import {attachVideo, clearVideo} from './video';
+import type {PkgFile} from './types';
+import {attachVideo, clearVideo, verifiedVideoOffset} from './video';
 
 // ---------------------------------------------------------------- 解析
 // 本次解析的结果存成参考数据而不是主数据：只用来给轴向页对齐时间戳、切动作段
@@ -321,6 +322,35 @@ const DEVICE_ANGLE_COLS = ['pitchDeg', 'sideTiltDeg'];
 const PKG_COLS = ['effectiveElapsedUs', 'timeUs', 'validity', 'frameType', 'pressureAdc', 'accelerationG',
   'angularVelocityDps', 'accelerationRaw', 'angularVelocityRaw', 'deviceSequence', 'temperatureCelsius',
   'imuCalibration', ...DEVICE_ANGLE_COLS];
+const SQUAT_COLS = ['timeUs', 'effectiveElapsedUs', 'nativeReceiveNs', 'validity', 'accelerationG', 'imuCalibration'];
+type SquatFile = PkgFile & {squat: string[]};
+const squatFiles = new WeakMap<object, SquatFile[][]>();
+
+export function squatPackage(sides: object) { return squatFiles.get(sides); }
+
+export async function squatInput(files: SquatFile[], alive: () => boolean) {
+  const rows: number[][] = [];
+  for (const f of files) {
+    if (!alive()) throw new Error('读取已取消。');
+    if (SQUAT_COLS.some(c => !f.squat.includes(c))) throw new Error('缺少双踝时间戳、加速度或补偿角速度列。');
+    for (const [rowStart, rowEnd] of f.rgs) {
+      if (!alive()) throw new Error('读取已取消。');
+      const part = await ParquetHQ.parquetReadObjects({file: f.ab, columns: SQUAT_COLS, rowStart, rowEnd});
+      for (const r of part) {
+        if (r.validity !== 'valid' || r.accelerationG == null) continue;
+        const gyro = r.imuCalibration?.angularVelocityCompensatedDps;
+        const v = struct6(r.accelerationG, gyro);
+        if (!gyro || !v.every(Number.isFinite)) throw new Error('双踝数据有帧缺少补偿角速度或有效加速度，不能用原始角速度代替。');
+        rows.push([numOrNaN(r.timeUs), numOrNaN(r.nativeReceiveNs), numOrNaN(r.effectiveElapsedUs), ...v]);
+      }
+    }
+  }
+  rows.sort((a,b)=>a[0]-b[0]);
+  const axis = (c: number) => Float64Array.from(rows, r=>r[c]);
+  const values = new Float64Array(rows.length*6);
+  rows.forEach((r,i)=>{for(let j=0;j<6;j++) values[i*6+j]=r[3+j];});
+  return {t:axis(0),receive:axis(1),elapsed:axis(2),values};
+}
 const hasDeviceAngles = files => files.some(f => DEVICE_ANGLE_COLS.some(c => f.cols.includes(c)));
 const collectAngles = files => hasDeviceAngles(files) ? {pitch: [], sideTilt: []} : undefined;
 function appendDeviceAngles(angles, r) {
@@ -339,9 +369,7 @@ const IMU_COLS = ['accelerationG', 'angularVelocityDps', 'accelerationRaw', 'ang
 const SKIP_TYPE = {magnetic: 1, deviceQuaternion: 1};
 const isSignalType = ft => !ft || !SKIP_TYPE[ft];
 
-// 摆放位置 -> 侧别键。压力页、步态对比都按「脚」组织，所以足部两个位置仍归一成 left / right；
-// 其余位置（腕 / 腰 / 胸…）各占一个键，用位置原词。早先只按 left/right 前缀归一，
-// 一包同时带右踝和右腕时两条流会抢同一个 right，被下面的判重当成「右踝重复导入」直接拒收。
+// 压力与步态沿用 left/right；同侧已有鞋垫时，脚踝另用独立键。
 const FOOT_PLACE = /(insole|ankle|foot|instep|shoe)/;
 const PLACE_CN = {insole: '鞋垫', ankle: '踝', foot: '足', instep: '足背', shoe: '鞋',
   wrist: '腕', hand: '手', arm: '臂', waist: '腰', hip: '髋', chest: '胸', back: '背',
@@ -482,9 +510,10 @@ async function parsePackage(file) {
     return;
   }
 
-  let zf, manifest;
+  let zf, manifest, archive: ArrayBuffer;
   try {
-    zf = await unzip(await file.arrayBuffer());
+    archive = await file.arrayBuffer();
+    zf = await unzip(archive);
     const m = await unzipBytes(zf.get('manifest.json'));
     if (!m) {
       const logs = [...zf.keys()].filter(p => /\.jsonl$/i.test(p));
@@ -512,14 +541,16 @@ async function parsePackage(file) {
   // 先把每只脚的帧文件与 footer 摸清：行数、row group 边界、列名。
   // 帧数超过阈值的走分段懒加载，短片段仍旧整段读进来 —— 两条路的数据形状一致，绘图不必分支。
   const jobs = [];
+  const pressureSides = new Set(srcs.filter(s => Number(s.pressureChannelCount) > 0).map(s => sideOfPlacement(s.placement)));
   try {
     for (const src of srcs) {
       const paths = (bySrc.get(src.sourceId) || []).sort();   // frame-00001… 序号补零，字符串序即 part 序
       if (!paths.length) { fail('manifest 里的 source ' + src.sourceId + ' 没有对应的 frames/*.parquet。'); return; }
-      const side = sideOfPlacement(src.placement);
+      const nch = Number(src.pressureChannelCount) || 0;
+      const foot = sideOfPlacement(src.placement), placement = String(src.placement || '').toLowerCase();
+      const side = !nch && pressureSides.has(foot) && /^(left|right)ankle$/.test(placement) ? placement : foot;
       registerSideLabel(side, src);
-      const job = {side, sourceId: src.sourceId, placement: src.placement,
-        nch: Number(src.pressureChannelCount) || 0, files: [], nAll: 0};
+      const job = {side, sourceId: src.sourceId, placement, family: src.deviceFamily, nch, files: [], nAll: 0};
       for (const path of paths) {
         const ab = await parquetBuffer(zf, path);
         const md = ParquetHQ.parquetMetadata(ab);
@@ -534,7 +565,7 @@ async function parsePackage(file) {
           const nr = Number(rg.num_rows);
           if (nr > 0) { rgs.push([acc, acc + nr]); acc += nr; }
         }
-        job.files.push({ab, base: job.nAll, rows, rgs, cols: PKG_COLS.filter(c => names.has(c))});
+        job.files.push({ab, base: job.nAll, rows, rgs, cols: PKG_COLS.filter(c => names.has(c)), squat: SQUAT_COLS.filter(c => names.has(c))});
         job.nAll += rows;
       }
       jobs.push(job);
@@ -565,8 +596,13 @@ async function parsePackage(file) {
   if (!sides.length) { fail('包里有帧，但没有可用帧时间（effectiveElapsedUs 全为空）。'); return; }
   rebaseCommon(sides);
   sides.sort((a, b) => a.side.localeCompare(b.side));
+  const ankles = ['leftankle','rightankle'].map(p => jobs.filter(j => j.family === 'walkpadImu' && j.placement?.toLowerCase() === p));
+  if (ankles.every(a => a.length === 1)) squatFiles.set(sides, ankles.map(([a]) => a.files));
+  const verified = media && !asRef ? await verifiedVideoOffset(archive) : undefined;
   applySides(sides, file.name, 'pressure', {rebuilt: false, src: srcInfo});
-  if (media) { try { attachVideo(media.u8, media.name, media.total); } catch { /* 视频挂不上就只没有视频 */ } }
+  if (media && !asRef) {
+    try { attachVideo(media.u8, media.name, media.total, verified); } catch { /* 视频挂不上就只没有视频 */ }
+  }
   // 全段统计放后台跑，不挡住首屏；换文件时代数一变，旧扫描自己退出
   if (state.lazy) {
     const gen = dataGen;

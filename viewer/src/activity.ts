@@ -3,7 +3,7 @@ import ActivityWorker from './activity-worker?worker&inline';
 import type {ActivitySegment, GaitSegment} from './gait/core';
 import {reportSummary} from './gait/walking';
 import type {GaitReportSegment, ReportSummary} from './gait/walking';
-import {gaitBadge, gaitFormat, initGaitDetail, renderGaitDetail, renderGaitOverview} from './gait/view';
+import {gaitBadge, gaitFormat, initGaitDetail, phaseValue, renderGaitDetail, renderGaitOverview} from './gait/view';
 import {IC_TO_LABELS} from './gait/running-icto';
 import type {IctoVersion} from './gait/running-icto';
 import {ACTIVITY_STILL, ACTIVITY_TURN, ACTIVITY_TURN_L, ACTIVITY_TURN_R, SEG_C, SEG_CN, SIDE_CN} from './core/constants';
@@ -32,7 +32,7 @@ let baseStats: ReportSummary[] = [], runStats: ReportSummary[] = [], baseOvervie
 let ictoVersion: IctoVersion = 'legacy', runningError = false, gaitNote = '', status = '';
 const usesRefined = (i: number) => ictoVersion === 'running' && !!refinedRunReport?.[i];
 const showDetail = (i: number) => renderGaitDetail(usesRefined(i) ? runningGait?.[i] : gait[i],
-  usesRefined(i) ? refinedRunReport[i] : report[i], segments[i], i, usesRefined(i));
+  usesRefined(i) ? refinedRunReport[i] : report[i], segments[i], i, usesRefined(i), state.receiptTiming);
 /* 转身段的判据明细：同向累计角与持续时长，达到转圈档就点出来 */
 function turnQuality(s: ActivitySegment) {
   const run = (result?.turnRuns ?? []).find(r => r.a <= s.a + .05 && r.b >= s.b - .05);
@@ -98,12 +98,12 @@ async function run() {
         ({result, segments, gait, report, refinedRunReport, runningGait, runningError} = ev.data);
         baseStats = report.map(s => s && reportSummary([s]));
         runStats = refinedRunReport?.map(s => s && reportSummary([s])) ?? [];
-        baseOverview = [0, 1].map(cls => {
-          const m = reportSummary(report.filter(s => s?.cls === cls));
-          m.durationMs = segments.filter(s => s.cls === cls).reduce((sum, s) => sum + Math.round(s.b * 1000) - Math.round(s.a * 1000), 0);
-          return m;
+        const overview = (cls: number, reports: GaitReportSegment[]) => ({
+          ...reportSummary(reports.filter(s => s?.cls === cls)),
+          durationMs: segments.reduce((sum, s) => s.cls === cls ? sum + Math.round(s.b * 1000) - Math.round(s.a * 1000) : sum, 0)
         });
-        runOverview = refinedRunReport ? reportSummary(refinedRunReport) : null;
+        baseOverview = [0, 1].map(cls => overview(cls, report));
+        runOverview = refinedRunReport ? overview(1, refinedRunReport) : null;
         const failed: string[] = ev.data.failed;
         gaitNote = ev.data.reportError ? '步态指标未完成，状态分段仍可查看。'
           : failed.length ? `${failed.map(s => SIDE_CN[s]).join('、')}步态候选计算未完成。`
@@ -121,7 +121,7 @@ async function run() {
     const copies = inputs.map(s => ({t: s.t.slice(), seq: s.seq.slice(), ok: s.ok.slice(), accAtRail: s.accAtRail?.slice(),
       deviceAngles: s.deviceAngles && {pitch: s.deviceAngles.pitch.slice(), sideTilt: s.deviceAngles.sideTilt.slice()},
       axes: s.axes.map(a => a.slice())}));
-    worker.postMessage({contract, inputs: copies, duration}, copies.flatMap(s => [s.t.buffer, s.seq.buffer, s.ok.buffer,
+    worker.postMessage({contract, inputs: copies, duration, receiptTiming: state.receiptTiming}, copies.flatMap(s => [s.t.buffer, s.seq.buffer, s.ok.buffer,
       ...(s.accAtRail ? [s.accAtRail.buffer] : []), ...(s.deviceAngles ? [s.deviceAngles.pitch.buffer, s.deviceAngles.sideTilt.buffer] : []),
       ...s.axes.map(a => a.buffer)]));
   } catch (e) { if (!alive()) return; running = false; status = '分析失败：' + (e?.message || e); finish(); renderActivity(); }
@@ -192,7 +192,9 @@ function renderRows() {
   $('activityPrev').disabled = page === 0; $('activityNext').disabled = page >= pages - 1;
   segments.slice(page * 100, page * 100 + 100).forEach((s, offset) => {
     const i = page * 100 + offset, row = document.createElement('tr'); row.classList.toggle('selected', selected === i);
-    const w = usesRefined(i) ? runStats[i] : baseStats[i];
+    const refined = usesRefined(i), w = refined ? runStats[i] : baseStats[i];
+    const phase = (refined ? refinedRunReport[i] : report[i])?.phaseTotals;
+    const pair = s.cls < 2 && phase ? (s.cls === 0 ? `双脚支撑 ${phaseValue(phase, 'doubleSupportMs')}` : `双脚腾空 ${phaseValue(phase, 'flightMs')}`) : '—';
     const flags = s.edge ? ['含上下文不足的边缘'] : [];
     if (s.cls < 2) flags.push(w?.countableMs ? `可计步 ${gaitFormat(w.countableMs / 1000, 2)} s` : '无双脚可计步覆盖');
     if (s.reviewed) flags.unshift(MODELS[modelIndex].contract.reviewGait ? '含短段复核' : '含双脚周期复核');
@@ -202,7 +204,7 @@ function renderRows() {
       : isExtraction() && s.cls === 2 ? [...flags, ...walkReviewReasons(s.walkReview)].join(' · ') || '未提取为走跑'
       : isExtraction() && s.cls < 2 ? [s.cls === 0 ? '通过步态复核' : 'TAS 跑步候选，未做跑姿复核', ...flags].join(' · ')
       : flags.join(' · ') || '模型推断';
-    for (const value of [String(i + 1), s.a.toFixed(2), s.b.toFixed(2), (s.b - s.a).toFixed(2), gaitBadge(s.cls, stateName(s.cls)), s.confidence == null ? '—' : (s.confidence * 100).toFixed(1) + '%', gaitFormat(w?.cadence, 1), gaitFormat(w?.steps, 0), quality]) {
+    for (const value of [String(i + 1), s.a.toFixed(2), s.b.toFixed(2), (s.b - s.a).toFixed(2), gaitBadge(s.cls, stateName(s.cls)), s.confidence == null ? '—' : (s.confidence * 100).toFixed(1) + '%', gaitFormat(w?.cadence, 1), gaitFormat(w?.steps, 0), quality, pair]) {
       const td = document.createElement('td'); td.append(value); row.append(td);
     }
     row.tabIndex = 0; row.onclick = () => choose(i); row.onkeydown = e => { if (e.key === 'Enter') { choose(i); body.children[offset]?.focus(); } }; body.append(row);

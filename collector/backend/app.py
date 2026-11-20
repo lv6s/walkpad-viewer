@@ -19,6 +19,7 @@ from .capture import Capture
 from .exports import export_package, export_standard, export_txt
 from .phone import Phone
 from .version import VERSION
+from .vision_bridge import VisionBridge
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -273,6 +274,12 @@ def create_app(root=ROOT,demo=False,phone_port=8766,debug=False,idle_exit=8):
                                             request.headers.get('content-type','video/webm'),bytes(raw))
         except ValueError as exc:
             raise HTTPException(400,str(exc))
+
+    vision = VisionBridge()
+
+    @app.websocket('/ws/vision')
+    async def vision_websocket(ws: WebSocket):
+        await vision.serve(ws)
 
     @app.websocket('/ws')
     async def websocket(ws:WebSocket):

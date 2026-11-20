@@ -66,6 +66,13 @@ export async function upload(path: string, blob: Blob) {
   if (!response.ok) throw new Error(result.detail || '录像写盘失败')
   return result
 }
+export type VisionTarget = 'workstation' | 'local'
+export type IdModel = 'bytetrack' | 'reid'
+
+export function openVisionSocket(target: VisionTarget, idModel: IdModel) {
+  if (!token) throw new Error('工作台未连接')
+  return new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/vision?target=${target}&id_model=${idModel}`, ['walkpad-vision', token])
+}
 export async function connect() {
   stopped = false
   try {

@@ -12,7 +12,11 @@
 - `.parquet` 导出
 - 维特上位机（WT901 / JY901 等）导出的 `.txt` / `.csv`
 
-测量包里带现场视频（`videos/*.mp4`）时，右下角浮出播放器，用「视频 0 s = 会话 X s」把它挂到会话时间轴上。包内没有视频起点字段，默认按「视频结束 ≈ 录制结束」推定，可直接改成实测值。视频播放或拖动进度时，IMU 页的每一栏上有一条橙色游标跟着走，可以一边看动作一边对波形。
+测量包里带现场视频（`videos/*.mp4`）时，右下角浮出播放器。已核验的包打开即应用已知起点；其他双踝包点「自动校准」，离线比对视频小腿转动和双踝角速度，不用跳跃或先预测。适用于 5–120 秒且双侧膝踝清楚可见的单段视频；匹配不唯一则保留原值。也可手填「视频 0 s = 会话」，或在有标记时暂停到落地画面用「落地对时」。IMU 和深蹲专项的游标随视频更新。
+
+动作校准使用 Google MediaPipe Tasks Vision 与 Pose Landmarker Lite（[Apache 2.0](vendor/mediapipe-license.txt)，[模型来源](https://developers.google.com/edge/mediapipe/solutions/vision/pose_landmarker)），顺序解码使用 [Mediabunny 1.66.2 源码](https://github.com/Vanilagy/mediabunny/tree/v1.66.2)（[MPL 2.0](vendor/mediabunny-license.txt)）。视频只在本机处理。
+
+同一测量包可同时包含左右鞋垫与左右脚踝 IMU：压力页显示鞋垫，IMU 页分开显示四路，深蹲专项只读取明确标为左踝、右踝的 Walkpad IMU。
 
 IMU 页的六轴下面还可以叠两条窄带：温度，以及设备自报的俯仰角 / 侧倾角（`pitchDeg` / `sideTiltDeg`）。两条各按自己的 min–max 定量程，工具条「显示」里可以单独关掉；文件没有相应列（或整段为空）时不会多出空带。
 

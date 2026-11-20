@@ -136,6 +136,9 @@ const paired = reportSummary(example);
 assert.equal(paired.countableMs, 2090); assert.equal(paired.steps, 4); assert.equal(paired.cadence, 60000 * 4 / 2090);
 assert.equal(metricMean(paired, 'right', 'contact') - metricMean(paired, 'left', 'contact'), 10);
 assert.equal(paired.durationMs, 3990);
+const walkOnly = reportSummary(example.filter(s => s?.cls === 0)), runOnly = reportSummary(example.filter(s => s?.cls === 1));
+assert.deepEqual([walkOnly.durationMs, walkOnly.countableMs, walkOnly.steps, walkOnly.cadence], [3190, 2090, 4, 60000 * 4 / 2090]);
+assert.deepEqual([runOnly.durationMs, runOnly.countableMs, runOnly.steps, runOnly.cadence], [800, 0, NaN, NaN]);
 assert.equal(example[2].steps[0].toIssue, 'no_to'); assert.equal(example[2].steps[1].toIssue, 'to_outside');
 const angleFeet = labFeet.map((s, i) => {
   const pitch = new Float64Array(n).fill(NaN), sideTilt = new Float64Array(n).fill(NaN);
@@ -176,6 +179,25 @@ assert.deepEqual(gapWalk.countable_intervals, [{start_ms: 1000, end_ms: 1480}]);
 assert.deepEqual(gapWalk.steps.map(e => [e.ic_ms, e.to_ms]), [[1020, null]]);
 assert.ok(Number.isNaN(metricMean(reportSummary([gapWalk]), 'left', 'contact')));
 console.log('PASS shared walking/running metrics: 2 steps / 1.2 s = 100 spm, 620/630 ms, coverage, missing TO, gaps and half-open boundaries');
+
+const phaseFeet = (leftTo = 1.6, nextLeft = 2, status = 'candidate_pair') => [
+  walkingFoot('left', [[1, 0.9, 1.9, 1, leftTo], [2, 1.9, 2.9, nextLeft, 2.6, status]]),
+  walkingFoot('right', [[1, 1.4, 2.4, 1.5, 2.1], [2, 2.4, 3.4, 2.5, 3.1]])
+];
+const phase = (cls, a = 1.5, b = 2.6, feet = phaseFeet()) => gaitReport([seg(a, b, cls)], feet)[0].phaseTotals;
+assert.deepEqual(phase(0), {knownMs: 1100, leftOnlyMs: 400, rightOnlyMs: 400, doubleSupportMs: 300, flightMs: 0});
+assert.deepEqual(phase(1), phase(0));
+assert.deepEqual(phase(1, 1.5, 2.6, phaseFeet(1.3, 2.3)), {knownMs: 1100, leftOnlyMs: 200, rightOnlyMs: 600, doubleSupportMs: 100, flightMs: 200});
+assert.deepEqual(phase(0, 1.55, 1.65), {knownMs: 100, leftOnlyMs: 0, rightOnlyMs: 50, doubleSupportMs: 50, flightMs: 0});
+assert.deepEqual(phase(0, 1.5, 1.6, phaseFeet(1.52)), {knownMs: 80, leftOnlyMs: 0, rightOnlyMs: 80, doubleSupportMs: 0, flightMs: 0});
+assert.deepEqual(phase(0, 1.5, 1.6, phaseFeet(1.54)), {knownMs: 100, leftOnlyMs: 0, rightOnlyMs: 60, doubleSupportMs: 40, flightMs: 0});
+assert.equal(phase(1, 2.1, 2.12, phaseFeet(1.3, 2.12)), undefined);
+assert.equal(phase(0, 1.5, 2, phaseFeet(null)), undefined);
+assert.equal(phase(1, 1.8, 2.5, phaseFeet(1.6, 2, 'missing_zero_crossing')), undefined);
+const phaseGap = phaseFeet(); phaseGap[0].inp.ok[85] = 0;
+assert.equal(phase(1, 1.65, 1.9, phaseGap), undefined);
+assert.equal(gaitReport([seg(1.5, 2.6, 1)], phaseFeet(), false, false)[0].phaseTotals, undefined);
+console.log('PASS segment phase totals, clipping, ambiguous overlap/flight, contact gaps and unsynchronized input');
 
 const markedFeet = () => labFeet.map((s, i) => {
   const ok = s.inp.ok.slice();

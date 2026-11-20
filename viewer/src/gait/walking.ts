@@ -5,6 +5,10 @@ import type {GaitMeasures} from './walking-imu.ts';
 
 type Side = 'left' | 'right';
 type Interval = {start_ms: number; end_ms: number};
+type Phase = Interval & {contact: boolean};
+export type GaitPhase = 'leftOnlyMs' | 'rightOnlyMs' | 'doubleSupportMs' | 'flightMs';
+export type GaitPhaseTotals = Record<GaitPhase, number> & {knownMs: number};
+const MIN_BILATERAL_PHASE_MS = 40; // Do not infer simultaneous contact or flight from near-coincident IMU events.
 type PitchFields = 'ic_pitch_deg' | 'to_pitch_deg' | 'icIssue' | 'toIssue';
 export interface GaitStep extends Omit<GaitMeasures, PitchFields> {
   ic_pitch_deg: number | null;
@@ -29,6 +33,7 @@ export interface GaitReportSegment {
   cls: number;
   durationMs: number;
   countable_intervals: Interval[];
+  phaseTotals?: GaitPhaseTotals;
   steps: GaitStep[];
 }
 
@@ -61,10 +66,22 @@ function firstAfter<T>(xs: T[], key: number, before: (x: T, key: number) => bool
   return a;
 }
 
+function bilateralPhases(left: Phase[], right: Phase[]) {
+  const out: (Interval & {left: boolean; right: boolean})[] = [];
+  for (let i = 0, j = 0; i < left.length && j < right.length;) {
+    const l = left[i], r = right[j], start_ms = Math.max(l.start_ms, r.start_ms), end_ms = Math.min(l.end_ms, r.end_ms);
+    if (end_ms > start_ms && (l.contact !== r.contact || end_ms - start_ms >= MIN_BILATERAL_PHASE_MS)) {
+      out.push({start_ms, end_ms, left: l.contact, right: r.contact});
+    }
+    if (l.end_ms <= r.end_ms) i++; if (r.end_ms <= l.end_ms) j++;
+  }
+  return out;
+}
+
 function prepare(s: GaitSideInput, side: Side, segments: ActivitySegment[]) {
   type Event = {side: Side; ic_ms: number; to_ms: number | null; icRow: number; toRow: number | null};
-  const support: Interval[] = [], steps: Event[] = [];
-  if (!s?.inp || !s.rec) return {support, steps, imu: null};
+  const support: Interval[] = [], steps: Event[] = [], phases: Phase[] = [];
+  if (!s?.inp || !s.rec) return {support, steps, phases, imu: null};
   const {inp, rec} = s, origin = s.t0 / 1e6, groups = groupsOf(inp);
   const bounds: {a: number; b: number}[] = [];
   let previousEnd = -Infinity;
@@ -73,7 +90,7 @@ function prepare(s: GaitSideInput, side: Side, segments: ActivitySegment[]) {
     const t = inp.tUs[i] / 1e6 - origin;
     if (!bounds[g]) {
       // Compare actual blocks without assuming group IDs start at zero.
-      if (t <= previousEnd) return {support, steps, imu: null};
+      if (t <= previousEnd) return {support, steps, phases, imu: null};
       bounds[g] = {a: t, b: t};
     } else bounds[g].b = t;
     previousEnd = t;
@@ -87,6 +104,7 @@ function prepare(s: GaitSideInput, side: Side, segments: ActivitySegment[]) {
     if (!events.has(e.cycle)) events.set(e.cycle, e);
   }
   const orderedIcs = [...ics.values()].sort((a, b) => a.rowIdx - b.rowIdx);
+  let prev: {cycle: number; group: number; end: number; to: number | null};
   for (let i = 0; i < orderedIcs.length; i++) {
     const ic = orderedIcs[i], window = cycles.get(ic.cycle);
     if (window?.status !== 'candidate_pair') continue;
@@ -98,15 +116,21 @@ function prepare(s: GaitSideInput, side: Side, segments: ActivitySegment[]) {
     const to_ms = to && groups[to.rowIdx] === g && to.rowIdx > ic.rowIdx && toMs > ic_ms && toMs < end_ms && (!next || to.rowIdx < next.rowIdx) ? toMs : null;
     support.push({start_ms, end_ms});
     steps.push({side, ic_ms, to_ms, icRow: ic.rowIdx, toRow: to_ms === null ? null : to.rowIdx});
+    // A missing/rejected cycle is unknown, not a prolonged swing.
+    if (prev?.to != null && prev.cycle + 1 === ic.cycle && prev.group === g && prev.end === start_ms && prev.to < ic_ms) {
+      phases.push({start_ms: prev.to, end_ms: ic_ms, contact: false});
+    }
+    if (to_ms !== null) phases.push({start_ms: ic_ms, end_ms: to_ms, contact: true});
+    prev = {cycle: ic.cycle, group: g, end: end_ms, to: to_ms};
   }
-  return {support: union(support), steps, imu: gaitImu(s, groups, segments)};
+  return {support: union(support), steps, phases, imu: gaitImu(s, groups, segments)};
 }
 
-export function gaitReport(segments: ActivitySegment[], sides: GaitSideInput[], onlyRuns = false): GaitReportSegment[] {
+export function gaitReport(segments: ActivitySegment[], sides: GaitSideInput[], onlyRuns = false, phaseTimingReliable = true): GaitReportSegment[] {
   const bySide = {left: sides.find(s => s.side === 'left'), right: sides.find(s => s.side === 'right')};
   const left = prepare(bySide.left, 'left', segments), right = prepare(bySide.right, 'right', segments);
   const imu = {left: left.imu, right: right.imu};
-  const coverage = intersect(left.support, right.support);
+  const coverage = intersect(left.support, right.support), phases = phaseTimingReliable ? bilateralPhases(left.phases, right.phases) : [];
   const events = [...left.steps, ...right.steps].sort((a, b) => a.ic_ms - b.ic_ms);
   return segments.map(({a, b, cls}, index) => {
     if (cls !== 1 && (onlyRuns || cls !== 0)) return null;
@@ -132,7 +156,15 @@ export function gaitReport(segments: ActivitySegment[], sides: GaitSideInput[], 
           ...(deviceAngles && {deviceAngles})});
       }
     }
-    return {index, cls, durationMs: end_ms - start_ms, countable_intervals, steps};
+    const totals: GaitPhaseTotals = {knownMs: 0, leftOnlyMs: 0, rightOnlyMs: 0, doubleSupportMs: 0, flightMs: 0};
+    for (let i = firstAfter(phases, start_ms, (v, t) => v.end_ms <= t); i < phases.length && phases[i].start_ms < end_ms; i++) {
+      const p = phases[i], span = Math.min(end_ms, p.end_ms) - Math.max(start_ms, p.start_ms);
+      if (span <= 0) continue;
+      totals.knownMs += span;
+      const phase = p.left ? (p.right ? 'doubleSupportMs' : 'leftOnlyMs') : (p.right ? 'rightOnlyMs' : 'flightMs');
+      totals[phase] += span;
+    }
+    return {index, cls, durationMs: end_ms - start_ms, countable_intervals, phaseTotals: totals.knownMs ? totals : undefined, steps};
   });
 }
 

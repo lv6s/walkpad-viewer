@@ -1,7 +1,7 @@
 /* 两只脚共用一个时间窗：框选 / 平移 / 缩放都改这一份状态。 */
 
 import {drawActivity} from './activity';
-import {refreshAction} from './action';
+import {drawSquat} from './squat';
 import {drawAxis} from './axis';
 import {$, el} from './core/dom';
 import {state, view} from './core/state';
@@ -68,7 +68,7 @@ function redrawTime() {
   else if (state.tab === 'imu') redrawImu();
   else if (state.tab === 'activity') drawActivity();
   else if (state.tab === 'axis') drawAxis();   // 「当前时间窗」模式下窗口变了结论也要跟着变
-  else if (state.tab === 'action') refreshAction();   // 分析范围就是窗口本身，必须重算
+  else if (state.tab === 'squat') drawSquat();
 }
 
 function redrawWave() {
@@ -89,7 +89,7 @@ function lodNote() {
 // 窗口条常驻：操作提示只有缩放过才出现的话，没人看得到
 function updateWinBar() {
   if (!el.winBar) return;
-  const supportsWindow = ['wave', 'imu', 'axis', 'activity', 'action'].includes(state.tab);
+  const supportsWindow = ['wave', 'imu', 'axis', 'activity', 'squat'].includes(state.tab);
   el.winBar.hidden = !state.sides.length || !supportsWindow;
   if (!state.sides.length) { drawScrub(); updateOverview(); return; }
   el.winReset.textContent = '复位全段';

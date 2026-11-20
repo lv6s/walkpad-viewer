@@ -50,7 +50,7 @@ export interface State {
   ref: RefData | null;
   /** 包里带的现场视频；null = 这份文件没有视频 */
   video: VideoInfo | null;
-  /** 视频当前时刻对应的会话时间（秒），null = 没有视频或已收起；IMU 页据此画游标 */
+  /** 视频游标的会话时间（秒），无可见视频时为 null */
   videoT: number | null;
   /** IMU 页的窄带开关：温度、设备俯仰/侧倾角 */
   imuTemp: boolean;

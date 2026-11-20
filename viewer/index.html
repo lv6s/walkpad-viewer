@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>鞋垫数据查看器</title>
-<link rel="stylesheet" href="css/app.css?v=3.25.0">
-<link rel="stylesheet" href="css/axis.css?v=3.25.0">
+<link rel="stylesheet" href="css/app.css?v=3.34.0">
+<link rel="stylesheet" href="css/axis.css?v=3.34.0">
 </head>
 <body data-page="viewer">
 <header>
@@ -43,7 +43,7 @@
     <button class="tab" data-tab="imu" role="tab" aria-selected="false">IMU</button>
     <button class="tab" data-tab="axis" role="tab" aria-selected="false">轴向推断</button>
     <button class="tab" data-tab="activity" role="tab" aria-selected="false">状态与步态</button>
-    <button class="tab" data-tab="action" role="tab" aria-selected="false">动作速度</button>
+    <button class="tab" data-tab="squat" role="tab" aria-selected="false" aria-controls="viewSquat">深蹲专项</button>
   </div>
 
   <div class="winbar" id="winBar" hidden>
@@ -227,7 +227,7 @@
       <section id="activityGaitOverview" class="gait-overview" aria-labelledby="gaitOverviewTitle" hidden>
         <h2 id="gaitOverviewTitle">整次步态概览 <small>步行与跑步分开汇总，使用同一套指标</small></h2>
         <div class="activity-table gait-table gait-static"><table>
-          <thead><tr><th scope="col">状态</th><th scope="col">识别时长（s）</th><th scope="col">有效计步（s / %）</th><th scope="col">有效步数</th><th scope="col">平均步频（步/分）</th><th scope="col">接地均值 · 左 / 右（ms）</th></tr></thead>
+          <thead><tr><th scope="col">状态</th><th scope="col">识别时长（s）</th><th scope="col">有效步数</th><th scope="col">平均步频（步/分）</th><th scope="col">有效计步（s / %）</th><th scope="col">接地均值 · 左 / 右（ms）</th></tr></thead>
           <tbody id="gaitOverviewRows"></tbody>
         </table></div>
         <p id="gaitOverviewHint" class="hint"></p>
@@ -240,12 +240,20 @@
         <canvas id="activityProb" aria-label="模型各状态的逐时概率"></canvas>
       </details>
       <h2>动作段明细 <small>点选一段，查看下方指标并定位时间窗</small></h2>
-      <div class="activity-table gait-table gait-segments"><table><thead><tr><th>段</th><th>开始 s</th><th>结束 s</th><th>时长 s</th><th>状态</th><th>平均模型概率</th><th>平均步频（步/分）</th><th>有效步数</th><th>质量提示</th></tr></thead><tbody id="activityRows"></tbody></table></div>
+      <div class="activity-table gait-table gait-segments"><table><thead><tr><th>段</th><th>开始 s</th><th>结束 s</th><th>时长 s</th><th>状态</th><th>平均模型概率</th><th>平均步频（步/分）</th><th>有效步数</th><th>质量提示</th><th scope="col" title="IMU 估计；占比以双脚可判定时间为分母">双脚支撑 / 腾空</th></tr></thead><tbody id="activityRows"></tbody></table></div>
       <div class="ptools"><button id="activityPrev">上一页</button><span id="activityPage"></span><button id="activityNext">下一页</button></div>
       <section id="gaitDetail" class="gait-detail" aria-labelledby="gaitTitle" hidden>
         <h2 id="gaitTitle"></h2>
         <p id="gaitNote" class="activity-warning"></p>
         <div id="gaitCompare" class="gait-kpis" aria-label="本段步态统计"></div>
+        <section id="gaitPhase" aria-labelledby="gaitPhaseTitle" hidden>
+          <h3 id="gaitPhaseTitle"></h3>
+          <p id="gaitPhaseCoverage" class="hint"></p>
+          <div class="activity-table gait-table gait-static"><table>
+            <thead><tr><th scope="col">状态</th><th scope="col">累计时长 / 占比</th></tr></thead><tbody id="gaitPhaseRows"></tbody>
+          </table></div>
+          <p class="hint">四种状态互不重叠，占比以双脚均可判定的时间为分母。缺口及不足 40 ms 的双脚同时支撑或腾空不计入；显示值四舍五入。</p>
+        </section>
         <div id="gaitMetrics" class="activity-table gait-table gait-static" hidden><table>
           <thead><tr><th scope="col">本段指标</th><th scope="col">左脚</th><th scope="col">右脚</th><th scope="col">右 − 左</th></tr></thead><tbody id="gaitMetricRows"></tbody>
         </table></div>
@@ -272,22 +280,29 @@
     </section>
   </div>
 
-  <div id="viewAction" hidden>
+  <div id="viewSquat" role="tabpanel" aria-label="深蹲专项" hidden>
     <section class="activity-card">
       <div class="ptools">
-        <label>设备 <select id="actionSide"></select></label>
-        <button id="actionRun" title="分析范围 = 上方时间窗；换设备或改时间窗会重算">重新分析</button>
-        <button id="actionCsv" disabled>导出 CSV</button>
+        <label>预测范围 <select id="squatScope"><option value="all">整段</option><option value="window">当前时间窗</option></select></label>
+        <button id="squatRun">预测</button>
+        <button id="squatCancel" hidden>取消</button>
+        <span class="chip" id="squatVersion"></span>
       </div>
-      <p id="actionStatus" role="status" aria-live="polite"></p>
-      <p id="actionSummary"></p>
-      <h2>竖直速度 <small>底色为一次动作，深色为下蹲段；圆点是转向时刻</small></h2>
-      <canvas id="actionChart" aria-label="竖直速度曲线与每次动作分段"></canvas>
-      <h2>每次动作</h2>
+      <p id="squatStatus" role="status" aria-live="polite"></p>
+      <p class="activity-warning">本地离线预测，仅用双踝加速度和补偿角速度。跳前蓄力可能被多算；可框选不含跳跃的时间窗再预测。</p>
+      <h2>四状态时间轴 <small>点色块定位一次深蹲；有视频时可点时间轴跳转</small></h2>
+      <div class="activity-legend squat-legend"><span>■ 非深蹲</span><span>■ 下降</span><span>■ 蹲底</span><span>■ 上升</span><span>▧ 无法判断</span></div>
+      <div class="canvas-wrap">
+        <canvas id="squatTimeline" aria-label="深蹲四状态时间轴"></canvas>
+        <div id="squatVideoCursor" aria-hidden="true" hidden></div>
+      </div>
+      <p class="hint" id="squatVideoTime" hidden></p>
+      <h2>逐次事件 <small>点行定位整次；点时间可跳到对应视频帧</small></h2>
       <div class="activity-table"><table>
-        <thead><tr><th>序</th><th>起点 s</th><th>下蹲 s</th><th>起身 s</th><th>深度 m</th><th>下蹲峰速</th><th>起身峰速</th><th>起身均速</th><th>反转 ms</th><th>底部加速度</th><th>一致性</th></tr></thead>
-        <tbody id="actionRows"></tbody>
+        <thead><tr><th scope="col">第几次</th><th scope="col">开始下降（s）</th><th scope="col">进入蹲底（s）</th><th scope="col">开始上升（s）</th><th scope="col">结束上升（s）</th><th scope="col">总时长（s）</th></tr></thead>
+        <tbody id="squatRows"></tbody>
       </table></div>
+      <p class="hint" id="squatEmpty"></p>
     </section>
   </div>
 
@@ -357,18 +372,19 @@
           <p><b>步态指标口径</b>：<span id="gaitRules"></span></p>
         </section>
 
-        <section data-help="action" data-title="动作速度">
-          <h3>动作速度</h3>
-          <p>只用<b>六轴</b>：陀螺积分跟踪姿态，加速度只在合量接近 1 g 时用来纠正倾角，相减后得到竖直加速度。<b>分段</b>取竖直速度过零处为转向点（顶端、底端），每段在这两点强制速度为零后重新积分，深度即该段位移 —— 除了「转向点竖直速度为零」不再有任何外部参考。</p>
-          <p><b>可信度分三档</b>：时长与节奏最稳；峰速约 ±0.15 m/s；深度受姿态残差影响，下蹲与起身是两次独立估计，「一致性」列就是两者相对差，超过 35% 的行会压暗，此时不要按精确位移使用。<b>底部加速度</b>不经过积分，是这一页最稳的量，但它是传感器测到的加速度，不是关节冲击力或地面反作用力。</p>
-          <p><b>边界</b>：采样率约 50 Hz 时只能看缓变的蹲起过程，抓不住很窄的冲击峰；时间轴是上位机写盘重建的时刻，不是硬件采样时刻。本页面向<b>离散动作</b>（深蹲、硬拉、起立），连续步行会被切成大量「动作」，不要按单次动作解读。设备装在腕上时测的是手腕运动，叉腰或握杠时才可近似当作身体升降，徒手自由摆臂不成立。</p>
+        <section data-help="squat" data-title="深蹲专项">
+          <h3>深蹲专项</h3>
+          <p>导入包含左踝、右踝的 Walkpad 采集 ZIP，选择「整段」或「当前时间窗」，点「预测」。只用两踝三轴加速度与补偿角速度，不用压力、手腕或视频；时间轴按手机接收时间估计踝间偏移。</p>
+          <p>每 20 ms 输出非深蹲、下降、蹲底或上升；缺口与无法判断片段留空或标斜线。计数只包含四条边界齐全的周期。带视频时，播放游标跟随进度；点时间轴、事件表行或单个事件时间可跳转视频。时间窗变化不会自动重算，重新预测以点击时的范围为准。</p>
+          <p>适合离线预标注。未知混合动作还未验收，跳前蓄力可能误报；如有跳跃，建议框选其间的深蹲片段分别预测。时间步长不是边界精度。</p>
         </section>
 
         <section data-help="video" data-title="现场视频">
           <h3>现场视频</h3>
           <p>测量包里有 <code>videos/*.mp4</code> 时，右下角浮出播放器，可与波形同时看：拖动标题栏挪位置，顶栏「视频」收起或再打开。视频在本地解码，不上传。</p>
-          <p>包内没有视频起点字段（<code>manifest</code> 与 <code>timeline</code> 都没有），起点按「视频结束 ≈ 录制结束」推定，并写明是推定值，随时可改成实测起点。口径固定为「会话时刻 = 视频时刻 + 起点」，「跳到会话」只接受视频覆盖到的区间，越界会提示而不静默贴边。</p>
-          <p>视频在播或拖动进度时，IMU 页各栏上有一条橙色游标跟着走（时刻取「视频时刻 + 起点」，暂停时停在原处）；浮窗收起或换文件后游标一起收掉，时间窗比视频短时游标跑出画面会在边缘留一个箭头。</p>
+          <p>已核验的采集包打开即应用已知起点。其他双踝包可点「自动校准」，将首段视频和对时所需的双踝数据加密发送到公司局域网内的工作站，用 GPU 识别视频姿态；工作站不保存本次数据和结果。适用于 5–120 秒、双侧膝踝清楚可见的单段视频；节奏太重复或证据不足时保留原值。也可将视频暂停在第一次完整深蹲最深的画面，再点「首次蹲底对时」：查看器将该画面与整段双踝预测的第 1 次蹲底中点对齐，无需先点预测。两种方式都不需要跳跃，也可手填起点。单点对时只更新起点，不校正漂移。</p>
+          <p>会话时刻 = 视频时刻 + 起点；「跳到会话」只接受视频覆盖到的区间。</p>
+          <p>视频在播或拖动进度时，IMU 和深蹲专项的橙色游标会跟随；暂停时停在原处。浮窗收起或换文件后游标同时隐藏；视频播到当前窗口外时，用边缘箭头提示。</p>
         </section>
       </div>
     </div>
@@ -385,17 +401,19 @@
   </div>
   <video id="vid" controls playsinline preload="metadata"></video>
   <div class="vid-row">
-    <label>视频 0 s = 会话 <input type="number" id="vidOff" step="0.05" inputmode="decimal"><span>s</span></label>
-    <button class="mini" id="vidAuto" title="按「视频结束 ≈ 录制结束」重新推定起点">重推</button>
+    <label>视频 0 s = 会话 <input type="number" id="vidOff" step="0.001" inputmode="decimal"><span>s</span></label>
+    <button class="mini" id="vidAuto" title="使用工作站 GPU 对齐视频与双踝 IMU；已核验的采集包直接使用已知偏移">自动校准</button>
+    <button class="mini" id="vidFirstBottom" title="暂停在第一次完整深蹲最深的画面，将此帧与双踝模型的第一个蹲底中点对齐">首次蹲底对时</button>
   </div>
   <div class="vid-row">
     <label>跳到会话 <input type="number" id="vidJump" step="0.1" inputmode="decimal"><span>s</span></label>
     <span class="vid-now" id="vidNow"></span>
   </div>
   <p class="vid-note" id="vidNote"></p>
+  <p class="vid-note" id="vidSeekStatus" role="status" hidden></p>
 </div>
 
-<script src="dist/app.js?v=3.25.0"></script>
+<script src="dist/app.js?v=3.34.0"></script>
 
 
 </body>

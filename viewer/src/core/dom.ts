@@ -11,7 +11,7 @@ export const el: Record<string, any> = {
   zero: $('#zeroPanels'), viewZero: $('#viewZero'),
   gap: $('#gapPanels'), viewGap: $('#viewGap'),
   viewActivity: $('#viewActivity'),
-  viewAction: $('#viewAction'),
+  viewSquat: $('#viewSquat'),
   viewImu: $('#viewImu'), imu: $('#imuPanels'), imuNote: $('#imuNote'),
   imuYa: $('#imuYa'), imuYg: $('#imuYg'), imuYauto: $('#imuYauto'), imuYfit: $('#imuYfit'),
   imuUa: $('#imuUa'), imuUg: $('#imuUg'), imuKindLbl: $('#imuKindLbl'),
@@ -29,6 +29,6 @@ export const el: Record<string, any> = {
   ictoBox: $('#ictoBox'), ictoCsvEv: $('#ictoCsvEv'), ictoCsvCy: $('#ictoCsvCy'),
   busy: $('#busy'), ver: $('#ver'),
   vidPanel: $('#vidPanel'), vidHead: $('#vidHead'), vid: $('#vid'), vidName: $('#vidName'),
-  vidToggle: $('#vidToggle'), vidClose: $('#vidClose'), vidOff: $('#vidOff'), vidAuto: $('#vidAuto'),
-  vidJump: $('#vidJump'), vidNow: $('#vidNow'), vidNote: $('#vidNote')
+  vidToggle: $('#vidToggle'), vidClose: $('#vidClose'), vidOff: $('#vidOff'), vidAuto: $('#vidAuto'), vidFirstBottom: $('#vidFirstBottom'),
+  vidJump: $('#vidJump'), vidNow: $('#vidNow'), vidNote: $('#vidNote'), vidSeekStatus: $('#vidSeekStatus')
 };

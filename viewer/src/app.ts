@@ -1,7 +1,7 @@
 /* 页签切换与总渲染编排。 */
 
 import {renderActivity} from './activity';
-import {drawAction, renderAction} from './action';
+import {renderSquat} from './squat';
 import {drawAxis, renderAxis} from './axis';
 import {renderCop, stopPlay} from './cop';
 import {SIDE_CN} from './core/constants';
@@ -14,6 +14,7 @@ import {drawGap, renderGap} from './gap';
 import {drawImu, renderImu} from './imu';
 import {bindWavePointer} from './interact';
 import {updateWinBar} from './timewin';
+import {syncVideoTab} from './video';
 import {drawSide} from './wave';
 import {applyZeroFilter, drawZero, renderZero} from './zero';
 
@@ -25,8 +26,8 @@ function placeWinBar(name) {
     ? '点色块定位 · 时间框缩放'
     : name === 'axis'
     ? '时间段只影响「当前时间窗」推断'
-    : name === 'action'
-    ? '框选一段动作再分析'
+    : name === 'squat'
+    ? '点色块定位 · 点时间轴跳视频'
     : 'Shift+拖动 框选 · 滚轮 缩放 · 双击 复位'
       + (name === 'wave' ? ' · 点格子看单通道' : '');
   updateWinBar();
@@ -40,9 +41,8 @@ function setTab(name) {
   if (!hasP && (name === 'wave' || name === 'cop' || name === 'zero')) name = 'imu';
   if (name === 'imu' && !state.sides.some(s => s.imu)) name = hasP ? 'wave' : 'axis';   // 无 IMU 列时回退
   if (name === 'axis' && !state.sides.some(s => s.imu && s.imu.phys)) name = hasP ? 'wave' : 'imu';
-  // 动作速度只认物理量六轴：raw 是硬件计数，量纲不对
-  if (name === 'action' && !state.sides.some(s => s.imu && s.imu.phys)) name = hasP ? 'wave' : 'imu';
   state.tab = name;
+  syncVideoTab();
   el.viewWave.hidden = name !== 'wave';
   el.viewCop.hidden = name !== 'cop';
   el.viewZero.hidden = name !== 'zero';
@@ -50,7 +50,7 @@ function setTab(name) {
   el.viewImu.hidden = name !== 'imu';
   el.viewAxis.hidden = name !== 'axis';
   if (el.viewActivity) el.viewActivity.hidden = name !== 'activity';
-  if (el.viewAction) el.viewAction.hidden = name !== 'action';
+  if (el.viewSquat) el.viewSquat.hidden = name !== 'squat';
   el.tabs.querySelectorAll('.tab').forEach(b => {
     const on = b.dataset.tab === name;
     b.classList.toggle('on', on);
@@ -73,8 +73,8 @@ function setTab(name) {
     drawGap();
   } else if (name === 'activity') {
     renderActivity();
-  } else if (name === 'action') {
-    renderAction();
+  } else if (name === 'squat') {
+    renderSquat();
   } else if (name === 'axis') {
     drawAxis();
   } else {
@@ -155,12 +155,6 @@ function renderAll() {
     b.title = b.disabled ? '这份文件只有 IMU，没有压力通道'
       : (t === 'gap' && state.rebuilt ? '维特 TXT 的时间戳是上位机写盘时刻，这一页按累计帧数估' : '');
   }
-  // 动作速度只认物理量六轴：raw 是硬件计数，量纲不对
-  {
-    const b = el.tabs.querySelector('[data-tab="action"]');
-    const ok = state.sides.some(s => s.imu && s.imu.phys);
-    if (b) { b.disabled = !ok; b.title = ok ? '' : '这一页需要物理量六轴（g / °/s）'; }
-  }
 
   // 详情卡会被插到某个 section 后面，重建面板前先收回，否则跟着 innerHTML 一起被清掉
   el.viewWave.appendChild(el.detail);
@@ -171,7 +165,7 @@ function renderAll() {
     renderZero();
   }
   renderActivity();
-  renderAction();
+  renderSquat();
   renderGap();
   renderImu();
   renderAxis();

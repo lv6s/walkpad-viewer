@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { api, status, upload } from '../store'
+import { api, status, upload, type IdModel, type VisionTarget } from '../store'
+import { cameraVision } from '../cameraVision'
 const video = ref<HTMLVideoElement>()
 const canvas = ref<HTMLCanvasElement>()
 const devices = ref<MediaDeviceInfo[]>([])
@@ -31,12 +32,13 @@ async function enumerate() {
 }
 // 预览与录像共用一套变换：MediaRecorder 录的是流，DOM 上的 transform 进不了文件，
 // 旋转只能靠 canvas 重绘后再 captureStream。
-function render(target: HTMLCanvasElement) {
+function render(target: HTMLCanvasElement, limit = Infinity) {
   const v = video.value
   const w = v?.videoWidth || 0, h = v?.videoHeight || 0
   if (!v || !w || !h) return
   const swap = rotate.value % 180 !== 0
-  const cw = swap ? h : w, ch = swap ? w : h
+  const scale = Math.min(1, limit / Math.max(w, h))
+  const cw = Math.round((swap ? h : w) * scale), ch = Math.round((swap ? w : h) * scale)
   if (target.width !== cw || target.height !== ch) { target.width = cw; target.height = ch }
   const ctx = target.getContext('2d')
   if (!ctx) return
@@ -44,8 +46,33 @@ function render(target: HTMLCanvasElement) {
   ctx.translate(cw/2, ch/2)
   ctx.rotate(rotate.value * Math.PI/180)
   if (mirror.value) ctx.scale(-1, 1)
-  ctx.drawImage(v, -w/2, -h/2, w, h)
+  ctx.drawImage(v, -w*scale/2, -h*scale/2, w*scale, h*scale)
   ctx.restore()
+}
+const visionTarget = ref<VisionTarget>('workstation')
+const idModel = ref<IdModel>('bytetrack')
+const { enabled: visionOn, message: visionMessage, people, start: startVision, stop: stopVision } =
+  cameraVision(() => video.value, target => render(target, 960))
+const overlayStyle = ref<Record<string, string>>({})
+const preview = ref<HTMLElement>()
+let resize: ResizeObserver | undefined
+function sizeOverlay() {
+  const v = video.value, c = canvas.value
+  const element = transformed.value ? c : v
+  if (!element || !v?.videoWidth || !preview.value) return
+  const outer = preview.value.getBoundingClientRect(), r = element.getBoundingClientRect()
+  const swap = rotate.value % 180 !== 0
+  const w = swap ? v.videoHeight : v.videoWidth
+  const h = swap ? v.videoWidth : v.videoHeight
+  const fit = Math.min(r.width / w, r.height / h)
+  const width = w * fit, height = h * fit
+  overlayStyle.value = { left: `${r.left-outer.left+(r.width-width)/2}px`, top: `${r.top-outer.top+(r.height-height)/2}px`,
+    width: `${width}px`, height: `${height}px` }
+}
+function toggleVision() {
+  if (!visionOn.value) { startVision(visionTarget.value, idModel.value); return }
+  stopVision()
+  visionMessage.value = ''
 }
 function loop() { const c = canvas.value; if (c) render(c); raf = requestAnimationFrame(loop) }
 function startLoop() {
@@ -53,7 +80,7 @@ function startLoop() {
   if (transformed.value && active.value && canvas.value) raf = requestAnimationFrame(loop)
 }
 function stopLoop() { cancelAnimationFrame(raf); raf = 0 }
-function releasePainted() { painted?.getTracks().forEach(track => track.stop()); painted = undefined; stopLoop() }
+function releasePainted() { painted?.getTracks().forEach(track => track.stop()); painted = undefined }
 // 录像源跟着变换走：不旋转时直接录摄像头流，旋转/镜像时录重绘后的 canvas
 function recordSource() {
   if (!transformed.value) return stream
@@ -125,7 +152,7 @@ async function stop() {
   if (stopPromise) await stopPromise
   releasePainted()
 }
-async function close() { await stop(); stream?.getTracks().forEach(track => track.stop()); stream = undefined; active.value = false; stopLoop() }
+async function close() { stopVision(); await stop(); stream?.getTracks().forEach(track => track.stop()); stream = undefined; active.value = false; stopLoop() }
 async function pip() {
   try { await video.value?.requestPictureInPicture() } catch (error) { message.value = String(error) }
 }
@@ -145,14 +172,36 @@ async function shot() {
   })
 }
 // 旋转/镜像只改变绘制方式，录像中途改会让码流几何跳变，所以录像时锁住
-watch([rotate, mirror], () => { if (!recording.value) startLoop() })
+watch([rotate, mirror], () => {
+  if (!recording.value) startLoop()
+  if (visionOn.value) {
+    stopVision()
+    visionMessage.value = '画面方向已变更，可重新开启动作识别'
+  }
+  sizeOverlay()
+}, { flush: 'post' })
 watch(() => status.value?.recorder.recording, async (value, old) => {
   if (value && !old && linked.value && active.value && !recording.value) await start()
   if (!value && old && recording.value) await stop()
 })
 function unload(event: BeforeUnloadEvent) { if (recording.value) { event.preventDefault(); event.returnValue = '' } }
-onMounted(() => { enumerate().catch(() => {}); window.addEventListener('beforeunload', unload) })
-onUnmounted(() => { close(); window.removeEventListener('beforeunload', unload) })
+onMounted(() => {
+  enumerate().catch(() => {})
+  window.addEventListener('beforeunload', unload)
+  resize = new ResizeObserver(sizeOverlay)
+  if (video.value) resize.observe(video.value)
+  if (canvas.value) resize.observe(canvas.value)
+})
+onUnmounted(() => { resize?.disconnect(); close(); window.removeEventListener('beforeunload', unload) })
 defineExpose({ stop, recording })
 </script>
-<template><section class="panel camera-panel"><div class="panel-head"><h2>摄像头</h2><span class="badge" :class="{ live: recording }">{{ recording ? '录像写盘中' : active ? '预览中' : '未开启' }}</span></div><div class="toolbar"><select v-model="selected" :disabled="active"><option value="">默认摄像头</option><option v-for="device in devices" :key="device.deviceId" :value="device.deviceId">{{ device.label || device.deviceId }}</option></select><select v-model="resolution" :disabled="active"><option>640x480</option><option>1280x720</option><option>1920x1080</option><option>3840x2160</option></select><select v-model="fps" :disabled="active"><option :value="15">15 fps</option><option :value="30">30 fps</option><option :value="60">60 fps</option></select><button v-if="!active" @click="open">开启摄像头</button><button v-else @click="close">关闭</button><button :disabled="!active" @click="pip">画中画</button><button :disabled="!active" @click="shot">拍照</button></div><div class="camera-preview"><video ref="video" autoplay playsinline muted :class="{ veiled: transformed }"></video><canvas v-show="transformed" ref="canvas" class="preview-canvas"></canvas></div><div class="toolbar"><select v-model.number="rotate" :disabled="!active || recording"><option :value="0">方向：原始</option><option :value="90">方向：顺时针90°</option><option :value="180">方向：180°</option><option :value="270">方向：顺时针270°</option></select><label><input v-model="mirror" type="checkbox" :disabled="!active || recording"> 镜像</label><label><input v-model="linked" type="checkbox"> 随传感器记录启停</label><button :disabled="!active || recording" @click="start">开始录像</button><button :disabled="!recording" @click="stop">停止录像</button></div><p class="muted">{{ message }}</p><p class="micro">方向与镜像对预览、拍照和录像文件同时生效（录像走 canvas 重绘，不是给画面加 CSS 旋转）；录像中锁定，避免码流分辨率中途跳变。传感器记录不依赖页面；摄像头仍由浏览器持有，刷新前请先停止录像。同步点击启停不代表帧级时间同步。</p></section></template>
+
+<style scoped>
+.preview-canvas { object-fit: contain; }
+.vision-overlay { position: absolute; pointer-events: none; overflow: hidden; }
+.vision-person { position: absolute; border: 2px solid #58edc4; color: #102032; }
+.vision-person.candidate { border-color: #ffc85a; }
+.vision-person.unknown { border-color: #dbe5f7; }
+.vision-person span { display: inline-block; white-space: nowrap; background: #fff; border-radius: 0 0 4px 0; padding: 2px 5px; font-size: 12px; font-weight: 650; }
+</style>
+<template><section class="panel camera-panel"><div class="panel-head"><h2>摄像头</h2><span class="badge" :class="{ live: recording }">{{ recording ? '录像写盘中' : active ? '预览中' : '未开启' }}</span></div><div class="toolbar"><select v-model="selected" :disabled="active"><option value="">默认摄像头</option><option v-for="device in devices" :key="device.deviceId" :value="device.deviceId">{{ device.label || device.deviceId }}</option></select><select v-model="resolution" :disabled="active"><option>640x480</option><option>1280x720</option><option>1920x1080</option><option>3840x2160</option></select><select v-model="fps" :disabled="active"><option :value="15">15 fps</option><option :value="30">30 fps</option><option :value="60">60 fps</option></select><button v-if="!active" @click="open">开启摄像头</button><button v-else @click="close">关闭</button><button :disabled="!active" @click="pip">画中画</button><button :disabled="!active" @click="shot">拍照</button><select v-model="visionTarget" :disabled="visionOn" aria-label="推理位置"><option value="workstation">推理：工作站</option><option value="local">推理：本机</option></select><label title="ID 仅在本次识别会话内有效。切换前请先关闭动作识别。">ID 识别模型 <select v-model="idModel" :disabled="visionOn"><option value="bytetrack">ByteTrack（原版）</option><option value="reid">人体重识别（ReID）</option></select></label><button :disabled="!active" :aria-pressed="visionOn" @click="toggleVision">{{ visionOn ? '关闭动作识别' : '实时动作识别' }}</button></div><div ref="preview" class="camera-preview"><video ref="video" autoplay playsinline muted :class="{ veiled: transformed }" @loadedmetadata="sizeOverlay" @resize="sizeOverlay"></video><canvas v-show="transformed" ref="canvas" class="preview-canvas"></canvas><div v-if="visionOn" class="vision-overlay" :style="overlayStyle"><div v-for="person in people" :key="person.id" class="vision-person" :class="person.status" :style="{ left: `${person.box[0]*100}%`, top: `${person.box[1]*100}%`, width: `${(person.box[2]-person.box[0])*100}%`, height: `${(person.box[3]-person.box[1])*100}%` }"><span>ID {{ person.id }} · {{ person.action }}<template v-if="person.count"> · 深蹲 {{ person.count }} 次</template></span></div></div></div><div class="toolbar"><select v-model.number="rotate" :disabled="!active || recording"><option :value="0">方向：原始</option><option :value="90">方向：顺时针90°</option><option :value="180">方向：180°</option><option :value="270">方向：顺时针270°</option></select><label><input v-model="mirror" type="checkbox" :disabled="!active || recording"> 镜像</label><label><input v-model="linked" type="checkbox"> 随传感器记录启停</label><button :disabled="!active || recording" @click="start">开始录像</button><button :disabled="!recording" @click="stop">停止录像</button></div><p v-if="active && visionMessage" class="micro" role="status">{{ visionMessage }}</p><p class="muted">{{ message }}</p><p class="micro">方向与镜像对预览、拍照和录像文件同时生效（录像走 canvas 重绘，不是给画面加 CSS 旋转）；录像中锁定，避免码流分辨率中途跳变。传感器记录不依赖页面；摄像头仍由浏览器持有，刷新前请先停止录像。同步点击启停不代表帧级时间同步。</p></section></template>
