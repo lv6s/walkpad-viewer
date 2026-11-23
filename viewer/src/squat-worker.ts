@@ -27,6 +27,8 @@ self.onmessage = ({data}: MessageEvent<Input>) => {
     catch {scoreIssue='逐次指标计算失败；分段结果仍可使用。';}
     try {repAngles=data.inputs.map((s,i)=>squatSideAngles({t:s.t,values:s.values,heading:s.heading},result.shifts[i]+offset,result.reps));}
     catch(e) {scoreIssue+=(scoreIssue?'；':'')+'三向角计算失败：'+(e instanceof Error ? e.message : String(e));}
-    self.postMessage({result,features,scoreIssue,wristIssue,repAngles}, {transfer:[result.phase.buffer]});
+    const traces=repAngles.flatMap(side=>side.traces ?? []);
+    const transfer=[result.phase.buffer,...traces.flatMap(({t,deg,linked})=>[t.buffer,deg.buffer,linked.buffer])];
+    self.postMessage({result,features,scoreIssue,wristIssue,repAngles}, {transfer});
   } catch (e) { self.postMessage({error:e instanceof Error ? e.message : String(e)}); }
 };

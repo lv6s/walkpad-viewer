@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {squatSideAngles} from '../src/squat-axis.ts';
+import {squatTraceAt} from '../src/squat-angle-chart.ts';
 
 const D2R = Math.PI/180;
 const mul = (A, B) => A.map(r => B[0].map((_, j) => r.reduce((s, x, k) => s + x*B[k][j], 0)));
@@ -17,7 +18,7 @@ const REPS = [[2.0, 3.0, 3.4, 4.4], [5.9, 6.9, 7.3, 8.3], [9.8, 10.8, 11.2, 12.2
 function fixture({R = mul(Rx(35*D2R), Rz(25*D2R)), flex = 25, tilt = 5, turnAt = 2, turnDeg = 8, mode = 'sync'} = {}) {
   const n = Math.round(14*HZ);
   const t = new Float64Array(n), values = new Float64Array(n*6);
-  const turnStart = REPS[turnAt][0] - TURN;
+  const turnStart = turnAt < 0 ? Infinity : REPS[turnAt][0] - TURN;
   for (let i = 0; i < n; i++) {
     const s = i/HZ;
     let phi = 0, dphi = 0, psi = 0, dpsi = 0;
@@ -139,6 +140,41 @@ const near = (a, b, tol) => Math.abs(a-b) <= tol;
   const r = squatSideAngles(fixture(), 0, []);
   assert.equal(r.ok, false);
   assert.match(r.reason, /分段/);
+}
+
+// 双踝时间曲线沿用逐次表的积分口径，换时间基准后仍与分段、蹲底角一致。
+{
+  const offset=18;
+  const reps=REPS.map(r=>r.map(t=>t+offset));
+  const r=squatSideAngles(fixture({tilt:0,turnAt:-1}),offset,reps);
+  assert.equal(r.traces.length,reps.length);
+  for(const [i,[start,bottom,rise,end]] of reps.entries()) {
+    assert.deepEqual(squatTraceAt(r.traces,start),[0,0,0]);
+    const mid=squatTraceAt(r.traces,(start+bottom)/2)[0];
+    const a=squatTraceAt(r.traces,bottom);
+    for(const [j,v] of [r.reps[i].ap,r.reps[i].ml,r.reps[i].yaw].entries()) assert.ok(near(a[j],v,1e-4));
+    assert.ok(near(mid,a[0]/2,1e-3));
+    assert.ok(near(squatTraceAt(r.traces,(rise+end)/2)[0],a[0]/2,1e-3));
+    assert.ok(near(squatTraceAt(r.traces,end)[0],0,1e-3));
+    assert.equal(squatTraceAt(r.traces,end+.1),null,'不应连过两次深蹲之间的静止段');
+  }
+}
+
+// 异常帧和长间隔均断线；后续有效帧可以继续读到，但缺口内不插值。
+{
+  const raw=fixture({tilt:0,turnAt:-1}), bad=259;
+  const skip=k=>k>=227 && k<=252;
+  raw.values[bad*6+3]=NaN;
+  const t=raw.t.filter((_,k)=>!skip(k)), values=raw.values.filter((_,i)=>!skip(Math.floor(i/6)));
+  const r=squatSideAngles({t,values},0,REPS);
+  const tr=r.traces[0], gapEnd=tr.t.findIndex(x=>x===2.53), badFrame=tr.t.findIndex(x=>x===2.59);
+  assert.equal(tr.linked[gapEnd],0);
+  assert.equal(tr.linked[badFrame],0);
+  assert.equal(tr.linked[badFrame+1],0);
+  assert.equal(squatTraceAt(r.traces,2.4),null);
+  assert.equal(squatTraceAt(r.traces,2.59),null);
+  assert.equal(squatTraceAt(r.traces,2.595),null);
+  assert.ok(squatTraceAt(r.traces,2.61).every(Number.isFinite));
 }
 
 console.log('squat-axis ok');

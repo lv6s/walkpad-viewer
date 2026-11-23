@@ -20,6 +20,10 @@ export type RepAngle = {
   heading: number; headingApp: number | null;
 };
 
+// 每次从下降起点归零。时间为会话秒，deg 按帧交错存前后倾、左右倾和绕竖直转角。
+// linked[i] 为 1 才能把 i-1 和 i 连起来（失效帧、长间隔不连线）。
+export type SquatAngleTrace = {t: Float64Array; deg: Float32Array; linked: Uint8Array};
+
 export type SideAngles = {
   ok: boolean; reason?: string;
   up?: Vec; lateral?: Vec; forward?: Vec;
@@ -27,7 +31,7 @@ export type SideAngles = {
   ratio?: number; spread?: number; tilt?: number; axisSource?: 'flexion'|'net-turn';
   net?: {n: number; coh: number; gap: number};
   bias?: Vec; biasNorm?: number; conf?: 'hi'|'mid'|'lo';
-  reps?: RepAngle[]; warns?: string[];
+  reps?: RepAngle[]; traces?: SquatAngleTrace[]; warns?: string[];
 };
 
 const angDeg = (a: Vec, b: Vec) => Math.acos(Math.max(-1, Math.min(1, dot(a, b)))) * R2D;
@@ -168,22 +172,23 @@ export function squatSideAngles(s: SquatAxesInput, shift: number, reps: readonly
   }));
   let axisSource: 'flexion'|'net-turn' = 'flexion';
 
+  const interval = (k: number): number => {
+    const dt = tt[k+1]-tt[k];
+    return good[k] && good[k+1] && dt > 0 && dt <= .2 ? dt : 0;
+  };
   const integral = (a: number, b: number, ax: Vec): number => {
     let sum = 0;
     for (let k = a; k < b; k++) {
-      if (!good[k] || !good[k+1]) continue;
-      const dt = tt[k+1]-tt[k];
-      if (!(dt > 0) || dt > .2) continue;
-      sum += dot(gyrC(k), ax)*dt;
+      const dt = interval(k);
+      if (dt) sum += dot(gyrC(k), ax)*dt;
     }
     return sum;
   };
   const netVec = (a: number, b: number): Vec => {
     const out = [0, 0, 0];
     for (let k = a; k < b; k++) {
-      if (!good[k] || !good[k+1]) continue;
-      const dt = tt[k+1]-tt[k];
-      if (!(dt > 0) || dt > .2) continue;
+      const dt = interval(k);
+      if (!dt) continue;
       const w = gyrC(k);
       out[0] += w[0]*dt; out[1] += w[1]*dt; out[2] += w[2]*dt;
     }
@@ -251,12 +256,27 @@ export function squatSideAngles(s: SquatAxesInput, shift: number, reps: readonly
     forward = [-forward[0], -forward[1], -forward[2]];
   }
 
-  const out: RepAngle[] = [];
+  const out: RepAngle[] = [], traces: SquatAngleTrace[] = [];
   for (let i = 0; i < reps.length; i++) {
     const r = reps[i], i0 = idx(r[0]), i1 = idx(r[1]), i2 = idx(r[2]), i3 = idx(r[3]);
     const li = rotUp(lateral, heads[i]), fi = rotUp(forward, heads[i]);
-    out.push({i, ap: integral(i0, i1, li), ml: integral(i0, i1, fi), yaw: integral(i0, i1, up),
-      back: integral(i2, i3, li), hold: tt[i2]-tt[i1], heading: heads[i], headingApp: hApps[i]});
+    const t = tt.slice(i0, i3+1), deg = new Float32Array(t.length*3).fill(NaN), linked = new Uint8Array(t.length);
+    let ap=0, ml=0, yaw=0, back=0, bottom=[0,0,0];
+    if (good[i0]) deg.set([0,0,0]);
+    for (let k = i0; k < i3; k++) {
+      const j=k+1-i0, dt=interval(k);
+      if (dt) {
+        const w=gyrC(k), delta=dot(w, li)*dt;
+        ap+=delta; ml+=dot(w, fi)*dt; yaw+=dot(w, up)*dt;
+        if (k>=i2) back+=delta;
+        linked[j]=1;
+      }
+      if (good[k+1]) {deg[j*3]=ap; deg[j*3+1]=ml; deg[j*3+2]=yaw;}
+      if (k+1===i1) bottom=[ap,ml,yaw];
+    }
+    traces.push({t,deg,linked});
+    out.push({i, ap: bottom[0], ml: bottom[1], yaw: bottom[2],
+      back, hold: tt[i2]-tt[i1], heading: heads[i], headingApp: hApps[i]});
   }
 
 
@@ -271,5 +291,5 @@ export function squatSideAngles(s: SquatAxesInput, shift: number, reps: readonly
   const conf: 'hi'|'mid'|'lo' = ratio >= .82 && spread <= 8 && upSpread <= 6 ? 'hi' : ratio >= .65 && spread <= 15 ? 'mid' : 'lo';
 
   return {ok: true, up, lateral, forward, upSource, quietDur: stillN/fs, upSpread,
-    ratio, spread, tilt, axisSource, net, bias, biasNorm, conf, reps: out, warns};
+    ratio, spread, tilt, axisSource, net, bias, biasNorm, conf, reps: out, traces, warns};
 }

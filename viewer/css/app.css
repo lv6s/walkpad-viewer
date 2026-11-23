@@ -4,6 +4,7 @@
     --bg:#f4f6f9; --card:#ffffff; --ink:#16202c; --muted:#67727f; --faint:#98a3b0;
     --line:#e2e7ee; --grid:#eef1f5; --accent:#1f4e79; --accent-soft:#e9f0f8; --warn:#a4552b;
     --loss:#cf4a44; --loss-soft:rgba(207,74,68,.15);
+    --squat-angle-left:#00776b; --squat-angle-right:#5659ba;
     /* 圆角只有三档：整卡 / 条 / 控件；间距只走上下 10–12 px 一档 */
     --r-card:12px; --r-bar:10px; --r-ctl:7px;
     --shadow:0 1px 2px rgba(16,24,40,.05);
@@ -15,6 +16,7 @@
       --bg:#12161b; --card:#181d24; --ink:#e6ebf1; --muted:#9aa7b4; --faint:#6b7683;
       --line:#2a323c; --grid:#222a33; --accent:#6fa8dc; --accent-soft:#1d2a38; --warn:#d08a5a;
       --loss:#e0706a; --loss-soft:rgba(224,112,106,.18);
+      --squat-angle-left:#66d3c3; --squat-angle-right:#b3b5ff;
       --shadow:0 1px 2px rgba(0,0,0,.35);
       --ctl-edge:rgba(255,255,255,.08); --accent-edge:rgba(111,168,220,.30);
     }
@@ -467,11 +469,21 @@
   .activity-legend{display:flex;gap:18px;flex-wrap:wrap;font-weight:600}
   .activity-card canvas{display:block;width:100%;border:1px solid var(--line);border-radius:6px}
   #squatTimeline{height:108px;cursor:crosshair}
-  #squatVideoCursor{position:absolute;top:12px;bottom:24px;width:2px;background:var(--warn);pointer-events:none;transform:translateX(-50%);box-shadow:0 0 0 1px var(--bg)}
-  #squatVideoCursor[data-edge]::before{position:absolute;top:-8px;color:var(--warn);font-size:12px;line-height:1}
-  #squatVideoCursor[data-edge="left"]::before{content:'◀';right:3px}
-  #squatVideoCursor[data-edge="right"]::before{content:'▶';left:3px}
+  .squat-cursor{position:absolute;top:12px;bottom:24px;pointer-events:none;transform:translateX(-50%)}
+  .squat-video-cursor{width:2px;background:var(--warn);box-shadow:0 0 0 1px var(--bg)}
+  .squat-video-cursor[data-edge]::before{position:absolute;top:-8px;color:var(--warn);font-size:12px;line-height:1}
+  .squat-video-cursor[data-edge="left"]::before{content:'◀';right:3px}
+  .squat-video-cursor[data-edge="right"]::before{content:'▶';left:3px}
+  .squat-hover-cursor{border-left:1px dashed var(--muted);width:1px}
   #squatVideoTime{margin:6px 0 0;color:var(--warn);font-variant-numeric:tabular-nums}
+  .squat-angle-head{display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:5px 16px;margin:16px 0 8px}
+  .squat-angle-head h2{margin:0}
+  .squat-angle-key{display:flex;gap:14px;font-size:12px;color:var(--muted)}
+  .squat-angle-key span::before{content:'';display:inline-block;vertical-align:middle;width:18px;margin-right:5px;border-top:2px solid var(--squat-angle-left)}
+  .squat-angle-key span+span::before{border-top:2px dashed var(--squat-angle-right)}
+  #squatAngleChart{height:224px;cursor:crosshair}
+  #squatAngleValues{margin:6px 0 0;color:var(--ink);font-variant-numeric:tabular-nums}
+  #squatAngleHelp{margin:6px 0 0}
   #squatRows .lnk{font-variant-numeric:tabular-nums}
   #vidSeekStatus{color:var(--warn)}
   .squat-legend{font-size:12px;margin-bottom:8px;color:var(--ink)}

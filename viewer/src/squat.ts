@@ -8,6 +8,7 @@ import {state} from './core/state';
 import {squatCaptureMeta, squatInput, squatPackage} from './parse';
 import {applyWin, winOf} from './timewin';
 import {seekVideoSession} from './video';
+import {drawSquatAngleChart, drawSquatTimeLabels, squatAngleLabels, squatTicks, squatTraceAt, squatX} from './squat-angle-chart';
 
 const HZ=50, colors=['#74849a','#526cdb','#b87616','#178477'];
 const labels=['非深蹲','下降','蹲底','上升'];
@@ -16,9 +17,12 @@ const $=<T extends HTMLElement=HTMLElement>(id:string)=>document.getElementById(
 let source: typeof state.sides, worker: Worker, result: SquatResult, token=0, selected=-1, busy=false, clips: [number,number,number][]=[];
 let angles: SideAngles[] = [];
 let message='';
+let hoverTime: number|null=null, pickedAngleTime: number|null=null;
+const hasAngles=()=>angles.some(side=>side.traces?.length);
 
 function reset(newCapture=false) {
   token++; worker?.terminate(); worker=null; busy=false; result=null; selected=-1; clips=[]; message=''; angles=[];
+  hoverTime=pickedAngleTime=null;
   resetSquatScore(newCapture);
 }
 
@@ -78,43 +82,69 @@ function focus(i:number) {
 
 function geometry(cv:HTMLCanvasElement) {
   const w=cv.clientWidth, h=cv.clientHeight;
-  return {w,h,l:46,r:Math.max(47,w-16),...winOf()};
+  return {w,h,l:46,r:Math.max(47,w-16),border:cv.clientLeft,...winOf()};
+}
+
+function placeCursor(plot: ReturnType<typeof geometry>,cursor: HTMLElement,t: number|null,allowEdge: boolean) {
+  const {a,b,w}=plot, edge=t==null ? '' : t<a ? 'left' : t>b ? 'right' : '';
+  cursor.hidden=!Number.isFinite(t) || !state.sides.length || w<100 || !(b>a) || (!!edge && !allowEdge);
+  if (!cursor.hidden) {
+    if (edge) cursor.dataset.edge=edge;
+    else cursor.removeAttribute('data-edge');
+    cursor.style.left=`${plot.border+squatX(plot,Math.min(b,Math.max(a,t)))}px`;
+  }
+  return edge;
 }
 
 export function paintSquatCursor() {
   if (state.tab!=='squat') return;
-  const cv=$<HTMLCanvasElement>('squatTimeline'), cursor=$('squatVideoCursor'), readout=$('squatVideoTime');
-  if (!cv || !cursor || !readout) return;
-  const t=state.videoT;
-  cursor.hidden=readout.hidden=t==null || !state.sides.length || cv.clientWidth<100;
-  if (cursor.hidden) return;
-  const {a,b,l,r}=geometry(cv);
-  const edge=t<a ? 'left' : t>b ? 'right' : '';
-  if (edge) cursor.dataset.edge=edge;
-  else cursor.removeAttribute('data-edge');
-  cursor.style.left=`${cv.clientLeft+l+(r-l)*Math.min(1,Math.max(0,(t-a)/(b-a)))}px`;
-  const j=result ? Math.floor((t-result.start)*HZ+1e-8) : -1;
-  const phase=j>=0 ? result.phase[j] : undefined;
-  const text=`视频游标 · 会话 ${t.toFixed(2)} s`+(edge ? ' · 超出当前时间窗' : phase==null ? '' : ` · ${labels[phase] ?? '无法判断'}`);
-  if (readout.textContent!==text) readout.textContent=text;
+  const cv=$<HTMLCanvasElement>('squatTimeline'), chart=$<HTMLCanvasElement>('squatAngleChart');
+  if (!cv || !chart) return;
+  const timelinePlot=geometry(cv), anglePlot=geometry(chart);
+  const t=state.videoT, cursor=$('squatVideoCursor'), readout=$('squatVideoTime');
+  const edge=placeCursor(timelinePlot,cursor,t,true);
+  readout.hidden=cursor.hidden;
+  if (!cursor.hidden) {
+    const j=result ? Math.floor((t-result.start)*HZ+1e-8) : -1;
+    const phase=j>=0 ? result.phase[j] : undefined;
+    const text=`视频游标 · 会话 ${t.toFixed(2)} s`+(edge ? ' · 超出当前时间窗' : phase==null ? '' : ` · ${labels[phase] ?? '无法判断'}`);
+    if (readout.textContent!==text) readout.textContent=text;
+  }
+
+  const ready=hasAngles(), video=$('squatAngleVideoCursor'), guide=$('squatAngleHoverCursor');
+  const videoEdge=placeCursor(anglePlot,video,ready ? t : null,true);
+  const inspected=ready ? hoverTime ?? (video.hidden || videoEdge ? pickedAngleTime : null) : null;
+  placeCursor(timelinePlot,$('squatTimelineHoverCursor'),inspected,false);
+  placeCursor(anglePlot,guide,inspected,false);
+  const time=!guide.hidden ? inspected : !video.hidden && !videoEdge ? t : null;
+  const values=$('squatAngleValues');
+  values.hidden=!ready;
+  if (!ready) return;
+  let text='移到图上查看同一时刻的双踝角度';
+  if (time!=null) {
+    const sides=[0,1].map(i=>squatTraceAt(angles[i]?.traces ?? [],time));
+    const details=sides.some(Boolean) ? squatAngleLabels.map((label,i)=>
+      `${label} ${sides.map((side,j)=>`${j?'右':'左'} ${side ? signed(side[i])+'°' : '—'}`).join(' / ')}`).join('　·　')
+      : '此时刻无角度数据';
+    text=`${time.toFixed(2)} s　·　${details}`;
+  }
+  if (values.textContent!==text) values.textContent=text;
 }
 
 export function drawSquat() {
   const cv=$<HTMLCanvasElement>('squatTimeline');
   if (!cv || cv.clientWidth<100 || !state.sides.length) return;
-  const {w,h,l,r,a,b}=geometry(cv); if (!(b>a)) return;
+  const plot=geometry(cv), {w,h,l,r,a,b}=plot; if (!(b>a)) return;
+  hoverTime=null;
   const g=cv.getContext('2d'), k=window.devicePixelRatio||1, css=getComputedStyle(cv);
   const ink=css.getPropertyValue('--ink'),line=css.getPropertyValue('--line'), bg=css.getPropertyValue('--bg');
   cv.width=Math.round(w*k); cv.height=Math.round(h*k); g.setTransform(k,0,0,k,0,0);
-  const x=(t:number)=>l+(r-l)*(t-a)/(b-a);
+  const x=(t:number)=>squatX(plot,t);
   g.fillStyle=bg; g.fillRect(0,0,w,h);
-  g.strokeStyle=line; g.fillStyle=ink; g.font='12px system-ui'; g.textAlign='center';
-  const count=Math.min(8,Math.max(2,Math.floor((r-l)/85)));
-  for (let i=0;i<=count;i++) {
-    const t=a+(b-a)*i/count, u=x(t);
-    g.beginPath();g.moveTo(u,18);g.lineTo(u,78);g.stroke();g.fillText(t.toFixed(b-a<12 ? 2 : 1),u,96);
-  }
-  g.textAlign='left';g.fillText('s',Math.min(w-8,r+4),96);
+  const ticks=squatTicks(plot);
+  g.strokeStyle=line; g.beginPath();
+  for (const tick of ticks) {g.moveTo(tick.x,18);g.lineTo(tick.x,78);}
+  g.stroke(); drawSquatTimeLabels(g,ticks,96,ink);
   for (const [s,e,p] of clips) {
     if(e<=a || s>=b) continue;
     const x0=x(Math.max(a,s)),x1=x(Math.min(b,e));
@@ -133,6 +163,10 @@ export function drawSquat() {
   });
   if (!result) {g.fillStyle=ink;g.textAlign='center';g.fillText('点击「预测」后显示状态时间轴', (l+r)/2,51);}
   else if (!clips.some(([s,e])=>e>a && s<b)) {g.fillStyle=ink;g.textAlign='center';g.fillText('当前时间窗不在上次预测范围内', (l+r)/2,51);}
+  const chart=$<HTMLCanvasElement>('squatAngleChart');
+  const empty=busy ? '正在计算双踝角度…' : !result ? '点击「预测」后显示角度曲线' : !result.reps.length
+    ? '没有完整深蹲，无法绘制角度曲线' : !hasAngles() ? '双踝数据不足，无法绘制角度曲线' : '当前时间窗没有可绘制的深蹲角度';
+  drawSquatAngleChart(chart,geometry(chart),[angles[0]?.traces ?? [],angles[1]?.traces ?? []],clips,colors,empty);
   paintSquatCursor();
 }
 
@@ -214,24 +248,35 @@ function renderSquatAngles() {
 }
 
 export function initSquat() {
-  const cv=$<HTMLCanvasElement>('squatTimeline'); if (!cv) return;
+  const cv=$<HTMLCanvasElement>('squatTimeline'), chart=$<HTMLCanvasElement>('squatAngleChart');
+  if (!cv || !chart) return;
   initSquatScore(renderSquat);
   $('squatVersion').textContent=`分段模型 v${modelVersion} · ${HZ} Hz`;
   $('squatRun').onclick=()=>void run();
   $('squatCancel').onclick=()=>{reset();message='预测已取消。';renderSquat();};
-  new ResizeObserver(drawSquat).observe(cv);
-  const hit=(event:MouseEvent)=>{
-    const {l,r,a,b}=geometry(cv), dx=event.clientX-cv.getBoundingClientRect().left-cv.clientLeft;
+  const observer=new ResizeObserver(drawSquat); observer.observe(cv); observer.observe(chart);
+  const hit=(canvas:HTMLCanvasElement,event:MouseEvent)=>{
+    const {l,r,a,b}=geometry(canvas), dx=event.clientX-canvas.getBoundingClientRect().left-canvas.clientLeft;
     return dx>=l && dx<=r ? a+(b-a)*(dx-l)/(r-l) : NaN;
   };
+  for (const canvas of [cv,chart]) {
+    canvas.onpointermove=e=>{
+      const t=hit(canvas,e); hoverTime=Number.isFinite(t) ? t : null; paintSquatCursor();
+    };
+    canvas.onpointerleave=canvas.onpointercancel=()=>{hoverTime=null; paintSquatCursor();};
+  }
   cv.onclick=e=>{
-    const t=hit(e); if(!Number.isFinite(t)) return;
+    const t=hit(cv,e); if(!Number.isFinite(t)) return;
     const i=result?.reps.findIndex(r=>r[0]<=t && t<r[3]);
     if(i>=0) focus(i);
     seekVideoSession(t,true);
   };
   cv.onmousemove=e=>{
-    const t=hit(e), s=clips.find(c=>c[0]<=t && t<c[1]);
+    const t=hit(cv,e), s=clips.find(c=>c[0]<=t && t<c[1]);
     cv.title=s ? `${t.toFixed(3)} s · ${labels[s[2]] ?? '无法判断'}` : '';
+  };
+  chart.onclick=e=>{
+    const t=hit(chart,e); if(!Number.isFinite(t) || !hasAngles()) return;
+    pickedAngleTime=t; seekVideoSession(t,true); paintSquatCursor();
   };
 }

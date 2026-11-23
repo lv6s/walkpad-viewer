@@ -280,9 +280,21 @@
       <div class="activity-legend squat-legend"><span>■ 非深蹲</span><span>■ 下降</span><span>■ 蹲底</span><span>■ 上升</span><span>▧ 无法判断</span></div>
       <div class="canvas-wrap">
         <canvas id="squatTimeline" aria-label="深蹲四状态时间轴"></canvas>
-        <div id="squatVideoCursor" aria-hidden="true" hidden></div>
+        <div id="squatTimelineHoverCursor" class="squat-cursor squat-hover-cursor" aria-hidden="true" hidden></div>
+        <div id="squatVideoCursor" class="squat-cursor squat-video-cursor" aria-hidden="true" hidden></div>
       </div>
       <p class="hint" id="squatVideoTime" hidden></p>
+      <div class="squat-angle-head">
+        <h2>双踝角度随时间变化 <small>与上方阶段共用时间轴</small></h2>
+        <div class="squat-angle-key"><span>左踝</span><span>右踝</span></div>
+      </div>
+      <div class="canvas-wrap">
+        <canvas id="squatAngleChart" role="img" aria-label="双踝前后倾、左右倾、绕竖直转角随时间变化" aria-describedby="squatAngleHelp"></canvas>
+        <div id="squatAngleHoverCursor" class="squat-cursor squat-hover-cursor" aria-hidden="true" hidden></div>
+        <div id="squatAngleVideoCursor" class="squat-cursor squat-video-cursor" aria-hidden="true" hidden></div>
+      </div>
+      <p class="hint" id="squatAngleValues" hidden></p>
+      <p class="hint" id="squatAngleHelp">悬停看同一时刻的数值；点击曲线定位视频。每次从下降起点归零，只显示完整深蹲；缺测处断线。曲线是小腿段相对转角，不是关节角，图中的「绕竖直」也不是表里的站姿累计航向。</p>
       <h2>逐次事件 <small>点行定位整次；点时间可跳到对应视频帧</small></h2>
       <div class="activity-table"><table>
         <thead><tr><th scope="col">第几次</th><th scope="col">开始下降（s）</th><th scope="col">进入蹲底（s）</th><th scope="col">开始上升（s）</th><th scope="col">结束上升（s）</th><th scope="col">总时长（s）</th><th scope="col">双踝提示 / 复核</th></tr></thead>
@@ -398,6 +410,7 @@
           <h3>深蹲专项</h3>
           <p>导入包含左踝、右踝的 Walkpad 采集 ZIP，选择「整段」或「当前时间窗」，点「预测」。只用两踝三轴加速度与补偿角速度，不用压力、手腕或视频；时间轴按手机接收时间估计踝间偏移。</p>
           <p>每 20 ms 输出非深蹲、下降、蹲底或上升；缺口与无法判断片段留空或标斜线。计数只包含四条边界齐全的周期。带视频时，播放游标跟随进度；点时间轴、事件表行或单个事件时间可跳转视频。时间窗变化不会自动重算，重新预测以点击时的范围为准。</p>
+          <p>四状态时间轴下方的双踝曲线共用同一时间窗和视频游标。前后倾、左右倾、绕竖直三个方向从每次开始下降相对归零，只累计有效帧的补偿角速度，缺口处不连线。点击曲线可定位视频，不改变当前时间窗。曲线不用于判定膝内扣等错误动作。</p>
           <p>适合离线预标注。未知混合动作还未验收，跳前蓄力可能误报；如有跳跃，建议框选其间的深蹲片段分别预测。时间步长不是边界精度。</p>
         </section>
 
