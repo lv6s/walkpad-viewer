@@ -68,10 +68,11 @@ export async function upload(path: string, blob: Blob) {
 }
 export type VisionTarget = 'workstation' | 'local'
 export type IdModel = 'bytetrack' | 'reid'
+export type ActionRules = 'v1' | 'r4'
 
-export function openVisionSocket(target: VisionTarget, idModel: IdModel) {
+export function openVisionSocket(target: VisionTarget, idModel: IdModel, actionRules: ActionRules) {
   if (!token) throw new Error('工作台未连接')
-  return new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/vision?target=${target}&id_model=${idModel}`, ['walkpad-vision', token])
+  return new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/vision?target=${target}&id_model=${idModel}&action_rules=${actionRules}`, ['walkpad-vision', token])
 }
 export async function connect() {
   stopped = false

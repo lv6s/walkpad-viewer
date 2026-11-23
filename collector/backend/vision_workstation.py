@@ -11,22 +11,38 @@ from .vision_worker import HEADER, MAX_FRAME, VISION
 
 
 ID_MODELS = ('bytetrack', 'reid')
+ACTION_RULES = ('v1', 'r4')
 REID_ALPN = 'walkpad-vision-reid/1'
+R4_ALPN = 'walkpad-vision-r4/1'
+REID_R4_ALPN = 'walkpad-vision-reid-r4/1'
+PROTOCOLS = {('bytetrack', 'v1'): None, ('reid', 'v1'): REID_ALPN,
+             ('bytetrack', 'r4'): R4_ALPN, ('reid', 'r4'): REID_R4_ALPN}
 
 
 class WorkstationError(ValueError):
     pass
 
 
-async def connect(config_path, id_model='bytetrack'):
+def selection(protocol):
+    """把协商出的 ALPN 还原成 (ID 模型, 动作规则)。"""
+    for pair, name in PROTOCOLS.items():
+        if name == protocol:
+            return pair
+    return ('bytetrack', 'v1')
+
+
+async def connect(config_path, id_model='bytetrack', action_rules='v1'):
     if id_model not in ID_MODELS:
         raise WorkstationError('不支持的 ID 识别模型')
+    if action_rules not in ACTION_RULES:
+        raise WorkstationError('不支持的动作规则')
+    protocol = PROTOCOLS[(id_model, action_rules)]
     try:
         config = json.loads(config_path.read_text(encoding='utf-8'))
         context = ssl.create_default_context(cafile=str(config_path.parent / 'tls' / 'ca.crt'))
         context.minimum_version = ssl.TLSVersion.TLSv1_2
-        if id_model == 'reid':
-            context.set_alpn_protocols([REID_ALPN])
+        if protocol:
+            context.set_alpn_protocols([protocol])
         tls = config_path.parent / 'tls'
         context.load_cert_chain(tls / 'client.crt', tls / 'client.key')
         host, port = config['host'], config['port']
@@ -42,9 +58,9 @@ async def connect(config_path, id_model='bytetrack'):
         raise WorkstationError('工作站证书验证失败，未发送识别画面') from exc
     except (OSError, TimeoutError) as exc:
         raise WorkstationError('无法连接工作站，请检查公司局域网或切换到本机') from exc
-    if id_model == 'reid' and writer.get_extra_info('ssl_object').selected_alpn_protocol() != REID_ALPN:
+    if protocol and writer.get_extra_info('ssl_object').selected_alpn_protocol() != protocol:
         await close(writer)
-        raise WorkstationError('工作站尚未支持人体重识别，请切换到原版或本机')
+        raise WorkstationError('工作站尚未支持所选识别选项，请更新工作站服务或切换选项')
     return reader, writer
 
 
@@ -91,7 +107,7 @@ async def available_gpu():
 def service_context(tls):
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
-    context.set_alpn_protocols([REID_ALPN])
+    context.set_alpn_protocols([name for name in PROTOCOLS.values() if name])
     context.load_cert_chain(tls / 'server.crt', tls / 'server.key')
     context.load_verify_locations(cafile=str(tls / 'ca.crt'))
     context.verify_mode = ssl.CERT_REQUIRED
@@ -117,11 +133,12 @@ class VisionService:
                 await encode(writer, {'type': 'error', 'message': '工作站暂无空闲 GPU，请稍后重试或切换到本机'})
                 return
             protocol = writer.get_extra_info('ssl_object').selected_alpn_protocol()
+            id_model, action_rules = selection(protocol)
             proc = await asyncio.create_subprocess_exec(
                 sys.executable, '-u', '-m', 'backend.vision_worker',
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                 env={**os.environ, 'CUDA_VISIBLE_DEVICES': str(gpu), 'WALKPAD_VISION_REQUIRE_GPU': '1',
-                     'WALKPAD_VISION_ID_MODEL': 'reid' if protocol == REID_ALPN else 'bytetrack'},
+                     'WALKPAD_VISION_ID_MODEL': id_model, 'WALKPAD_VISION_ACTION_RULES': action_rules},
             )
             ready = await message(proc.stdout, 55.)
             if ready.get('type') == 'ready':

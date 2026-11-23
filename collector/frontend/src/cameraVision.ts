@@ -1,5 +1,5 @@
 import { ref, shallowRef } from 'vue'
-import { openVisionSocket, type IdModel, type VisionTarget } from './store'
+import { openVisionSocket, type ActionRules, type IdModel, type VisionTarget } from './store'
 
 interface Person {
   id: number; box: [number, number, number, number]; action: string
@@ -25,12 +25,12 @@ export function cameraVision(video: () => HTMLVideoElement | undefined, draw: (c
     old?.close()
   }
 
-  function start(target: VisionTarget, idModel: IdModel) {
+  function start(target: VisionTarget, idModel: IdModel, actionRules: ActionRules) {
     stop()
     const v = video()
     if (!v?.requestVideoFrameCallback) { message.value = '当前浏览器不支持实时取帧'; return }
     let current: WebSocket
-    try { current = openVisionSocket(target, idModel) }
+    try { current = openVisionSocket(target, idModel, actionRules) }
     catch (error) { message.value = String(error); return }
     socket = current
     enabled.value = true
@@ -62,7 +62,7 @@ export function cameraVision(video: () => HTMLVideoElement | undefined, draw: (c
       if (socket !== current) return
       const event = JSON.parse(data)
       if (event.type === 'ready') {
-        source = idModel === 'reid' ? `${event.device} · ReID` : event.device
+        source = [event.device, idModel === 'reid' ? 'ReID' : '', (event.rules || actionRules) === 'r4' ? '规则 r4' : ''].filter(Boolean).join(' · ')
         message.value = `${source} · 等待画面`
         videoCallback = v.requestVideoFrameCallback(frame)
       } else if (event.type === 'result') {

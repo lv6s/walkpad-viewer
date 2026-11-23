@@ -115,9 +115,10 @@ def test_workstation_bridge_routes_and_reports_disconnect(monkeypatch):
             writer.close()
             await writer.wait_closed()
 
-    async def stub_connect(config, id_model):
+    async def stub_connect(config, id_model, action_rules):
         assert config.name == 'workstation.json'
         assert id_model == 'reid'
+        assert action_rules == 'r4'
         async with await asyncio.start_server(infer, '127.0.0.1', 0) as server:
             return await asyncio.open_connection(*server.sockets[0].getsockname())
 
@@ -130,7 +131,7 @@ def test_workstation_bridge_routes_and_reports_disconnect(monkeypatch):
     app.state.token = 'sample-secret'
     app.websocket('/ws/vision')(VisionBridge().serve)
     with TestClient(app) as client:
-        with client.websocket_connect('/ws/vision?target=workstation&id_model=reid', headers={'origin':'http://testserver'},
+        with client.websocket_connect('/ws/vision?target=workstation&id_model=reid&action_rules=r4', headers={'origin':'http://testserver'},
                                       subprotocols=['walkpad-vision', 'sample-secret']) as ws:
             assert ws.receive_json() == {'type':'ready','device':'Workstation GPU'}
             ws.send_bytes(struct.pack('!Id', 7, .5)+b'fake')

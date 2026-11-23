@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 from fastapi import WebSocket, WebSocketDisconnect
 
 from .vision_worker import HEADER, MAX_FRAME, VISION
-from .vision_workstation import ID_MODELS, close, connect, message, send
+from .vision_workstation import ACTION_RULES, ID_MODELS, close, connect, message, send
 
 
 async def receive(ws, frames):
@@ -61,6 +61,7 @@ class VisionBridge:
         self.active = True
         target = ws.query_params.get('target', 'local')
         id_model = ws.query_params.get('id_model', 'bytetrack')
+        action_rules = ws.query_params.get('action_rules', 'r4')
         label = '工作站' if target == 'workstation' else '本机'
         try:
             await ws.accept(subprotocol='walkpad-vision')
@@ -68,9 +69,11 @@ class VisionBridge:
                 raise ValueError('不支持的识别位置')
             if id_model not in ID_MODELS:
                 raise ValueError('不支持的 ID 识别模型')
+            if action_rules not in ACTION_RULES:
+                raise ValueError('不支持的动作规则')
             frames = asyncio.Queue(maxsize=1)
             tasks = [asyncio.create_task(receive(ws, frames)),
-                     asyncio.create_task(self.run(ws, frames, target, id_model))]
+                     asyncio.create_task(self.run(ws, frames, target, id_model, action_rules))]
             try:
                 done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                 for task in done:
@@ -92,9 +95,9 @@ class VisionBridge:
             finally:
                 self.active = False
 
-    async def run(self, ws, frames, target, id_model):
+    async def run(self, ws, frames, target, id_model, action_rules):
         if target == 'workstation':
-            reader, writer = await connect(VISION / 'workstation.json', id_model)
+            reader, writer = await connect(VISION / 'workstation.json', id_model, action_rules)
             try:
                 await exchange(ws, frames, reader, writer)
             finally:
@@ -104,7 +107,8 @@ class VisionBridge:
             sys.executable, '-u', '-m', 'backend.vision_worker',
             cwd=Path(__file__).resolve().parents[1],
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            env={**os.environ, 'WALKPAD_VISION_ID_MODEL': id_model},
+            env={**os.environ, 'WALKPAD_VISION_ID_MODEL': id_model,
+                 'WALKPAD_VISION_ACTION_RULES': action_rules},
         )
         try:
             await exchange(ws, frames, proc.stdout, proc.stdin, local=True)

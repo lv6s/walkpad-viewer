@@ -14,12 +14,20 @@ WEIGHT_HASH = 'a083adb42303728ae14c4bd6bd56d80da46f82fb2564dbd6f31dcc92ea321646'
 HEADER = struct.Struct('!Id')
 MAX_FRAME = 1024 * 1024
 IDENTITY_MODES = ('bytetrack', 'reid')
+ACTION_RULES = ('v1', 'r4')
 
 
 def identity_mode():
     mode = os.environ.get('WALKPAD_VISION_ID_MODEL', 'bytetrack').strip().lower()
     if mode not in IDENTITY_MODES:
         raise ValueError('跨帧身份模式 WALKPAD_VISION_ID_MODEL 只支持 bytetrack 或 reid')
+    return mode
+
+
+def action_rules():
+    mode = os.environ.get('WALKPAD_VISION_ACTION_RULES', 'r4').strip().lower()
+    if mode not in ACTION_RULES:
+        raise ValueError('动作规则 WALKPAD_VISION_ACTION_RULES 只支持 v1 或 r4')
     return mode
 
 
@@ -96,13 +104,20 @@ def main():
     out = sys.stdout.buffer
     sys.stdout = sys.stderr
     pin = sys.stdin.buffer
+    rules = None
     try:
         mode = identity_mode()
+        rules = action_rules()
         cv2, np, model, device = setup()
         identity = PersonIdentity(load_encoder(cv2, VISION)) if mode == 'reid' else None
-        actions = LiveActions(identity.ttl) if identity else LiveActions()
+        retention = identity.ttl if identity else 3.
+        if rules == 'r4':
+            from .vision_rules_r4 import R4Actions
+            actions = R4Actions(cv2, retention)
+        else:
+            actions = LiveActions(retention)
         tracker = Path(__file__).with_name('vision_bytetrack.yaml')
-        send(out, {'type': 'ready', 'device': 'GPU' if device == 0 else 'CPU'})
+        send(out, {'type': 'ready', 'device': 'GPU' if device == 0 else 'CPU', 'rules': rules})
         last_seq, last_t = 0, -1.
         while size := pin.read(4):
             length = int.from_bytes(size, 'big')
@@ -124,12 +139,14 @@ def main():
             if identity is not None:
                 state, recovered = identity.resolve(t, image, state)
                 actions.reset(recovered)
-            people = actions.frame(t, state)
+            people = (actions.frame(t, image, state) if rules == 'r4'
+                      else actions.frame(t, state))
             send(out, {'type': 'result', 'seq': seq, 't': t, 'people': people})
             last_seq, last_t = seq, t
     except Exception as exc:
         if isinstance(exc, ImportError):
-            message = '本机视觉依赖不可用：' + str(exc)
+            prefix = '动作规则 r4 依赖不可用：' if rules == 'r4' else '本机视觉依赖不可用：'
+            message = prefix + str(exc)
         else:
             message = '本机识别失败：' + str(exc)
         send(out, {'type': 'error', 'message': message[:300]})
