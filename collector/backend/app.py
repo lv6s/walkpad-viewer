@@ -191,8 +191,6 @@ def create_app(root=ROOT,demo=False,phone_port=8766,debug=False,idle_exit=8):
                 if body.profile not in ('wt','insole') or body.enabled is None:
                     raise ValueError('invalid algorithm configuration')
                 return await asyncio.wrap_future(c.algorithm.control('configure',profile=body.profile,enabled=body.enabled))
-            if action in ('velocity_start','velocity_stop'):
-                return c.velocity_control(body.device_id, action == 'velocity_start')
             if action == 'bias':
                 key = body.bias_key or body.foot
                 device = next((d for d in c.devices.values() if d['bias_key'] == key and d['profile'] == 'insole'), None)

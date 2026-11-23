@@ -97,6 +97,59 @@ def test_ble_connect_checks_gatt_before_registering(tmp_path,monkeypatch):
     asyncio.run(run())
 
 
+def test_live_lab_attitude_uses_device_time_and_resets_reference(tmp_path):
+    async def run():
+        c = Capture(tmp_path)
+        await c.start()
+        try:
+            d = c._device('ankle','Ankle','insole',None,placement='leftAnkle',kind='imu')
+            d.update(connected=True,connection='first')
+            epoch = time.time()*1000
+            receipt = time.monotonic()*1000
+            for i in range(101):
+                await c._process('ankle',demo_packet('insole',i,'l',epoch+i*20),receipt,epoch,None,None,False)
+            frames = c.stream(0)['frames']
+            assert frames[99]['attitude']['degrees'][2] is None
+            first = frames[100]['attitude']
+            assert first['degrees'] == pytest.approx((0,0,0))
+            assert 'velocity' not in frames[-1]
+            packet = demo_packet('insole',101,'l',epoch+2270)
+            await c._process('ankle',packet,time.monotonic()*1000,epoch,None,None,False)
+            after_gap = c.public(d)['attitude']
+            assert after_gap['degrees'][2] is None and after_gap['reference_id'] != first['reference_id']
+            d['connection'] = 'second'
+            assert c.public(d)['attitude'] is None
+            await c._process('ankle',packet,time.monotonic()*1000,epoch,None,None,False)
+            assert c.public(d)['attitude']['reference_id'] == 'second:0'
+            d['connected'] = False
+            assert c.public(d)['attitude'] is None
+        finally:
+            await c.close()
+    asyncio.run(run())
+
+
+def test_live_wt_streams_only_fresh_angle_frames(tmp_path):
+    async def run():
+        c = Capture(tmp_path)
+        d = c._device('wt','WT','wt',None,placement='leftWrist')
+        d.update(connected=True,connection='wt1')
+        packed = b'\x55\x53' + struct.pack('<4h',4096,-8192,16384,0)
+        angle = packed + bytes([sum(packed) % 256])
+        receipt, epoch = time.monotonic()*1000, time.time()*1000
+        await c._process('wt',angle,receipt,epoch,None,None,False)
+        expected = dict(degrees=[22.5,-45.,90.],reference_id='wt1')
+        assert c.public(d)['attitude'] == expected
+        assert c.stream(0)['frames'][0]['attitude'] == expected
+        packet = b'\x55\x59' + bytes(18)
+        await c._process('wt',packet,receipt,epoch,None,None,False)
+        assert 'attitude' not in d['last'] and c.public(d)['attitude'] == expected
+        d['attitude_receipt'] -= 501
+        assert c.public(d)['attitude'] is None
+        await c._process('wt',demo_packet('wt',0,'l',epoch),time.monotonic()*1000,epoch,None,None,False)
+        assert c.public(d)['attitude']['degrees'] == [0.,0.,0.]
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('profile',['insole','wt'])
 def test_split_and_combined(profile):
     data = demo_packet(profile,2,'l',time.time()*1000)

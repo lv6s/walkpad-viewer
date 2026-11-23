@@ -1,12 +1,8 @@
 import { shallowRef, ref } from 'vue'
 
-export interface VelocityState {
-  status: string; valid: boolean; speed_mps: number | null; velocity_mps: number[] | null
-  elapsed_s: number; calibration_progress: number; frame: string
-  time_basis: string | null; bias_source: 'online' | 'initial'; bias_ready: boolean
-  gyro_bias_dps: number[] | null
-  constraint?: string; constraint_updates?: number; quality?: string
-  velocity_std_mps?: number[] | null; linear_acc_mps2?: number[] | null
+export interface Attitude {
+  degrees: [number, number, number | null]
+  reference_id: string
 }
 export interface Frame {
   cursor: number
@@ -17,8 +13,7 @@ export interface Frame {
   receipt_ms: number
   epoch_ms: number
   values: (number | null)[] | null
-  velocity?: VelocityState
-  angles?: number[]
+  attitude?: Attitude | null
   pressure?: number[]
   temperature?: number
   device_ms?: number | null
@@ -30,7 +25,7 @@ export interface Device {
   id: string; name: string; address?: string; profile: 'wt' | 'insole'; kind: 'insole' | 'imu' | 'wt'; has_pressure: boolean; foot: string | null; bias_key: string; placement: string | null; placement_label: string | null; source: string
   connected: boolean; reconnecting: boolean; frames: number; bad: number; rate: number
   last: Frame | null; topology: string; format: number | null; format_status: string; command_status: string
-  velocity: VelocityState
+  attitude: Attitude | null
 }
 export interface Status {
   version: string; source: string; devices: Device[]; cursor: number; demo_allowed: boolean
