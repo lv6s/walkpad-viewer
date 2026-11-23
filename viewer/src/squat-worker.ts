@@ -20,13 +20,13 @@ self.onmessage = ({data}: MessageEvent<Input>) => {
       try {wristGrid=wristOnSquatGrid(data.wrist,data.inputs[0],result.shifts[0],offset,result.start,result.phase.length);}
       catch(e) {wristIssue='腕部未通过对时质检：'+(e instanceof Error ? e.message : String(e));}
     }
+    try {repAngles=data.inputs.map((s,i)=>squatSideAngles({t:s.t,values:s.values,heading:s.heading},result.shifts[i]+offset,result.reps));}
+    catch(e) {scoreIssue='三向角计算失败：'+(e instanceof Error ? e.message : String(e));}
     try {
       const angles=data.inputs.map((s,i)=>deviceAnglesOnSquatGrid(s,result.shifts[i]+offset,result.start,result.phase.length));
-      features=extractSquatFeatures(result.start,result.phase,raw,result.reps,wristGrid,angles);
+      features=extractSquatFeatures(result.start,result.phase,raw,result.reps,wristGrid,angles,repAngles);
     }
-    catch {scoreIssue='逐次指标计算失败；分段结果仍可使用。';}
-    try {repAngles=data.inputs.map((s,i)=>squatSideAngles({t:s.t,values:s.values,heading:s.heading},result.shifts[i]+offset,result.reps));}
-    catch(e) {scoreIssue+=(scoreIssue?'；':'')+'三向角计算失败：'+(e instanceof Error ? e.message : String(e));}
+    catch {scoreIssue += (scoreIssue ? '；' : '')+'逐次指标计算失败；分段结果仍可使用。';}
     const traces=repAngles.flatMap(side=>side.traces ?? []);
     const transfer=[result.phase.buffer,...traces.flatMap(({t,deg,linked})=>[t.buffer,deg.buffer,linked.buffer])];
     self.postMessage({result,features,scoreIssue,wristIssue,repAngles}, {transfer});

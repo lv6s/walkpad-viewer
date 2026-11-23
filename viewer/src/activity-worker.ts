@@ -1,7 +1,8 @@
 import {activityEngine} from './activity-engine';
 import {analyzeGaitWindow} from './gait-window';
 import {analyzeMoticonTas} from './moticon-tas';
-import {analyzeGaitExtraction} from './turn-rule';
+import {analyzeActivity4} from './activity4';
+import {analyzeGaitExtraction, annotateActivity4} from './turn-rule';
 import {inferOffline, walkingRanges} from './axis/offline';
 import {ACTIVITY_STILL} from './core/constants';
 import {ictoDetectRows} from './icto/core';
@@ -14,8 +15,11 @@ import type {GaitReportSegment} from './gait/walking';
 function buildSegments(r): ActivitySegment[] {
   const out: ActivitySegment[] = [];
   for (let i = 0; i < r.ticks;) {
-    let end = i + 1; while (end < r.ticks && r.labels[end] === r.labels[i]) end++;
     const label = r.labels[i], cls = label < 0 ? 3 : label;
+    const turn = r.turns?.[i] ?? 0, excluded = !!r.turns && cls < 2 && !!(turn || r.walkReview[i]);
+    let end = i + 1;
+    while (end < r.ticks && r.labels[end] === label && (!r.turns ||
+      (r.turns[end] === turn && (cls !== 0 || !!r.walkReview[end] === !!r.walkReview[i])))) end++;
     let sum = 0, edge = false, reviewed = false, walkReview = 0, changed = false;
     const modeled = (label >= 0 && label < 3) || (label === ACTIVITY_STILL && r.probs.length > ACTIVITY_STILL * r.ticks);
     for (let k = i; k < end; k++) {
@@ -23,7 +27,9 @@ function buildSegments(r): ActivitySegment[] {
       edge ||= !!r.edge[k]; reviewed ||= !!r.reviewed?.[k]; walkReview |= r.walkReview?.[k] ?? 0;
       changed ||= !!r.baseLabels && r.baseLabels[k] !== label;
     }
-    out.push({a: i / 10, b: end / 10, cls, confidence: !modeled || reviewed || changed ? null : sum / (end - i), edge, reviewed, walkReview}); i = end;
+    out.push({a: i / 10, b: end / 10, cls, confidence: !modeled || reviewed || changed ? null : sum / (end - i), edge, reviewed, walkReview,
+      ...(turn && {turn}), ...(excluded && {excludeFromGait: true})});
+    i = end;
   }
   const end = r.ticks / 10;
   if (r.duration > end + 1e-6) {
@@ -37,6 +43,7 @@ function buildSegments(r): ActivitySegment[] {
 const engine = activityEngine();
 const dispatch = (contract, inputs, duration, progress) =>
   contract.kind === 'moticon-tas' ? analyzeMoticonTas(engine, inputs, duration, progress)
+    : contract.kind === 'activity4' ? analyzeActivity4(engine, inputs, duration, progress)
     : contract.kind === 'gait-window' ? analyzeGaitWindow(engine, contract.id, inputs, duration, progress, contract.reviewGait)
     : engine.analyze(contract, inputs, duration, progress);
 self.onmessage = async ({data: {contract, inputs, duration, receiptTiming, axis}}) => {
@@ -46,9 +53,10 @@ self.onmessage = async ({data: {contract, inputs, duration, receiptTiming, axis}
       imu: {phys: s.axes}, activityIn: s}, {win: axis.win, walking, support: s.support}));
     if (axis && !contract) { self.postMessage({axes: axisResult()}); return; }
     let result;
-    if (contract.kind === 'gait-extraction') {
-      const base = await analyzeMoticonTas(engine, inputs, duration, p => progress(Math.round(p * .7)));
-      result = await analyzeGaitExtraction(engine, inputs, duration, p => progress(Math.round(70 + p * .3)), contract.id, base);
+    if (contract.kind === 'gait-extraction' || contract.kind === 'activity4-annotated') {
+      const extraction = contract.kind === 'gait-extraction';
+      const base = await (extraction ? analyzeMoticonTas : analyzeActivity4)(engine, inputs, duration, p => progress(Math.round(p * .7)));
+      result = await (extraction ? analyzeGaitExtraction : annotateActivity4)(engine, inputs, duration, p => progress(Math.round(70 + p * .3)), contract.id, base);
     } else {
       result = await dispatch(contract, inputs, duration, progress);
     }
@@ -71,7 +79,7 @@ self.onmessage = async ({data: {contract, inputs, duration, receiptTiming, axis}
         } catch { failed.push(side); return {side, t0: 0, inp: null, rec: null}; }
       });
       try { report = gaitReport(segments, sides, false, !receiptTiming); } catch { reportError = true; }
-      const runs = segments.map((s, i) => s.cls === 1 ? i : -1).filter(i => i >= 0);
+      const runs = segments.map((s, i) => s.cls === 1 && !s.excludeFromGait ? i : -1).filter(i => i >= 0);
       const runSegments = runs.map(i => segments[i]);
       const diagnostics = (events: GaitSideInput[]) => {
         const list: GaitSegment[] = [], computed = gaitMetrics({segments: runSegments, sides: events});
@@ -92,6 +100,7 @@ self.onmessage = async ({data: {contract, inputs, duration, receiptTiming, axis}
     }
     const transfer = [result.labels.buffer, result.probs.buffer, result.edge.buffer];
     if (result.reviewed) transfer.push(result.reviewed.buffer);
+    if (result.turns) transfer.push(result.turns.buffer, result.walkReview.buffer);
     self.postMessage({result, segments, gait, runningGait, report, refinedRunReport, failed, debugError, reportError, runningError}, {transfer});
   } catch (e) { self.postMessage({error: e?.message || String(e)}); }
 };

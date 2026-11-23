@@ -5,7 +5,10 @@ export const GAIT_MIN_CYCLES = 5;
 export const GAIT_MIN_SEG = 3;
 const STRIDE_MIN = .25, STRIDE_MAX = 2;
 
-export interface ActivitySegment {a: number; b: number; cls: number; confidence?: number; edge?: boolean; reviewed?: boolean; walkReview?: number}
+export interface ActivitySegment {
+  a: number; b: number; cls: number; confidence?: number; edge?: boolean; reviewed?: boolean; walkReview?: number;
+  turn?: number; excludeFromGait?: boolean;
+}
 export interface DeviceAngleArrays {pitch: Float64Array; sideTilt: Float64Array}
 export interface GaitSource {t: Float64Array; seq: Float64Array; ok: Uint8Array; axes: Float32Array[]; accAtRail?: Uint8Array; deviceAngles?: DeviceAngleArrays}
 export interface Candidate {

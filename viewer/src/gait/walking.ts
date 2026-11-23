@@ -132,8 +132,8 @@ export function gaitReport(segments: ActivitySegment[], sides: GaitSideInput[], 
   const imu = {left: left.imu, right: right.imu};
   const coverage = intersect(left.support, right.support), phases = phaseTimingReliable ? bilateralPhases(left.phases, right.phases) : [];
   const events = [...left.steps, ...right.steps].sort((a, b) => a.ic_ms - b.ic_ms);
-  return segments.map(({a, b, cls}, index) => {
-    if (cls !== 1 && (onlyRuns || cls !== 0)) return null;
+  return segments.map(({a, b, cls, excludeFromGait}, index) => {
+    if (excludeFromGait || (cls !== 1 && (onlyRuns || cls !== 0))) return null;
     const start_ms = ms(a), end_ms = ms(b);
     const countable_intervals: Interval[] = [], steps: GaitStep[] = [];
     for (let i = firstAfter(coverage, start_ms, (v, t) => v.end_ms <= t); i < coverage.length && coverage[i].start_ms < end_ms; i++) {

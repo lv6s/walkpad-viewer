@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>鞋垫数据查看器</title>
-<link rel="stylesheet" href="css/app.css?v=3.43.0">
-<link rel="stylesheet" href="css/axis.css?v=3.43.0">
+<link rel="stylesheet" href="css/app.css?v=3.48.0">
+<link rel="stylesheet" href="css/axis.css?v=3.48.0">
 </head>
 <body data-page="viewer">
 <header>
@@ -210,6 +210,7 @@
       <p id="activityStatus" role="status" aria-live="polite"></p>
       <p id="activityIctoHint" class="hint" aria-live="polite"></p>
       <p id="activitySummary"></p>
+      <p id="activityAnnotations" class="hint" hidden></p>
       <section id="activityGaitOverview" class="gait-overview" aria-labelledby="gaitOverviewTitle" hidden>
         <h2 id="gaitOverviewTitle">整次步态概览 <small>步行与跑步分开汇总，使用同一套指标</small></h2>
         <div class="activity-table gait-table gait-static"><table>
@@ -275,7 +276,7 @@
         <span class="chip" id="squatVersion"></span>
       </div>
       <p id="squatStatus" role="status" aria-live="polite"></p>
-      <p class="activity-warning">本地离线预测，仅用双踝加速度和补偿角速度。跳前蓄力可能被多算；可框选不含跳跃的时间窗再预测。</p>
+      <p class="activity-warning">分段只用双踝加速度和补偿角速度；指标另用可用的设备俯仰、侧倾与腕部六轴。跳前蓄力可能被多算，可框选不含跳跃的时间窗再预测。不评分、不判动作对错或受伤风险。</p>
       <h2>四状态时间轴 <small>点色块定位一次深蹲；有视频时可点时间轴跳转</small></h2>
       <div class="activity-legend squat-legend"><span>■ 非深蹲</span><span>■ 下降</span><span>■ 蹲底</span><span>■ 上升</span><span>▧ 无法判断</span></div>
       <div class="canvas-wrap">
@@ -295,9 +296,9 @@
       </div>
       <p class="hint" id="squatAngleValues" hidden></p>
       <p class="hint" id="squatAngleHelp">悬停看同一时刻的数值；点击曲线定位视频。每次从下降起点归零，只显示完整深蹲；缺测处断线。曲线是小腿段相对转角，不是关节角，图中的「绕竖直」也不是表里的站姿累计航向。</p>
-      <h2>逐次事件 <small>点行定位整次；点时间可跳到对应视频帧</small></h2>
+      <h2>逐次事件 <small>点行选中该次并查看下方指标；点时间可跳到对应视频帧</small></h2>
       <div class="activity-table"><table>
-        <thead><tr><th scope="col">第几次</th><th scope="col">开始下降（s）</th><th scope="col">进入蹲底（s）</th><th scope="col">开始上升（s）</th><th scope="col">结束上升（s）</th><th scope="col">总时长（s）</th><th scope="col">双踝提示 / 复核</th></tr></thead>
+        <thead><tr><th scope="col">第几次</th><th scope="col">开始下降（s）</th><th scope="col">进入蹲底（s）</th><th scope="col">开始上升（s）</th><th scope="col">结束上升（s）</th><th scope="col">总时长（s）</th></tr></thead>
         <tbody id="squatRows"></tbody>
       </table></div>
       <p class="hint" id="squatEmpty"></p>
@@ -309,34 +310,19 @@
       </table></div>
       <p class="hint">前后角＝蹲到最低点相对本次蹲前站立的前后倾变化；左右角＝同一阶段的内外倾；航向＝两次深蹲之间站立期累计的绕竖直转角，第 1 次为 0；深蹲动作内的屈伸耦合不计入，所以它反映的是站姿朝向有没有变。正方向取包内多数次深蹲的下降方向，两脚口径一致、可直接互比。量的是小腿段姿态，不是髋屈曲角。</p>
       <p class="hint">左右角的前提是内扣/外翻没有和屈伸同步到位：两者严格同比例时合成一根轴，数学上分不开，会有一部分并进前后角。</p>
-      <h2>逐次质量复核 <small>点「预测」自动给出双踝偏差提示</small></h2>
+      <h2>逐次指标 <small>选中一次查看双踝与腕部指标，选择不需要操作视频</small></h2>
       <div class="ptools">
-        <button id="squatScoreExport" type="button" disabled>导出指标与复核</button>
+        <label>查看第几次 <select id="squatMetricsRep" disabled></select></label>
+        <button id="squatMetricsExport" type="button" disabled>导出指标 JSON</button>
       </div>
-      <p id="squatScoreStatus" class="hint" role="status" aria-live="polite"></p>
-      <p class="activity-warning">偏差提示看双踝角度和轨迹差，不判断足内外翻、膝内扣或下蹲深度。腕部只展示指标。人工复核只保存在本页当前采集包，换包或关闭前请导出。</p>
-      <div class="ptools">
-        <label>查看第几次 <select id="squatScoreRep" disabled></select></label>
-        <label>人工复核 <select id="squatScoreReview" disabled><option value="">未复核</option><option value="good">好</option><option value="fair">一般</option><option value="bad">不好</option></select></label>
-        <span id="squatScoreResult" class="hint"></span>
-      </div>
-      <details class="note">
-        <summary>高级：评分模型与个人档</summary>
-        <div class="ptools">
-          <button id="squatScoreImport" type="button">导入评分模型 / 个人档</button>
-          <input id="squatScoreFile" type="file" accept=".json,application/json" hidden>
-          <button id="squatScoreBuiltIn" type="button" disabled>使用内置提示</button>
-          <button id="squatScoreFit" type="button" disabled>用本包复核调整偏置</button>
-          <button id="squatScoreReset" type="button" disabled>恢复基础评分</button>
-          <button id="squatScoreProfile" type="button" disabled>导出个人档</button>
-        </div>
-        <p class="hint">个人调整仅用于导入的质量模型，且只使用明确复核的样本。同一人的个人档建议用另一次采集验证。</p>
-      </details>
-      <details id="squatScoreDetails" hidden>
-        <summary>查看本次指标</summary>
-        <p id="squatScoreIssues" class="hint"></p>
-        <div class="activity-table"><table><thead><tr><th scope="col">指标</th><th scope="col">数值</th></tr></thead><tbody id="squatScoreMetrics"></tbody></table></div>
-      </details>
+      <p id="squatMetricsStatus" class="hint" role="status" aria-live="polite"></p>
+      <p id="squatMetricsIssues" class="hint"></p>
+      <div class="activity-table"><table>
+        <thead><tr><th scope="col">指标</th><th scope="col">数值</th></tr></thead>
+        <tbody id="squatMetricsBody"></tbody>
+      </table></div>
+      <p class="hint">比较动作时，先看双踝的幅度差、起身时差和侧向转角，再看入蹲底附近的减速、晃动与回位。侧向转角不是膝内扣或足外翻角，加速度模长偏差也不是关节负荷。</p>
+      <p class="hint">双手叉腰时，可用腕峰相位、蹲底腕角保留率及腕/踝摆幅比观察腰侧和下肢的配合。腕峰时刻减蹲底中点为负，表示腕峰提前；腕/踝摆幅比以双踝主轴摆幅均值为分母。腕角不是腰椎角。数据不足时显示「—」。</p>
     </section>
   </div>
 
@@ -408,10 +394,11 @@
 
         <section data-help="squat" data-title="深蹲专项">
           <h3>深蹲专项</h3>
-          <p>导入包含左踝、右踝的 Walkpad 采集 ZIP，选择「整段」或「当前时间窗」，点「预测」。只用两踝三轴加速度与补偿角速度，不用压力、手腕或视频；时间轴按手机接收时间估计踝间偏移。</p>
+          <p>导入包含左踝、右踝的 Walkpad 采集 ZIP，选择「整段」或「当前时间窗」，点「预测」。分段只用两踝三轴加速度与补偿角速度，不用压力或视频；腕部六轴只用于逐次指标，不参与分段。时间轴按手机接收时间估计踝间偏移。</p>
           <p>每 20 ms 输出非深蹲、下降、蹲底或上升；缺口与无法判断片段留空或标斜线。计数只包含四条边界齐全的周期。带视频时，播放游标跟随进度；点时间轴、事件表行或单个事件时间可跳转视频。时间窗变化不会自动重算，重新预测以点击时的范围为准。</p>
           <p>四状态时间轴下方的双踝曲线共用同一时间窗和视频游标。前后倾、左右倾、绕竖直三个方向从每次开始下降相对归零，只累计有效帧的补偿角速度，缺口处不连线。点击曲线可定位视频，不改变当前时间窗。曲线不用于判定膝内扣等错误动作。</p>
           <p>适合离线预标注。未知混合动作还未验收，跳前蓄力可能误报；如有跳跃，建议框选其间的深蹲片段分别预测。时间步长不是边界精度。</p>
+          <p>逐次指标只描述双踝与腕部的运动学量，按数据可用性标注缺口；不评分、不做动作分类，也不推断受伤风险。腕部角度类指标以双手叉腰姿势为前提，其他摆臂姿势只作参照；腕角不是腰椎角，设备加速度模长偏差不是关节负荷。</p>
         </section>
 
         <section data-help="video" data-title="现场视频">
@@ -448,7 +435,7 @@
   <p class="vid-note" id="vidSeekStatus" role="status" hidden></p>
 </div>
 
-<script src="dist/app.js?v=3.43.0"></script>
+<script src="dist/app.js?v=3.48.0"></script>
 
 
 </body>

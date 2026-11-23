@@ -3,8 +3,9 @@ import fs from 'node:fs';
 import {activityEngine} from '../src/activity-engine.ts';
 import {ACTIVITY_WALK_RUN_UNCERTAIN, analyzeGaitWindow, reviewGaitSpan, windowFeatures, windowProbabilities} from '../src/gait-window.ts';
 import {ACTIVITY_STILL, ACTIVITY_TURN_L, ACTIVITY_TURN_R} from '../src/core/constants.ts';
-import {analyzeGaitExtraction, screenGait, WALK_REVIEW} from '../src/turn-rule.ts';
+import {analyzeGaitExtraction, annotateActivity4, screenGait, WALK_REVIEW} from '../src/turn-rule.ts';
 import {analyzeMoticonTas, decodeMoticonTas, predictMoticonTas} from '../src/moticon-tas.ts';
+import {analyzeActivity4, predictActivity4} from '../src/activity4.ts';
 const contract = JSON.parse(fs.readFileSync(new URL('../src/o1-model.json', import.meta.url)));
 const fixture = JSON.parse(fs.readFileSync(new URL('./o1-parity.json', import.meta.url)));
 const engine = activityEngine(), models = engine.load(contract), n = fixture.input[0].length;
@@ -78,6 +79,49 @@ for (let i = 0; i < tk; i++) {
 }
 console.log('PASS Moticon TAS PyTorch state/boundary/decode parity, chunk joins and gap isolation', tasError, boundaryError);
 
+const activity4Ref = JSON.parse(fs.readFileSync(new URL('./activity4-parity.json', import.meta.url)));
+const makeActivity4 = n => Float32Array.from({length: 12 * n}, (_, k) => {
+  const c = Math.floor(k / n), i = k % n;
+  return (Math.sin(i * (.024 + c * .003)) + .25 * Math.cos(i * .077 + c)) * (c % 6 < 3 ? .8 : 220) + (c % 6 === 2 ? 1 : 0);
+});
+let activity4Error = 0, activity4BoundaryError = 0;
+for (const {samples, logits, boundaryLogits, decoded} of activity4Ref) {
+  const actual = predictActivity4(makeActivity4(samples), samples), target = logits.flat();
+  assert.equal(actual.logits.length, target.length);
+  assert.equal(actual.boundaryLogits.length, boundaryLogits.length);
+  for (let i = 0; i < target.length; i++) activity4Error = Math.max(activity4Error, Math.abs(actual.logits[i] - target[i]));
+  for (let i = 0; i < boundaryLogits.length; i++) activity4BoundaryError = Math.max(activity4BoundaryError, Math.abs(actual.boundaryLogits[i] - boundaryLogits[i]));
+  const boundary = actual.boundaryLogits.map(v => 1 / (1 + Math.exp(-v)));
+  assert.deepEqual([...decodeMoticonTas(actual.logits, boundary, 5)], decoded);
+}
+assert.ok(activity4Error < 2e-5 && activity4BoundaryError < 2e-5, `ONNX activity4 mismatch: ${activity4Error}, ${activity4BoundaryError}`);
+const blipLogits = new Float32Array(20 * 4);
+blipLogits.fill(3, 0, 20);
+blipLogits[20 + 8] = 4;
+assert.ok(decodeMoticonTas(blipLogits, new Float32Array(20), 5).every(c => c === 0));
+blipLogits.fill(7, 20 + 10, 40);
+assert.deepEqual([...decodeMoticonTas(blipLogits, new Float32Array(20), 5)], [...Array(10).fill(0), ...Array(10).fill(1)]);
+const a4n = activity4Ref.at(-1).samples, a4x = makeActivity4(a4n), a4ticks = a4n / 5;
+const a4sources = [0, 1].map(foot => ({
+  t: Float64Array.from({length: a4n}, (_, i) => (i + .5) / 50), seq: Float64Array.from({length: a4n}, (_, i) => i),
+  ok: new Uint8Array(a4n).fill(1), axes: Array.from({length: 6}, (_, c) => a4x.subarray((foot * 6 + c) * a4n, (foot * 6 + c + 1) * a4n))
+}));
+const a4full = await analyzeActivity4(engine, a4sources, a4n / 50);
+assert.equal(a4full.validTicks, a4ticks);
+assert.equal(a4full.edge[250], 0);
+assert.equal(a4full.edge[255], 1);
+for (let i = 0; i < a4ticks; i++) {
+  const z = activity4Ref.at(-1).logits.map(c => c[i]), max = Math.max(...z), p = z.map(v => Math.exp(v - max));
+  const sum = p.reduce((a, b) => a + b);
+  assert.equal(a4full.labels[i], classMap[activity4Ref.at(-1).decoded[i]]);
+  for (const [c, cls] of classMap.entries()) assert.ok(Math.abs(a4full.probs[cls * a4ticks + i] - p[c] / sum) < 2e-5);
+}
+const a4gap = await analyzeActivity4(engine, [left, right], 10);
+assert.ok(a4gap.labels.slice(40, 50).every(v => v === -1));
+assert.ok(a4gap.labels.slice(60, 80).every(v => v >= 0));
+assert.equal((await analyzeActivity4(engine, [left, missing], 10)).validTicks, 0);
+console.log('PASS Activity4 ONNX state and boundary parity, joint decoding, chunk joins and gap isolation', activity4Error, activity4BoundaryError);
+
 const feetFor = (seconds, swing, yaw = () => 0) => [0, 1].map(foot => {
   const count = seconds * 50, source = {
     t: Float64Array.from({length: count}, (_, i) => (i + .5) / 50), seq: Float64Array.from({length: count}, (_, i) => i),
@@ -109,6 +153,21 @@ assert.equal(extracted.labels[140], ACTIVITY_TURN_R);
 assert.equal(extracted.labels[200], 1);
 assert.ok(extracted.labels.slice(100, 105).every(v => v === -1));
 assert.equal(extracted.turnRuns.length, 2);
+const baseAnnotated = {...a4gap, labels: takeoff.slice(), edge: new Uint8Array(230), probs: new Float32Array(1150),
+  ticks: 230, duration: 23, validTicks: 225};
+baseAnnotated.labels.fill(0, 35, 75);
+const annotated = await annotateActivity4(engine, turnFeet, 23, () => {}, 'annotated', baseAnnotated);
+assert.strictEqual(annotated.labels, baseAnnotated.labels);
+assert.strictEqual(annotated.probs, baseAnnotated.probs);
+assert.strictEqual(annotated.edge, baseAnnotated.edge);
+assert.equal(annotated.labels[20], ACTIVITY_STILL);
+assert.equal(annotated.labels[50], 0);
+assert.equal(annotated.labels[140], 1);
+assert.equal(annotated.turns[50], ACTIVITY_TURN_L);
+assert.equal(annotated.turns[140], ACTIVITY_TURN_R);
+assert.ok(annotated.walkReview[50] & WALK_REVIEW.lowSwing);
+assert.equal(annotated.walkReview[140], 0);
+assert.ok(annotated.turns.slice(100, 105).every(v => v === 0));
 const broken = feetFor(4, () => 0, () => 35);
 for (const foot of broken) foot.ok.fill(0, 96, 104);
 const brokenResult = await analyzeGaitExtraction(engine, broken, 4, () => {}, 'extraction', {

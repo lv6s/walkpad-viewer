@@ -62,8 +62,8 @@ function rmsWindows(power: Float32Array, group: Int32Array, ticks: number) {
   return {swing, quiet};
 }
 
-export function screenGait(labels: Int8Array, turns: Int8Array, feet: readonly [Sampled, Sampled], grid: number) {
-  const ticks = labels.length, out = labels.slice(), reasons = new Uint8Array(ticks);
+function reviewWalks(labels: Int8Array, feet: readonly [Sampled, Sampled], grid: number, turns?: Int8Array) {
+  const ticks = labels.length, reasons = new Uint8Array(ticks);
   const [l, r] = feet.map(foot => rmsWindows(projectedGyro(foot, grid, 2 * RATE, 0, true), foot.group, ticks));
   for (let t = 0; t < ticks;) {
     if (!(l.quiet[t] < WALK_RULE.quiet && r.quiet[t] < WALK_RULE.quiet)) { t++; continue; }
@@ -73,25 +73,27 @@ export function screenGait(labels: Int8Array, turns: Int8Array, feet: readonly [
     t = e;
   }
   for (let t = 0; t < ticks; t++) {
-    if (turns[t]) { out[t] = turns[t]; reasons[t] = 0; continue; }
-    if (out[t] < 0) { reasons[t] = 0; continue; }
-    if (out[t] === ACTIVITY_STILL) out[t] = 2;
-    if (out[t] !== 0) continue;
+    if (turns?.[t] || labels[t] !== 0) { reasons[t] = 0; continue; }
     if (!(l.swing[t] >= WALK_RULE.swing && r.swing[t] >= WALK_RULE.swing)) reasons[t] |= WALK_REVIEW.lowSwing;
-    if (reasons[t]) out[t] = 2;
   }
+  const eligible = (t: number) => labels[t] === 0 && !turns?.[t] && !reasons[t];
   for (let t = 0; t < ticks;) {
-    if (out[t] !== 0) { t++; continue; }
+    if (!eligible(t)) { t++; continue; }
     let e = t + 1;
-    while (e < ticks && out[e] === 0) e++;
-    if (e - t < WALK_RULE.minTicks) { out.fill(2, t, e); reasons.fill(WALK_REVIEW.short, t, e); }
+    while (e < ticks && eligible(e)) e++;
+    if (e - t < WALK_RULE.minTicks) reasons.fill(WALK_REVIEW.short, t, e);
     t = e;
   }
-  return {labels: out, walkReview: reasons};
+  return reasons;
 }
 
-export async function analyzeGaitExtraction(engine: ReturnType<typeof activityEngine>, sources, duration: number,
-  progress: (p: number) => void, modelId: string, base: {labels: Int8Array; probs: Float32Array; edge: Uint8Array}) {
+export function screenGait(labels: Int8Array, turns: Int8Array, feet: readonly [Sampled, Sampled], grid: number) {
+  const walkReview = reviewWalks(labels, feet, grid, turns);
+  return {labels: labels.map((c, t) => turns[t] || (c === ACTIVITY_STILL || walkReview[t] ? 2 : c)), walkReview};
+}
+
+async function gaitEvidence(engine: ReturnType<typeof activityEngine>, sources, duration: number,
+  progress: (p: number) => void, baseEdge: Uint8Array) {
   const rule = TURN_RULE;
   const grid = Math.floor(duration * RATE + 1e-7), ticks = Math.floor(grid / 5);
   const l = engine.sample(sources[0], grid), r = engine.sample(sources[1], grid);
@@ -153,7 +155,7 @@ export async function analyzeGaitExtraction(engine: ReturnType<typeof activityEn
   for (const run of runs) turnAt.fill(run.dir === 0 ? 2 : run.dir > 0 ? 1 : -1, Math.round(run.a * RATE), Math.round(run.b * RATE));
   const turns = new Int8Array(ticks);
   const strength = new Float32Array(ticks).fill(NaN);
-  const edge = base.edge.slice();
+  const edge = baseEdge.slice();
   const edgeWin = Math.round(rule.edgeS * RATE);
   for (let t = 0; t < ticks; t++) {
     const from = t * 5, to = from + 5;
@@ -177,11 +179,26 @@ export async function analyzeGaitExtraction(engine: ReturnType<typeof activityEn
   progress(70);
   await new Promise(resolve => setTimeout(resolve, 0));
 
-  const {labels, walkReview} = screenGait(base.labels, turns, [l, r], grid);
+  return {turns, strength, edge, runs, feet: [l, r] as const, grid, ticks};
+}
+
+export async function analyzeGaitExtraction(engine: ReturnType<typeof activityEngine>, sources, duration: number,
+  progress: (p: number) => void, modelId: string, base: {labels: Int8Array; probs: Float32Array; edge: Uint8Array}) {
+  const {turns, strength, edge, runs, feet, grid, ticks} = await gaitEvidence(engine, sources, duration, progress, base.edge);
+  const {labels, walkReview} = screenGait(base.labels, turns, feet, grid);
   const probs = new Float32Array(ticks * (ACTIVITY_TURN + 1)).fill(NaN);
   probs.set(base.probs);
   probs.set(strength, ACTIVITY_TURN * ticks);
   progress(100);
   const validTicks = labels.reduce((n, c) => n + (c >= 0 ? 1 : 0), 0);
   return {labels, probs, edge, ticks, validTicks, duration, modelId, reviewed: null, walkReview, baseLabels: base.labels, turnRuns: runs};
+}
+
+export async function annotateActivity4<T extends {labels: Int8Array; edge: Uint8Array}>(engine: ReturnType<typeof activityEngine>, sources,
+  duration: number, progress: (p: number) => void, modelId: string, base: T) {
+  const {turns, runs, feet, grid} = await gaitEvidence(engine, sources, duration, progress, base.edge);
+  const walkReview = reviewWalks(base.labels, feet, grid);
+  for (let t = 0; t < turns.length; t++) if (base.labels[t] < 0) turns[t] = 0;
+  progress(100);
+  return {...base, modelId, turns, walkReview, turnRuns: runs};
 }

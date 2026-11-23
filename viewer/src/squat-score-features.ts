@@ -2,6 +2,7 @@
    侧向为水平主轴的残差代理，不是内翻 / 外翻判定。
    wrist 加速度按 g、角速度按原始 dps 计，腕部特征不做零偏扣除。 */
 import type {SquatRep} from './squat-core';
+import type {SideAngles} from './squat-axis';
 
 /** 与 squat-core 的公共重采样网格一致。 */
 export const FEATURE_HZ = 50;
@@ -67,6 +68,11 @@ export const FEATURE_DEFS: FeatureDef[] = [
   def('device_motion_lr_ratio', '双踝设备角度轨迹相对差', '1', 2),
   def('device_angle_return_deg', '双踝动作起止窗设备角度平均差', '°', 1),
 
+  def('ascent_peak_delay_right_minus_left_s', '起身主轴速度峰时差（右−左）', 's', 2),
+  ...sided('descent_end_speed_dps', '下降末段三轴角速度 RMS', '°/s', 1),
+  ...sided('bottom_transition_acc_dev_peak_g', '入蹲底附近加速度模偏差峰值', 'g', 3),
+  ...sided('squat_descent_lateral_deg', '下降侧向转角（轴估计）', '°', 1),
+  ...sided('squat_descent_yaw_deg', '下降绕竖直转角（陀螺积分）', '°', 1),
   ...sided('return_gravity_angle_deg', '前后站立重力夹角', '°', 1),
   ...sided('return_gyro_bias_delta_dps', '前后站立角速度零偏差', '°/s', 1),
 
@@ -75,6 +81,13 @@ export const FEATURE_DEFS: FeatureDef[] = [
   def('coverage_bilateral', '双踝同时覆盖率', '1', 2, true),
   def('coverage_wrist', '腕部数据覆盖率', '1', 2, true),
 
+  def('wrist_tilt_peak_deg', '腕部重力倾角峰值', '°', 1),
+  def('wrist_tilt_peak_phase', '腕峰相位（开始 0，结束 1）', '1', 2),
+  def('wrist_tilt_bottom_phase', '蹲底中点相位（开始 0，结束 1）', '1', 2),
+  def('wrist_tilt_peak_to_bottom_s', '腕峰时刻减蹲底中点（负值为提前）', 's', 2),
+  def('wrist_tilt_bottom_deg', '蹲底附近腕部重力倾角', '°', 1),
+  def('wrist_tilt_bottom_retention', '蹲底腕角保留率（蹲底角 ÷ 峰值）', '1', 2),
+  def('wrist_to_ankle_range_ratio', '腕角峰值 / 双踝主轴摆幅均值', '1', 2),
   def('wrist_gyro_rms_dps', '腕部角速度均方根', '°/s', 1),
   def('wrist_gyro_peak_dps', '腕部角速度峰值', '°/s', 1),
   def('wrist_gyro_path_deg', '腕部角速度路径（积分）', '°', 1),
@@ -247,6 +260,21 @@ function deviceMotion(axes: [Float64Array,Float64Array], a: number, b: number, b
   return {change,magnitude,range:Math.max(...traces[1])-Math.min(...traces[1]),ret:Math.hypot(end[0]-start[0],end[1]-start[1])};
 }
 
+function wristTilt(x: Float64Array, phase: Int8Array, pre: Stance, a: number, b: number) {
+  const alpha = 1 - Math.exp(-1 / (FEATURE_HZ * .15));
+  const trace: number[] = [];
+  let lp = scale3(pre.g, pre.gMag);
+  for (let i = pre.b + 1; i <= b; i++) {
+    const acc = accIn(x, phase, i);
+    if (!acc) return null;
+    lp = add3(lp, scale3(sub3(acc, lp), alpha));
+    const g = unit3(lp);
+    if (!g) return null;
+    if (i >= a) trace.push(Math.atan2(norm3(cross3(pre.g, g)), dot3(pre.g, g)) * 180 / Math.PI);
+  }
+  return trace;
+}
+
 export function extractSquatFeatures(
   start: number,
   phase: Int8Array,
@@ -254,6 +282,7 @@ export function extractSquatFeatures(
   reps: SquatRep[],
   wrist?: Float64Array,
   deviceAngles?: ([Float64Array,Float64Array] | undefined)[],
+  repAngles?: SideAngles[],
 ): RepFeatures[] {
   const n = phase.length;
   const empty = () => Object.fromEntries(FEATURE_DEFS.map(d => [d.key, null])) as Record<string, number | null>;
@@ -346,6 +375,9 @@ export function extractSquatFeatures(
     if (descRange) movement.push(descRange);
     if (ascRange) movement.push(ascRange);
     const movementRanges = movement.length ? movement : [full];
+    const ascentPeaks = [NaN, NaN];
+    const descentEnd = sampleRange(start, Math.max(t0, t1 - .2), t1, n, false);
+    const transition = sampleRange(start, Math.max(t0, t1 - .15), Math.min(t3, t1 + .15), n, true);
 
     for (const {key, idx, label} of sides) {
       const x = ankles[idx];
@@ -368,6 +400,31 @@ export function extractSquatFeatures(
         ? scale3(add3(pre.gyro, post.gyro), .5)
         : base ? base.gyro : [0, 0, 0];
       const gMag = base?.gMag ?? 1;
+      const side = repAngles?.[idx];
+      const rotation = side?.ok && validSide === total ? side.reps?.[ri] : null;
+      if (side?.conf !== 'lo') put(`squat_descent_lateral_deg_${key}`, rotation?.ml);
+      put(`squat_descent_yaw_deg_${key}`, rotation?.yaw);
+
+      if (descentEnd && base) {
+        const [a, b] = descentEnd;
+        let count = 0, sum = 0;
+        for (let i = a; i <= b; i++) {
+          const gyro = gyroIn(x, phase, i);
+          if (!gyro) break;
+          const w = sub3(gyro, bias); sum += dot3(w, w); count++;
+        }
+        if (count >= MIN_SAMPLES && count === b - a + 1) put(`descent_end_speed_dps_${key}`, Math.sqrt(sum / count));
+      }
+      if (transition) {
+        const [a, b] = transition;
+        let count = 0, peak = 0;
+        for (let i = a; i <= b; i++) {
+          const acc = accIn(x, phase, i);
+          if (!acc) break;
+          peak = Math.max(peak, Math.abs(norm3(acc) - gMag)); count++;
+        }
+        if (count >= MIN_SAMPLES && count === b - a + 1) put(`bottom_transition_acc_dev_peak_g_${key}`, peak);
+      }
 
       let axis: Vec3 | null = null;
       if (g) {
@@ -417,6 +474,16 @@ export function extractSquatFeatures(
 
       if (axis && g) {
         const u = axis;
+        if (ascRange && validSide === total && values[`sagittal_axis_confidence_${key}`]! >= AXIS_TRUST) {
+          const [a, b] = ascRange;
+          let peak = 5;
+          for (let i = a + 2; i <= b - 2; i++) {
+            let sum = 0;
+            for (let j = i - 2; j <= i + 2; j++) sum += dot3(sub3(gyroIn(x, phase, j)!, bias), u);
+            const speed = Math.abs(sum / 5);
+            if (speed > peak + 1e-9) {peak = speed; ascentPeaks[idx] = i;}
+          }
+        }
         let count = 0, peakS = 0, sumS2 = 0, excursionS = 0, peakL = 0, sumL2 = 0, excursionL = 0;
         for (const [a, b] of movementRanges) for (let i = a; i <= b; i++) {
           const raw = gyroIn(x, phase, i);
@@ -513,7 +580,33 @@ export function extractSquatFeatures(
     const rl = values.sagittal_range_deg_left, rr = values.sagittal_range_deg_right;
     if (rl != null && rr != null) put('sagittal_range_lr_abs_deg', Math.abs(rl - rr));
 
+    put('ascent_peak_delay_right_minus_left_s', (ascentPeaks[1] - ascentPeaks[0]) / FEATURE_HZ);
+
     if (wrist) {
+      const pre = findStance(wrist, phase, beforeFrom, beforeTo, 'end');
+      if (!pre) issue('腕部缺少本次蹲前站立参考');
+      else {
+        const [a, b] = full, trace = wristTilt(wrist, phase, pre, a, b);
+        if (!trace || trace.length < MIN_SAMPLES) issue('腕部倾角需要从蹲前到起身连续的数据');
+        else {
+          const peakIndex = trace.reduce((best, v, i) => v > trace[best] ? i : best, 0);
+          const peak = trace[peakIndex], peakTime = start + (a + peakIndex) / FEATURE_HZ;
+          const middle = (t1 + t2) / 2, middleIndex = frame(middle) - a;
+          const atBottom = median(trace.slice(Math.max(0, middleIndex - 3), middleIndex + 4));
+          put('wrist_tilt_peak_deg', peak);
+          put('wrist_tilt_bottom_deg', atBottom);
+          put('wrist_tilt_bottom_phase', (middle - t0) / (t3 - t0));
+          // 小摆幅时峰值时刻与比值由噪声主导。
+          if (peak >= 3) {
+            put('wrist_tilt_peak_phase', Math.max(0, Math.min(1, (peakTime - t0) / (t3 - t0))));
+            put('wrist_tilt_peak_to_bottom_s', peakTime - middle);
+            put('wrist_tilt_bottom_retention', atBottom / peak);
+          }
+          const ankleMean = (rl + rr) / 2;
+          if (validBoth === total && rl != null && rr != null && ankleMean >= 5 && values.sagittal_axis_confidence_left >= AXIS_TRUST &&
+              values.sagittal_axis_confidence_right >= AXIS_TRUST) put('wrist_to_ankle_range_ratio', peak / ankleMean);
+        }
+      }
       let nG = 0, g2 = 0, gPeak = 0, gPath = 0, nA = 0, a2 = 0, aPeak = 0, pairs = 0, jerk2 = 0, prev: number | null = null;
       const devs: number[] = [];
       for (let i = full[0]; i <= full[1]; i++) {

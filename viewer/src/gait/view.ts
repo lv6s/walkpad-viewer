@@ -134,13 +134,14 @@ export function renderGaitDetail(g: GaitSegment, w: GaitReportSegment, s: Activi
   if (report !== w) stepPage = 0;
   report = w;
   if (!s) { ($('gaitStepAngleSource') as HTMLSelectElement).value = 'device'; return; }
-  const modelStill = s.cls === ACTIVITY_STILL && s.confidence != null, gait = s.cls === 0 || s.cls === 1;
+  const modelStill = s.cls === ACTIVITY_STILL && s.confidence != null, gait = !s.excludeFromGait && (s.cls === 0 || s.cls === 1);
   $('gaitTitle').textContent = `第 ${index + 1} 段 · ${modelStill ? '静止' : SEG_CN[s.cls]} · ${gaitFormat(s.a, 2)}–${gaitFormat(s.b, 2)} s`;
   $('gaitMetrics').hidden = $('gaitSamples').hidden = $('gaitPhase').hidden = !gait;
   periods.hidden = s.cls !== 1 || !g?.cells.some(c => c.periods.length);
   steps.hidden = !w?.steps.length;
   coverage.hidden = !w?.countable_intervals.length;
-  const note = s.cls === ACTIVITY_STILL ? (modelStill ? '模型判为静止。该段不计算步态指标。' : '双脚 IMU 局部低运动，支持静止。该段不计算步态指标。')
+  const note = s.excludeFromGait ? `${s.turn ? SEG_CN[s.turn] : '未通过步行复核'} · 保留活动类别，不纳入常规步态统计。`
+    : s.cls === ACTIVITY_STILL ? (modelStill ? '模型判为静止。该段不计算步态指标。' : '双脚 IMU 局部低运动，支持静止。该段不计算步态指标。')
     : s.cls === 3 ? '该段未判定，不计算步态指标。'
     : !gait ? '该段不计算步态指标。「其他」不等同于静止。'
     : `${s.cls === 1 && experimental ? '跑步实验版' : '原版'} IC/TO · ${w?.countable_intervals.length ? '汇总俯仰只统计 App 事件帧读数，冲击用三轴加速度合量；无 App 角的录制仍可在逐步表查看足部俯仰估计。' : '本段无双脚可计步覆盖，不将缺失指标当作 0。'}`;

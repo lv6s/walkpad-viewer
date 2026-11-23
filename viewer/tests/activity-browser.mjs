@@ -86,7 +86,7 @@ try {
   assert.ok((await page.locator('#ver').textContent()).includes(APP_VER));
   assert.equal(await page.locator('#activityModel').inputValue(), 'B1Q 实测候选');
   assert.deepEqual(await page.locator('#activityModel option').evaluateAll(options => options.map(o => o.value)),
-    ['B1Q 实测候选', 'Moticon 多域时序模型', 'GaitWindow 优化版', '正常走跑提取']);
+    ['B1Q 实测候选', 'Moticon 多域时序模型', 'GaitWindow 优化版', '正常走跑提取', '50 Hz 双脚 IMU 四分类', '50 Hz 四分类 + 步态复核 + 转向']);
   assert.equal(await page.locator('#activityIctoVersion').inputValue(), 'legacy');
   if (process.env.D56_COP_ZIP) {
     await importFile({name: 'd56-cop.zip', mimeType: 'application/zip', buffer: fs.readFileSync(process.env.D56_COP_ZIP)});
@@ -157,6 +157,74 @@ try {
   assert.match(tasCsv.suggestedFilename(), /WT-offline-Moticon-TAS-v1_状态分段\.csv$/);
   assert.match(fs.readFileSync(await tasCsv.path(), 'utf8'), /,WT-offline-Moticon-TAS-v1\b/);
   assert.equal(await page.locator('#activityTurnLLegend').isHidden(), true);
+  await page.selectOption('#activityModel', '50 Hz 双脚 IMU 四分类'); await analyze();
+  assert.match(await page.locator('#activityStatus').textContent(), /walkpad-activity4-50hz-v2/);
+  assert.equal(await page.locator('#activityStillLegend').textContent(), '■ 静止');
+  assert.equal(await page.locator('#activityTurnLLegend').isHidden(), true);
+  assert.ok(await page.locator('#activityRows tr').evaluateAll(rows => rows.some(r => {
+    const t = r.cells; return t[4].textContent === '无法判断' && +t[1].textContent <= 6 && +t[2].textContent >= 7;
+  })));
+  const annotatedOption = '50 Hz 四分类 + 步态复核 + 转向';
+  async function activityCsv() {
+    const pending = page.waitForEvent('download'); await page.locator('#activityCsv').click();
+    const download = await pending;
+    const [header, ...rows] = fs.readFileSync(await download.path(), 'utf8').trimEnd().split(/\r?\n/);
+    return {name: download.suggestedFilename(), header, rows: rows.map(r => r.split(','))};
+  }
+  function stateSpans(rows) {
+    const spans = [];
+    for (const [a, b, , state] of rows) {
+      const prev = spans.at(-1);
+      if (prev?.[2] === state && prev[1] === a) prev[1] = b;
+      else spans.push([a, b, state]);
+    }
+    return spans;
+  }
+  const originalGap = await activityCsv();
+  assert.match(originalGap.name, /walkpad-activity4-50hz-v2_状态分段\.csv$/);
+  await page.selectOption('#activityModel', annotatedOption); await analyze();
+  const annotatedGap = await activityCsv();
+  assert.match(annotatedGap.name, /walkpad-activity4-50hz-v2-review-turn_状态分段\.csv$/);
+  assert.match(annotatedGap.header, /,turn,walk_review,gait_eligible$/);
+  assert.deepEqual(stateSpans(annotatedGap.rows), stateSpans(originalGap.rows));
+  assert.ok(annotatedGap.rows.filter(r => r[3] === '无法判断').every(r => r.slice(7).every(v => !v)));
+  if (process.env.ACTIVITY4_WALK_RUN_ZIP) {
+    await page.selectOption('#activityModel', '50 Hz 双脚 IMU 四分类');
+    await importFile({name: '50hz-walk-run.zip', mimeType: 'application/zip', buffer: fs.readFileSync(process.env.ACTIVITY4_WALK_RUN_ZIP)});
+    await analyze();
+    const rows = await page.locator('#activityRows tr').evaluateAll(rows => rows.map(r =>
+      ({state: r.cells[4].textContent, a: +r.cells[1].textContent, b: +r.cells[2].textContent})));
+    const activityRows = rows.filter(r => r.state !== '无法判断');
+    assert.deepEqual(activityRows.map(r => r.state), ['静止', '步行', '跑步', '步行']);
+    const runs = activityRows.filter(r => r.state === '跑步');
+    assert.ok(Math.abs(runs[0].a - 92.3) < .11 && Math.abs(runs[0].b - 99.0) < .11, JSON.stringify(runs));
+    for (const [a, b] of [[6, 11], [25.5, 27.5], [41, 48], [81.5, 85.5]]) {
+      assert.ok(rows.some(r => r.state === '步行' && r.a <= a && r.b >= b), `walk ${a}–${b}`);
+    }
+    const base = await activityCsv();
+    const totals = await page.locator('#activitySummary').textContent();
+    await page.selectOption('#activityModel', annotatedOption); await analyze();
+    const tagged = await activityCsv();
+    assert.deepEqual(stateSpans(tagged.rows), stateSpans(base.rows));
+    assert.equal(await page.locator('#activitySummary').textContent(), totals);
+    const turnedWalk = tagged.rows.filter(r => r[3] === '步行' && r[7]);
+    assert.ok(turnedWalk.length > 0 && turnedWalk.every(r => r[9] === 'no'));
+    assert.ok(tagged.rows.some(r => r[3] === '步行' && !r[7] && r[8] && r[9] === 'no'));
+    assert.ok(tagged.rows.some(r => r[3] === '步行' && !r[7] && !r[8] && r[9] === 'yes'));
+    const overview = await page.locator('#gaitOverviewRows tr').evaluateAll(rows => rows.map(r => Number(r.cells[1].textContent)));
+    for (const [i, state] of ['步行', '跑步'].entries()) {
+      const included = tagged.rows.filter(r => r[3] === state && r[9] === 'yes').reduce((sum, r) => sum + Number(r[2]), 0);
+      assert.ok(Math.abs(overview[i] - included) < .011);
+    }
+    const turnRow = page.locator('#activityRows tr').filter({hasText: /步行 (左转|右转|转身)/}).first();
+    assert.equal(await turnRow.locator('td').nth(7).textContent(), '—');
+    await turnRow.click();
+    assert.match(await page.locator('#gaitNote').textContent(), /不纳入常规步态统计/);
+    assert.ok(await page.locator('#gaitMetrics').isHidden());
+    console.log('PASS Activity4 user recording:', totals, 'running only at', runs, 'turned walk',
+      turnedWalk.map(r => r.slice(0, 2)), 'gait overview seconds', overview);
+    await importFile('dual_gap.zip');
+  }
   await page.selectOption('#activityModel', '正常走跑提取'); await analyze();
   assert.match(await page.locator('#activityStatus').textContent(), /WT-gait-extraction-v1/);
   assert.equal(await page.locator('#activityTurnLLegend').isVisible(), true);

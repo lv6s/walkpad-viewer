@@ -2,7 +2,7 @@ import SquatWorker from './squat-worker?worker&inline';
 import type {AnkleStream, SquatResult} from './squat-core';
 import type {SideAngles} from './squat-axis';
 import type {RepFeatures} from './squat-score-features';
-import {initSquatScore, renderSquatScore, resetSquatScore, selectSquatScore, setSquatScore, squatScoreLabel} from './squat-score-ui';
+import {initSquatMetrics, renderSquatMetrics, resetSquatMetrics, selectSquatMetrics, setSquatMetrics} from './squat-score-ui';
 import {version as modelVersion} from './squat-v03-model.json';
 import {state} from './core/state';
 import {squatCaptureMeta, squatInput, squatPackage} from './parse';
@@ -23,7 +23,7 @@ const hasAngles=()=>angles.some(side=>side.traces?.length);
 function reset(newCapture=false) {
   token++; worker?.terminate(); worker=null; busy=false; result=null; selected=-1; clips=[]; message=''; angles=[];
   hoverTime=pickedAngleTime=null;
-  resetSquatScore(newCapture);
+  resetSquatMetrics(newCapture);
 }
 
 async function run() {
@@ -42,13 +42,14 @@ async function run() {
       catch {wristReadIssue='腕部所需六轴或时间戳不可用；不影响双踝分段。';}
     }
     if (!alive()) return;
-    worker=new SquatWorker(); message='正在本地预测深蹲…'; renderSquat();
+    worker=new SquatWorker(); message='正在本地分段并计算逐次指标…'; renderSquat();
     const finish=(value?:SquatResult,error?:string,features?:RepFeatures[],featureIssue?:string,wristIssue?:string,
         repAngles?:SideAngles[])=>{
       if (!alive()) return;
       worker?.terminate(); worker=null; busy=false;
       result=value ?? null;
       angles=repAngles ?? [];
+      selected=result?.reps.length ? 0 : -1;
       if (!result) message='预测失败：'+error;
       else {
         const {phase,start,valid}=result;
@@ -58,7 +59,7 @@ async function run() {
         }
         message=`预测完成 · ${result.reps.length} 次完整深蹲 · 实际范围 ${start.toFixed(3)}–${(start+(phase.length-1)/HZ).toFixed(3)} s · 可判断 ${(valid/HZ).toFixed(2)} / ${(phase.length/HZ).toFixed(2)} s`;
       }
-      setSquatScore(result,features,{recordId:meta?.recordId ?? null,
+      setSquatMetrics(result,features,{recordId:meta?.recordId ?? null,
         wrist:w ? {placement:w.placement,family:w.family,gyro:wristMode==='wrist-comp' ? 'compensated' : 'raw'} : undefined},
         [featureIssue,wristReadIssue,wristIssue].filter(Boolean).join(' · '));
       renderSquat();
@@ -75,7 +76,7 @@ async function run() {
 
 function focus(i:number) {
   selected=i; const r=result?.reps[i]; if (!r) return;
-  selectSquatScore(i);
+  selectSquatMetrics(i);
   applyWin(r[0]-.20,r[3]+.20); drawSquat();
   $('squatRows').querySelectorAll('tr').forEach((row,j)=>row.classList.toggle('selected',i===j));
 }
@@ -196,12 +197,11 @@ export function renderSquat() {
       } else cell.textContent=val;
       tr.append(cell);
     }
-    const score=document.createElement('td'); score.textContent=squatScoreLabel(i); tr.append(score);
     rows.append(tr);
   });
   $('squatEmpty').textContent=!result ? '暂无预测结果' : result.reps.length ? '' : '该范围未识别到完整深蹲。';
   renderSquatAngles();
-  renderSquatScore();
+  renderSquatMetrics();
   drawSquat();
 }
 
@@ -227,12 +227,9 @@ function renderSquatAngles() {
     else if (a) status.push(`${name} 无法给出三向角：${a.reason}`);
   }
   if (!angles.length) status.push('点「预测」后给出逐次三向角。');
-  const diffs = (L?.ok ? L.reps : []).map(x => x.headingApp).filter(v => Number.isFinite(v)) as number[];
-  if (diffs.length) {
-    const worst = Math.max(...diffs.map(Math.abs));
-    status.push(`APP 航向与陀螺积分最大差 ${worst.toFixed(1)}°${worst > 5 ? '（口径可能不一致，航向只作参考）' : ''}`);
-  } else if (L?.ok) {
-    status.push('本包没有航向列，航向由陀螺积分得到，会随时间累积漂移。');
+  if (L?.ok || R?.ok) {
+    const hasAppHeading=[L, R].some(a=>a?.ok && a.reps.some(x=>Number.isFinite(x.headingApp)));
+    status.push(`${hasAppHeading ? '' : '无可用 APP 航向值；'}表中航向为站立期陀螺积分，可能累积漂移。`);
   }
   const warn = [L, R].flatMap(a => a?.ok ? a.warns ?? [] : []).filter((v, i, xs) => xs.indexOf(v) === i);
   $('squatAngleStatus').textContent = [...status, ...warn].join('　·　');
@@ -250,7 +247,7 @@ function renderSquatAngles() {
 export function initSquat() {
   const cv=$<HTMLCanvasElement>('squatTimeline'), chart=$<HTMLCanvasElement>('squatAngleChart');
   if (!cv || !chart) return;
-  initSquatScore(renderSquat);
+  initSquatMetrics();
   $('squatVersion').textContent=`分段模型 v${modelVersion} · ${HZ} Hz`;
   $('squatRun').onclick=()=>void run();
   $('squatCancel').onclick=()=>{reset();message='预测已取消。';renderSquat();};

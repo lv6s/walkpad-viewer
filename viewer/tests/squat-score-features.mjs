@@ -174,6 +174,56 @@ assert.equal(missingAngles.device_pitch_lr_deg,null);
 close(missingAngles.device_pitch_bottom_deg_left,20);
 assert.equal(missingAngles.coverage_bilateral,1);
 
+const wristPattern=(peakTime, bottomAngle, standingDeg)=>{
+  const x=new Float64Array(N*6);
+  for(let i=0;i<N;i++) {
+    const t=START+i/HZ, f=t-rep1[0], end=rep1[3]-rep1[0];
+    const deg=f<=0 || f>=end ? 0 : f<=peakTime ? 36*f/peakTime :
+      f<=1.1 ? 36+(bottomAngle-36)*(f-peakTime)/(1.1-peakTime) : bottomAngle*(end-f)/(end-1.1);
+    const rad=(standingDeg+deg)*Math.PI/180;
+    fill(x,i,[Math.sin(rad),0,Math.cos(rad)],[0,0,0]);
+  }
+  return x;
+};
+const earlyWrist=wristPattern(.4,13,28);
+const early=extractSquatFeatures(START,phase,[left,right],[rep1],earlyWrist)[0].values;
+const late=extractSquatFeatures(START,phase,[left,right],[rep1],wristPattern(1.05,36,-21))[0].values;
+assert(early.wrist_tilt_peak_phase < late.wrist_tilt_peak_phase);
+assert(early.wrist_tilt_peak_to_bottom_s < -.4);
+assert(early.wrist_tilt_bottom_retention < .7 && late.wrist_tilt_bottom_retention > .9);
+close(early.wrist_tilt_bottom_phase,.5);
+close(early.wrist_to_ankle_range_ratio,early.wrist_tilt_peak_deg/((early.sagittal_range_deg_left+early.sagittal_range_deg_right)/2));
+const wristRotated=extractSquatFeatures(START,phase,[left,right],[rep1],wristPattern(.4,13,-30))[0].values;
+close(early.wrist_tilt_peak_deg,wristRotated.wrist_tilt_peak_deg);
+assert.equal(withWrist.values.wrist_tilt_peak_phase,null);
+const noWristStand=extractSquatFeatures(START,gapPhase,[left,right],[rep1],earlyWrist)[0];
+assert.equal(noWristStand.values.wrist_tilt_peak_deg,null);
+assert(noWristStand.issues.some(s=>s.includes('腕部缺少本次蹲前站立')));
+const brokenWrist=Float64Array.from(earlyWrist);
+brokenWrist[at(104)*6]=NaN;
+const broken=extractSquatFeatures(START,phase,[left,right],[rep1],brokenWrist)[0].values;
+assert.equal(broken.wrist_tilt_peak_deg,null);
+assert.equal(broken.sagittal_range_deg_left,a.sagittal_range_deg_left);
+
+function delayedPeak(source, center) {
+  const x=Float64Array.from(source);
+  for(let i=at(104.2);i<=at(105.2);i++) {
+    fill(x,i,[0,0,1],[gyro0[0]-90*Math.exp(-((i-center)**2)/64),gyro0[1],gyro0[2]]);
+  }
+  return x;
+}
+const leftTimed=delayedPeak(left,at(104.5)), rightTimed=delayedPeak(left,at(104.7));
+const rotations=[{ok:true,conf:'hi',reps:[{ml:-4,yaw:3}]},{ok:true,conf:'lo',reps:[{ml:6,yaw:-2}]}];
+const timing=extractSquatFeatures(START,phase,[leftTimed,rightTimed],[rep1],undefined,undefined,rotations)[0].values;
+close(timing.ascent_peak_delay_right_minus_left_s,.2);
+close(timing.descent_end_speed_dps_left,90);
+assert(timing.bottom_transition_acc_dev_peak_g_left > .1);
+assert.equal(timing.squat_descent_lateral_deg_left,-4);
+assert.equal(timing.squat_descent_lateral_deg_right,null);
+assert.equal(timing.squat_descent_yaw_deg_right,-2);
+assert.equal(a.squat_descent_yaw_deg_left,null);
+assert.equal(ph.values.ascent_peak_delay_right_minus_left_s,null);
+
 assert.equal(new Set(FEATURE_DEFS.map(d => d.key)).size, FEATURE_DEFS.length);
 
 console.log(`squat-score-features: ${FEATURE_DEFS.length} defs, ${out.length} reps OK`);

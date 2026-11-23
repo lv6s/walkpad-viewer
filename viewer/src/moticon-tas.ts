@@ -87,13 +87,13 @@ export function predictMoticonTas(x: Float32Array, n: number) {
   return {logits: conv(h, ticks, WIDTH, 4, 'state'), boundary};
 }
 
-export function decodeMoticonTas(logits: Float32Array, boundary: Float32Array) {
+export function decodeMoticonTas(logits: Float32Array, boundary: Float32Array, strength = 1.5) {
   const n = boundary.length, labels = new Int8Array(n), back = new Uint8Array(4 * n);
   if (!n) return labels;
   // Per-tick normalization cancels in path comparisons, so decode directly from logits.
   let dp = Float64Array.from({length: 4}, (_, c) => logits[c * n]), next = new Float64Array(4);
   for (let t = 1; t < n; t++) {
-    const cost = 1.5 * (1.35 - 1.15 * boundary[t]);
+    const cost = strength * (1.35 - 1.15 * boundary[t]);
     for (let c = 0; c < 4; c++) {
       let best = -Infinity, from = 0;
       for (let k = 0; k < 4; k++) {
