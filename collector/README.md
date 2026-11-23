@@ -31,6 +31,8 @@ python launch_workbench.py --legacy # 旧版维特多设备页面
 
 ## 采集与导出
 
+点击「停止并保存」，待写盘完成后，可从页首直接导出本次「原始 ZIP」或「测量包（查看器）」。其他格式和过往记录在「历史记录与回放」。
+
 - 落盘：`records/<session>/frames_*.parquet`，`schema_version=capture_frames.v3`，含原始帧十六进制、六轴原值与物理量、设备日历、`device_kind`，以及逐帧零偏四列（`imu_bias_dps`、`imu_bias_ready`、`imu_bias_revision`、`imu_bias_gate`）。
 - 标准导出（`format=standard`）：列名与 app 的 `standard_measurement_frames` 同构，末尾多 5 个自定义列（`placement_code`、`gyro_temperature_celsius`、`device_date`、`device_time`、`dropped_frames_before`），在 parquet 的 kvMetadata 里登记。
 - 测量包导出（`format=package`）：与 labpad 的 `lab_measurement_package.v2.3` 同构的 zip。成员为 `manifest.json`（`physicalSchemas` 写完整列定义）、`frames/<设备目录>/frame-00001.parquet`、`timeline/footer.parquet`（sections `periods`/`segments`/`eventOrder`/`mappings`/`videos`）与 `设备目录对照.txt`；设备目录名取 `<deviceFamily>_<蓝牙名>_<MAC首2位>-<MAC末4位>`，帧表 26 列，ZSTD 压缩、行组 8192。鞋垫写 `frameType=insole` 与 56 通道压力，独立 IMU 写 `inertial` 且压力三项为 null。
@@ -43,16 +45,23 @@ python launch_workbench.py --legacy # 旧版维特多设备页面
 
 在采集工作台勾选「摄像头」，开启设备后选择「ID 识别模型」和「动作规则」，再点「实时动作识别」。预览层显示 ID、动作或候选及已完成的深蹲次数。
 
-- **ByteTrack（原版）**：默认模式，使用跟踪器轨迹 ID；离场、遮挡后可能换号。
+- **采集身份复核（GPU，默认）**：先让所有受试者同时入画，等每人都有 ID 后再开始动作。首位已登记人员离画后不再自动发新号。实时只有高置信、一对一的轨迹才接回原 ID；结束识别或停录后展示复入候选，未经复核不计入动作。
+- **ByteTrack（原版）**：使用跟踪器轨迹 ID；离场、遮挡后可能换号。
 - **人体重识别（ReID）**：同一次实时识别内，人员离场再入画时尝试恢复原 ID 和已确认的深蹲次数，不续接未完成动作。特征只留在当前会话内存，不识别人脸、不绑定设备；相似外观、遮挡或角度变化仍可能换号或错配。
-- **v4.9.8-r4**（默认动作规则）：直接复用离线 r4 的判据代码，每人取最近 12 秒姿态窗口约每秒重算一次，结果滞后约 0.7 秒。窗口比离线整段视频短，候选/确认时机和深蹲计数时刻可能与离线成片不同；窗口内无有效镜头运动估计时按固定机位补偿。
+- **TrackTrack + ReID（GPU）**：可选的短时跟踪 + 会话内复入模式，只在「推理：工作站」的 GPU 上提供，本机不加载。选择「推理：本机」会直接报错并提示需要工作站，不会自动降级为 ReID 或 ByteTrack；状态栏显示 `TrackTrack/ReID GPU`。身份尚未确认的轨迹只在状态栏显示「待确认身份 N」，不进入 people、不参与动作与深蹲统计。工作站按 ALPN 区分该模式，旧模式与旧工作站照常兼容。
+- **v4.9.8-r5**（默认）：使用 r5 人体姿态核验，重复出现可信人体结构后才进入发号与动作判定。动作和深蹲计数沿用 r4 的实时窗口；不等同于 r5 离线成片。
+- **v4.9.8-r4**：直接复用离线 r4 的判据代码，每人取最近 12 秒姿态窗口约每秒重算一次，结果滞后约 0.7 秒。窗口比离线整段视频短，候选/确认时机和深蹲计数时刻可能与离线成片不同；窗口内无有效镜头运动估计时按固定机位补偿。
 - **原版规则**：上一版轻量实时规则，用于现场对照。
 
 切换模型、规则、旋转或镜像需重新开启识别；新识别会话不沿用旧 ID。识别不写入录像、IMU 记录或导出文件。需要与离线成片一致的结论时，仍以离线包处理录像为准。
 
-默认「推理：工作站」：公司局域网双向 TLS 只传识别用的压缩画面帧和结果，帧不在工作站保存；摄像头预览、录像及 IMU 仍在本机。工作站不可用时可手动切换「推理：本机」，不会自动把识别转到其他位置。
+公司采集网内默认直连 `192.168.100.29:18843`，使用工作站「采集身份复核（GPU）」与 r5。客户端不用放权重、装 CUDA、配地址或持有个人证书。连接使用 TLS，仓库内的 `backend/vision_lan_ca.crt` 仅用于验证工作站，并不是登录凭证；只传识别帧和结果，识别帧不在工作站保存，录像及 IMU 仍在本机。选择本机推理才需要本机权重，GPU 专用模式也不可用。
 
-两端用原版 `yolo26s-pose.pt`（`runtime/vision/`，启动时校验 SHA-256），视觉依赖可置于 `runtime/vision/deps/`。ReID 使用 [Open Model Zoo 的 person-reidentification-retail-0288](https://docs.openvino.ai/2023.3/omz_models_model_person_reidentification_retail_0288.html)（FP32 `.xml`/`.bin` 同置于 `runtime/vision/`），在 CPU 上运行；OpenVINO 依赖可置于 `runtime/vision/reid-deps/`。工作站以 `python -m backend.vision_workstation --host <内网地址> --port 18843` 启动，只允许单会话并选择一张空闲 GPU。本机 `runtime/vision/workstation.json` 配置 `host`、`port`。两端 `runtime/vision/tls/` 各自保存私有 CA 签发的本端证书和密钥及 `ca.crt`；权重、证书、密钥和本地配置不入库。
+工作站以 `python -m backend.vision_workstation --host 192.168.100.29 --port 18843 --allow-lan 192.168.100.0/24` 启动，绑定指定地址并仅为指定采集网段提供免客户端证书接入；同网段能访问端口的设备均可使用，不得转发到公网。只允许单会话，选择一张空闲 GPU。省略 `--allow-lan` 则要求双向 TLS。客户端可用 `runtime/vision/workstation.json` 覆盖 `host`、`port`；非默认地址默认要求双向 TLS，也可显式设 `"client_auth": false` 并配置该服务的 `runtime/vision/tls/ca.crt`。恢复默认地址的双向 TLS 时，显式设 `"client_auth": true` 并放好客户端证书和密钥。
+
+实际执行视觉推理的一端加载 `runtime/vision/yolo26s-pose.pt`（启动时校验 SHA-256）。CPU ReID 使用 Open Model Zoo 的 `person-reidentification-retail-0288`（FP32 `.xml`/`.bin`）；工作站 GPU ReID 使用 `runtime/vision/yolo26n-reid.onnx` 和 CUDA 12.8 兼容的 `onnxruntime-gpu==1.26.0`（`runtime/vision/reid-cu128-deps/`）。权重、运行依赖、私钥及本地配置不入库。
+
+同事可以在团队协作仓开分支修改 `backend/vision_*` 或 `backend/rules_r4/`。选择工作站时执行的是**工作站部署的代码**：分支部署到工作站独立测试服务后再验证，通过后用对应 Git 版本更新共用服务。只修改自己的采集电脑不会改变共享算法；连接成功后界面会显示工作站服务版本。
 
 ## 目录
 

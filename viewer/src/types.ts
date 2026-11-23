@@ -54,8 +54,8 @@ export interface Block {
   ch: Float32Array[];
   imu: ImuData | null;
   temp: Float64Array | null;
-  /** 设备自报俯仰 / 侧倾角（度），列缺失或整段为空时为 null */
-  deviceAngles?: {pitch: Float32Array | null; sideTilt: Float32Array | null} | null;
+  /** 设备自报俯仰 / 侧倾角与相对航向（度），列缺失或整段为空时为 null；航向已按 referenceId 展开 */
+  deviceAngles?: {pitch: Float32Array | null; sideTilt: Float32Array | null; heading?: Float32Array | null} | null;
   ictoIn: IctoInput | null;
   a: number;
   b: number;
@@ -184,11 +184,6 @@ export interface DetailRef {
   j: number;
 }
 
-export interface RefData {
-  name: string;
-  sides: Side[];
-  mode: 'pressure' | 'imu';
-}
 
 export interface ImuY {
   phys: {acc: number | null; gyro: number | null};

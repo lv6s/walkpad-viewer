@@ -121,6 +121,7 @@ class Track:
     def __init__(self):
         self.samples = deque(maxlen=600)
         self.counted = deque(maxlen=40)
+        self.seen = -1e9
         self.count = 0
         self.label = ('未判定', 'unknown')
         self.held = (-1e9, ('未判定', 'unknown'))
@@ -144,11 +145,11 @@ class R4Actions:
         height, width = image.shape[:2]
         self.size = (width, height)
         self.camera.update(self.index, image, [box for _, box, _ in detections])
-        self.tracks = {i: p for i, p in self.tracks.items()
-                       if now - p.samples[-1][0] <= self.retention}
+        self.tracks = {i: p for i, p in self.tracks.items() if now - p.seen <= self.retention}
         output = []
         for identity, box, pose in detections:
             track = self.tracks.setdefault(identity, Track())
+            track.seen = now
             track.samples.append((now, pose * max(width, height), self.index))
             while now - track.samples[0][0] > self.window:
                 track.samples.popleft()
@@ -163,9 +164,11 @@ class R4Actions:
         for identity in identities:
             track = self.tracks.get(identity)
             if track is not None:
+                # 计数与已计数周期保留，避免同一周期在新窗口里被重复计数。
                 track.samples.clear()
                 track.held = (-1e9, ('未判定', 'unknown'))
                 track.label = ('未判定', 'unknown')
+                track.analysed = -1e9
 
     def _analyze(self, track, now):
         samples = list(track.samples)

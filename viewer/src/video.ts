@@ -194,7 +194,8 @@ async function calibrateMotion(): Promise<void> {
     }
     el.vidOff.blur();
     setOffset(fit.offset_seconds,'motion');
-    seekStatus(`工作站 GPU 已估计视频起点 ${fit.offset_seconds.toFixed(3)} s；预测结果不变。`);
+    const service = fit.version ? `（v${fit.version}）` : '';
+    seekStatus(`工作站 GPU${service} 已估计视频起点 ${fit.offset_seconds.toFixed(3)} s；预测结果不变。`);
   } catch (e) {
     if (alive()) seekStatus(`${e instanceof DOMException && e.name==='TimeoutError' ? '等待工作站 GPU 超时' : e instanceof Error ? e.message : String(e)}（原偏移保留）`);
   } finally {

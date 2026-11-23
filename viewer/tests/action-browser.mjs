@@ -8,6 +8,7 @@ import {motionOffset} from '../src/video-align.ts';
 const [reference, root, unsupported, missingComp, badClock] = process.argv.slice(2);
 const mixed = process.env.WALKPAD_MIXED_CAPTURE;
 const motionCapture = process.env.WALKPAD_MOTION_CAPTURE;
+const wristCapture = process.env.WALKPAD_WRIST_CAPTURE;
 assert.ok(reference && root, 'Pass the v0.3.0 reference JSON and capture directory.');
 const cases = JSON.parse(readFileSync(reference, 'utf8'));
 const span = 24, lag = -.72;
@@ -69,7 +70,7 @@ async function run(expected) {
   assert.ok(Math.abs(out.start-expected.start)<1e-4,`${out.start} != ${expected.start}`);
   assert.equal(out.phase.length,expected.phase.length);
   assert.equal(out.phase.filter((v,i)=>v!==expected.phase[i]).length,0);
-  const rows=await page.locator('#squatRows tr').evaluateAll(rs=>rs.map(r=>[...r.cells].map(c=>Number(c.textContent))));
+  const rows=await page.locator('#squatRows tr').evaluateAll(rs=>rs.map(r=>[...r.cells].slice(0,6).map(c=>Number(c.textContent))));
   assert.equal(rows.length,expected.reps.length);
   for(const [i,row] of rows.entries()) {
     const rep=expected.reps[i];
@@ -208,6 +209,66 @@ async function videoLink(rep) {
   assert.ok(await cursor.isHidden());
   await vid.evaluate(v=>v.pause());
 }
+async function scoringFlow() {
+  const status=page.locator('#squatScoreStatus'), review=page.locator('#squatScoreReview');
+  const first=page.locator('#squatRows tr').first().locator('td').last();
+  const original=await page.evaluate(()=>window.squatTest.reps);
+  assert.match(await status.textContent(),/内置双踝偏差提示/);
+  assert.match(await first.textContent(),/^(偏差较小|有偏差|偏差明显)$/);
+  assert.ok(await page.locator('#squatScoreFit').isDisabled());
+  const defaultExport=page.waitForEvent('download');await page.locator('#squatScoreExport').click();
+  const baseline=JSON.parse(readFileSync(await (await defaultExport).path(),'utf8'));
+  assert.equal(baseline.predictionKind,'bilateral-deviation');
+  assert.ok(baseline.reps.every(r=>r.basePrediction && r.review===null));
+  await page.getByText('高级：评分模型与个人档',{exact:true}).click();
+  await page.locator('#squatScoreDetails summary').click();
+  assert.ok(await page.locator('#squatScoreMetrics tr').count()>=35);
+  assert.match(await page.locator('#squatScoreMetrics').textContent(),/侧向/);
+  await review.selectOption('good');
+  assert.equal(await first.textContent(),'人工：好');
+  const input=page.locator('#squatScoreFile');
+  const load=(value)=>input.setInputFiles({name:'scoring-test-only.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(value))});
+  const fixture={schema:'walkpad-squat-score-model-v1',featureSchema:'walkpad-squat-features-v1',modelId:'test-only',
+    features:[{name:'rep_duration_s',weight:1,center:1,scale:1}], thresholds:[-.5,.5],clamp:{min:-6,max:6},
+    personalization:{maxBias:.5,l2:4,minExamples:3,minPerGrade:1}};
+  await load({...fixture,features:[{...fixture.features[0],name:'wrist_gyro_rms_dps'}]});
+  await page.waitForFunction(()=>document.querySelector('#squatScoreStatus').textContent.includes('导入失败'));
+  await load(fixture);
+  await page.waitForFunction(()=>document.querySelector('#squatScoreStatus').textContent.includes('基础模型：test-only'));
+  assert.match(await page.locator('#squatScoreResult').textContent(),/基础判定/);
+  assert.equal(await first.textContent(),'人工：好');
+  const picker=page.locator('#squatScoreRep');
+  await page.locator('#squatScoreFit').click();
+  assert.match(await status.textContent(),/可用复核不足/);
+  await picker.selectOption('1');await review.selectOption('fair');
+  await picker.selectOption('2');await review.selectOption('bad');
+  await page.locator('#squatScoreFit').click();
+  assert.match(await status.textContent(),/个人偏置.*3 条/);
+  async function download(id) {
+    const p=page.waitForEvent('download');await page.locator(id).click();
+    return JSON.parse(readFileSync(await (await p).path(),'utf8'));
+  }
+  const data=await download('#squatScoreExport');
+  assert.equal(data.schema,'walkpad-squat-review-v1');
+  assert.equal(data.predictionKind,'quality-model');
+  assert.deepEqual(data.reps.slice(0,3).map(r=>r.review),['good','fair','bad']);
+  assert.equal(data.reps[0].features.coverage_bilateral,1);
+  assert.equal(data.featureDefinitions.find(d=>d.key==='coverage_bilateral').scoreInput,false);
+  assert.equal(data.featureDefinitions.find(d=>d.key==='wrist_gyro_rms_dps').scoreInput,false);
+  assert.deepEqual(data.reps.map(r=>r.timesS),original);
+  const profile=await download('#squatScoreProfile');
+  await page.locator('#squatScoreReset').click();
+  assert.ok(await page.locator('#squatScoreProfile').isDisabled());
+  await load(profile);
+  await page.waitForFunction(()=>document.querySelector('#squatScoreStatus').textContent.includes('已启用导入的个人档'));
+  assert.equal(await first.textContent(),'人工：好');
+  assert.deepEqual(await page.evaluate(()=>window.squatTest.reps),original);
+  await page.locator('#squatScoreBuiltIn').click();
+  assert.match(await status.textContent(),/内置双踝偏差提示/);
+  assert.equal(await first.textContent(),'人工：好');
+  assert.ok(await page.locator('#squatScoreFit').isDisabled());
+  console.log('PASS offline default ankle hints, guarded JSON import, manual review, opt-in bias, and export');
+}
 try {
   await page.goto(new URL('../index.html',import.meta.url).href);
   assert.ok((await page.locator('#ver').textContent()).includes(APP_VER));
@@ -234,6 +295,25 @@ try {
     await run(c.full);
     await videoCalibration(c);
     console.log('PASS',c.name,'full',c.full.reps.length,'clips',c.clips.map(x=>x.result.reps.length),'calibration');
+  }
+  if (cases.length) {
+    await page.locator('#squatScope').selectOption('all');
+    await run(cases.at(-1).full);
+    await scoringFlow();
+  }
+  if (wristCapture) {
+    await importFile(wristCapture);
+    assert.doesNotMatch(await page.locator('#squatScoreStatus').textContent(),/个人偏置/);
+    await page.locator('#squatScope').selectOption('all');
+    await page.locator('#squatRun').click();
+    await page.waitForFunction(()=>/^预测完成|^预测失败/.test(document.querySelector('#squatStatus').textContent));
+    assert.match(await page.locator('#squatStatus').textContent(),/^预测完成/);
+    const p=page.waitForEvent('download'); await page.locator('#squatScoreExport').click();
+    const exported=JSON.parse(readFileSync(await (await p).path(),'utf8'));
+    assert.ok(exported.source.wrist?.family);
+    assert.ok(exported.reps.some(r=>Number.isFinite(r.features?.wrist_gyro_rms_dps)), JSON.stringify(exported.issues));
+    assert.ok(exported.reps.every(r=>r.review===null));
+    console.log('PASS optional wrist stream and no review leakage between packages');
   }
   if (mixed) {
     await importFile(mixed);
@@ -292,6 +372,7 @@ try {
   for(const [file,re] of [[missingComp,/缺少补偿角速度/],[badClock,/时间轴差异过大|时间轴波动较大/]]) {
     if(!file) continue;
     await importFile(file);
+    if(await page.locator('#vidPanel').isVisible()) await page.locator('#vidClose').click();
     await page.locator('#squatRun').click();
     await page.waitForFunction(()=>/^预测失败/.test(document.querySelector('#squatStatus').textContent));
     assert.match(await page.locator('#squatStatus').textContent(),re);

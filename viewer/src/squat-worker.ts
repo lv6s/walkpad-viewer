@@ -1,8 +1,10 @@
-import {predictSquats, type AnkleStream} from './squat-core';
+import {deviceAnglesOnSquatGrid, predictSquats, wristOnSquatGrid, type AnkleStream} from './squat-core';
+import {extractSquatFeatures, type RepFeatures} from './squat-score-features';
+import {squatSideAngles, type SideAngles} from './squat-axis';
 
 type Streams = {inputs: [AnkleStream, AnkleStream]; origin: number};
 export type CalibrationInput = Streams & {firstBottom: true};
-type Input = CalibrationInput | (Streams & {range: {a:number;b:number}|null});
+type Input = CalibrationInput | (Streams & {range: {a:number;b:number}|null; wrist?: AnkleStream});
 self.onmessage = ({data}: MessageEvent<Input>) => {
   try {
     if ('firstBottom' in data) {
@@ -11,7 +13,20 @@ self.onmessage = ({data}: MessageEvent<Input>) => {
       self.postMessage({firstBottom: (rep[1]+rep[2])/2});
       return;
     }
-    const result = predictSquats(data.inputs, data.origin, data.range);
-    self.postMessage({result}, {transfer:[result.phase.buffer]});
+    let raw: [Float64Array,Float64Array], offset=0;
+    const result=predictSquats(data.inputs,data.origin,data.range,(grid,mapping)=>{raw=grid;offset=mapping;});
+    let wristGrid: Float64Array, wristIssue='', features: RepFeatures[], scoreIssue='', repAngles: SideAngles[] = [];
+    if (data.wrist && result.reps.length) {
+      try {wristGrid=wristOnSquatGrid(data.wrist,data.inputs[0],result.shifts[0],offset,result.start,result.phase.length);}
+      catch(e) {wristIssue='腕部未通过对时质检：'+(e instanceof Error ? e.message : String(e));}
+    }
+    try {
+      const angles=data.inputs.map((s,i)=>deviceAnglesOnSquatGrid(s,result.shifts[i]+offset,result.start,result.phase.length));
+      features=extractSquatFeatures(result.start,result.phase,raw,result.reps,wristGrid,angles);
+    }
+    catch {scoreIssue='逐次指标计算失败；分段结果仍可使用。';}
+    try {repAngles=data.inputs.map((s,i)=>squatSideAngles({t:s.t,values:s.values,heading:s.heading},result.shifts[i]+offset,result.reps));}
+    catch(e) {scoreIssue+=(scoreIssue?'；':'')+'三向角计算失败：'+(e instanceof Error ? e.message : String(e));}
+    self.postMessage({result,features,scoreIssue,wristIssue,repAngles}, {transfer:[result.phase.buffer]});
   } catch (e) { self.postMessage({error:e instanceof Error ? e.message : String(e)}); }
 };

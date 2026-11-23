@@ -1,13 +1,18 @@
 import type {AnkleStream} from './squat-core';
 
-type LocalConfig = {endpoint: string; publicKey: string; token: string};
+type LocalConfig = {endpoint: string; publicKey: string; token?: string};
 type CalibrationResult = {
   schema: string;
+  version?: string;
   status: 'accepted' | 'rejected';
   pose_backend?: string;
   offset_seconds?: number;
   reason?: string;
   diagnostics?: {best_candidate_seconds?: number; alternative_seconds?: number};
+};
+const LAN_CONFIG: LocalConfig = {
+  endpoint: 'http://192.168.100.29:18872/v1/calibrate',
+  publicKey: 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1HnDG53oAVbwHf7dFu5asNTUgT6VMa/+wT5uBLf/EgqCyZu7bCQaUEaiaFFTDDuiXtqGHuOBF+n4H1rUQgw32Gklrq9eIO5agPw8qdyAxkKy1PNmZGpuN9zC/vAjs8mTAGviFT02p/p8qSyeH8ZcqDLU0kV34HCQsv/VF+NGq+GW7Dis1RSOXjabZuH35zuh4JU64ajFCTzPpg2U+h9dSlan1Aqrna8+t3SWMCtzlnOjdHjR4Bp9MmHbZlTU5PaW0/8rdgWr5wN9xInUIbt0UZqL6Ge/PPKp1yAoaEWRElwtkoJ1aWv8zDG91FiQaP6FaKb8Gwgyy28KPUE1cxnyBQIDAQAB',
 };
 const scope = globalThis as typeof globalThis & {walkpadWorkstation?: LocalConfig};
 const bytes = new TextEncoder();
@@ -19,7 +24,7 @@ let loading: Promise<LocalConfig>;
 function config(): Promise<LocalConfig> {
   if (loading) return loading;
   return loading = new Promise<LocalConfig>((resolve,reject)=>{
-    if (location.protocol !== 'file:') { reject(new Error('请从桌面的鞋垫波形查看器快捷方式打开')); return; }
+    if (location.protocol !== 'file:') { reject(new Error('请直接打开本地查看器 index.html，再使用工作站自动校准')); return; }
     const script = document.createElement('script');
     script.src = new URL('workstation.local.js',document.baseURI).href;
     script.onload = () => {
@@ -32,7 +37,7 @@ function config(): Promise<LocalConfig> {
       }
       resolve(value);
     };
-    script.onerror = () => { script.remove(); reject(new Error('此查看器未配置工作站 GPU')); };
+    script.onerror = () => { script.remove(); resolve(LAN_CONFIG); };
     document.head.append(script);
   }).catch(error=>{ loading=undefined; throw error; });
 }
@@ -67,7 +72,8 @@ export async function workstationCalibration(video: Blob, origin: number, stream
     signal.throwIfAborted();
     throw new Error('无法连接工作站 GPU，请确认在公司局域网，并允许浏览器访问本地网络',{cause:error});
   }
-  if (!response.ok) throw new Error(response.status===403 ? '工作站拒绝请求，请检查连接配置与两台电脑的时钟' : `工作站连接失败（${response.status}）`);
+  if (response.status === 429) throw new Error('工作站校准请求过于频繁，请稍后重试');
+  if (!response.ok) throw new Error(response.status===403 ? '工作站拒绝请求，请检查局域网与两台电脑的时钟' : `工作站连接失败（${response.status}）`);
   const answer = new Uint8Array(await response.arrayBuffer());
   if (answer.length < 29 || answer.length > 8192) throw new Error('工作站返回了无效响应');
   const plain = await subtle.decrypt({name:'AES-GCM',iv:answer.subarray(0,12),additionalData:responseAAD},aes,answer.subarray(12));

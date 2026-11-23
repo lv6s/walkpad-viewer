@@ -50,10 +50,15 @@ function render(target: HTMLCanvasElement, limit = Infinity) {
   ctx.restore()
 }
 const visionTarget = ref<VisionTarget>('workstation')
-const idModel = ref<IdModel>('bytetrack')
-const actionRules = ref<ActionRules>('r4')
-const { enabled: visionOn, message: visionMessage, people, start: startVision, stop: stopVision } =
+const idModel = ref<IdModel>('collection-reid')
+const actionRules = ref<ActionRules>('r5')
+const { enabled: visionOn, message: visionMessage, people, review, start: startVision, stop: stopVision,
+  finish: finishVision } =
   cameraVision(() => video.value, target => render(target, 960))
+watch(visionTarget, target => {
+  if (target === 'local' && (idModel.value === 'collection-reid' || idModel.value === 'tracktrack-reid')) idModel.value = 'bytetrack'
+})
+watch(idModel, model => { if (model === 'collection-reid') actionRules.value = 'r5' })
 const overlayStyle = ref<Record<string, string>>({})
 const preview = ref<HTMLElement>()
 let resize: ResizeObserver | undefined
@@ -72,8 +77,7 @@ function sizeOverlay() {
 }
 function toggleVision() {
   if (!visionOn.value) { startVision(visionTarget.value, idModel.value, actionRules.value); return }
-  stopVision()
-  visionMessage.value = ''
+  finishVision()
 }
 function loop() { const c = canvas.value; if (c) render(c); raf = requestAnimationFrame(loop) }
 function startLoop() {
@@ -183,7 +187,10 @@ watch([rotate, mirror], () => {
 }, { flush: 'post' })
 watch(() => status.value?.recorder.recording, async (value, old) => {
   if (value && !old && linked.value && active.value && !recording.value) await start()
-  if (!value && old && recording.value) await stop()
+  if (!value && old) {
+    if (visionOn.value && idModel.value === 'collection-reid') finishVision()
+    if (recording.value) await stop()
+  }
 })
 function unload(event: BeforeUnloadEvent) { if (recording.value) { event.preventDefault(); event.returnValue = '' } }
 onMounted(() => {
@@ -205,4 +212,12 @@ defineExpose({ stop, recording })
 .vision-person.unknown { border-color: #dbe5f7; }
 .vision-person span { display: inline-block; white-space: nowrap; background: #fff; border-radius: 0 0 4px 0; padding: 2px 5px; font-size: 12px; font-weight: 650; }
 </style>
-<template><section class="panel camera-panel"><div class="panel-head"><h2>摄像头</h2><span class="badge" :class="{ live: recording }">{{ recording ? '录像写盘中' : active ? '预览中' : '未开启' }}</span></div><div class="toolbar"><select v-model="selected" :disabled="active"><option value="">默认摄像头</option><option v-for="device in devices" :key="device.deviceId" :value="device.deviceId">{{ device.label || device.deviceId }}</option></select><select v-model="resolution" :disabled="active"><option>640x480</option><option>1280x720</option><option>1920x1080</option><option>3840x2160</option></select><select v-model="fps" :disabled="active"><option :value="15">15 fps</option><option :value="30">30 fps</option><option :value="60">60 fps</option></select><button v-if="!active" @click="open">开启摄像头</button><button v-else @click="close">关闭</button><button :disabled="!active" @click="pip">画中画</button><button :disabled="!active" @click="shot">拍照</button><select v-model="visionTarget" :disabled="visionOn" aria-label="推理位置"><option value="workstation">推理：工作站</option><option value="local">推理：本机</option></select><label title="ID 仅在本次识别会话内有效。切换前请先关闭动作识别。">ID 识别模型 <select v-model="idModel" :disabled="visionOn"><option value="bytetrack">ByteTrack（原版）</option><option value="reid">人体重识别（ReID）</option></select></label><label title="v4.9.8-r4 用最近 12 秒窗口重算，判定比原版更严，深蹲计数可能更慢。切换前先关闭动作识别。">动作规则 <select v-model="actionRules" :disabled="visionOn"><option value="r4">v4.9.8-r4</option><option value="v1">原版规则</option></select></label><button :disabled="!active" :aria-pressed="visionOn" @click="toggleVision">{{ visionOn ? '关闭动作识别' : '实时动作识别' }}</button></div><div ref="preview" class="camera-preview"><video ref="video" autoplay playsinline muted :class="{ veiled: transformed }" @loadedmetadata="sizeOverlay" @resize="sizeOverlay"></video><canvas v-show="transformed" ref="canvas" class="preview-canvas"></canvas><div v-if="visionOn" class="vision-overlay" :style="overlayStyle"><div v-for="person in people" :key="person.id" class="vision-person" :class="person.status" :style="{ left: `${person.box[0]*100}%`, top: `${person.box[1]*100}%`, width: `${(person.box[2]-person.box[0])*100}%`, height: `${(person.box[3]-person.box[1])*100}%` }"><span>ID {{ person.id }} · {{ person.action }}<template v-if="person.count"> · 深蹲 {{ person.count }} 次</template></span></div></div></div><div class="toolbar"><select v-model.number="rotate" :disabled="!active || recording"><option :value="0">方向：原始</option><option :value="90">方向：顺时针90°</option><option :value="180">方向：180°</option><option :value="270">方向：顺时针270°</option></select><label><input v-model="mirror" type="checkbox" :disabled="!active || recording"> 镜像</label><label><input v-model="linked" type="checkbox"> 随传感器记录启停</label><button :disabled="!active || recording" @click="start">开始录像</button><button :disabled="!recording" @click="stop">停止录像</button></div><p v-if="active && visionMessage" class="micro" role="status">{{ visionMessage }}</p><p class="muted">{{ message }}</p><p class="micro">方向与镜像对预览、拍照和录像文件同时生效（录像走 canvas 重绘，不是给画面加 CSS 旋转）；录像中锁定，避免码流分辨率中途跳变。传感器记录不依赖页面；摄像头仍由浏览器持有，刷新前请先停止录像。同步点击启停不代表帧级时间同步。</p></section></template>
+<template><section class="panel camera-panel"><div class="panel-head"><h2>摄像头</h2><span class="badge" :class="{ live: recording }">{{ recording ? '录像写盘中' : active ? '预览中' : '未开启' }}</span></div><div class="toolbar"><select v-model="selected" :disabled="active"><option value="">默认摄像头</option><option v-for="device in devices" :key="device.deviceId" :value="device.deviceId">{{ device.label || device.deviceId }}</option></select><select v-model="resolution" :disabled="active"><option>640x480</option><option>1280x720</option><option>1920x1080</option><option>3840x2160</option></select><select v-model="fps" :disabled="active"><option :value="15">15 fps</option><option :value="30">30 fps</option><option :value="60">60 fps</option></select><button v-if="!active" @click="open">开启摄像头</button><button v-else @click="close">关闭</button><button :disabled="!active" @click="pip">画中画</button><button :disabled="!active" @click="shot">拍照</button><select v-model="visionTarget" :disabled="visionOn" aria-label="推理位置"><option value="workstation">推理：工作站</option><option value="local">推理：本机</option></select><label title="ID 仅在本次识别会话内有效。切换前请先关闭动作识别。TrackTrack + ReID 需在工作站 GPU 上运行，本机会直接报错，不会自动切换模式。">ID 识别模型 <select v-model="idModel" :disabled="visionOn"><option value="collection-reid" :disabled="visionTarget !== 'workstation'">采集身份复核（GPU）</option><option value="bytetrack">ByteTrack（原版）</option><option value="reid">人体重识别（ReID）</option><option value="tracktrack-reid" :disabled="visionTarget !== 'workstation'">TrackTrack + ReID（GPU）</option></select></label><label title="r5 在分配 ID 前要求持续的人体姿态证据，动作判定采用最近 12 秒的姿态窗口。">动作规则 <select v-model="actionRules" :disabled="visionOn || idModel === 'collection-reid'"><option value="r5">v4.9.8-r5</option><option value="r4">v4.9.8-r4</option><option value="v1">原版规则</option></select></label><button :disabled="!active" :aria-pressed="visionOn" @click="toggleVision">{{ visionOn ? '关闭动作识别' : '实时动作识别' }}</button></div><div ref="preview" class="camera-preview"><video ref="video" autoplay playsinline muted :class="{ veiled: transformed }" @loadedmetadata="sizeOverlay" @resize="sizeOverlay"></video><canvas v-show="transformed" ref="canvas" class="preview-canvas"></canvas><div v-if="visionOn" class="vision-overlay" :style="overlayStyle"><div v-for="person in people" :key="person.id" class="vision-person" :class="person.status" :style="{ left: `${person.box[0]*100}%`, top: `${person.box[1]*100}%`, width: `${(person.box[2]-person.box[0])*100}%`, height: `${(person.box[3]-person.box[1])*100}%` }"><span>ID {{ person.id }} · {{ person.action }}<template v-if="person.count"> · 深蹲 {{ person.count }} 次</template></span></div></div></div><div class="toolbar"><select v-model.number="rotate" :disabled="!active || recording"><option :value="0">方向：原始</option><option :value="90">方向：顺时针90°</option><option :value="180">方向：180°</option><option :value="270">方向：顺时针270°</option></select><label><input v-model="mirror" type="checkbox" :disabled="!active || recording"> 镜像</label><label><input v-model="linked" type="checkbox"> 随传感器记录启停</label><button :disabled="!active || recording" @click="start">开始录像</button><button :disabled="!recording" @click="stop">停止录像</button></div><p v-if="active && visionMessage" class="micro" role="status">{{ visionMessage }}</p><p class="muted">{{ message }}</p><p class="micro">方向与镜像对预览、拍照和录像文件同时生效（录像走 canvas 重绘，不是给画面加 CSS 旋转）；录像中锁定，避免码流分辨率中途跳变。传感器记录不依赖页面；摄像头仍由浏览器持有，刷新前请先停止录像。同步点击启停不代表帧级时间同步。</p><details v-if="review">
+  <summary>身份复核 · {{ review.tracks.filter(row => row.status === 'needs_review').length }} 段待人工确认</summary>
+  <p>时间以摄像头预览时间轴为准，不是 IMU 或导出录像的起点。推荐编号未计入动作。</p>
+  <p v-if="review.overflow">轨迹数达到会话容量，后续轨迹未进入复核。</p>
+  <ul><li v-for="row in review.tracks" :key="row.track_id">
+    {{ row.start_s.toFixed(2) }}–{{ row.last_seen_s.toFixed(2) }} 秒 ·
+    {{ row.person_id ? `ID ${row.person_id}${row.status === 'live_reconnected' ? '（已实时接回）' : ''}` : row.suggested_id ? `建议 ID ${row.suggested_id}（待复核）` : '身份未确定' }}
+  </li></ul>
+</details></section></template>

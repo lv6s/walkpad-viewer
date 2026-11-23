@@ -1,8 +1,9 @@
 import model from './squat-v03-model.json';
+import {ankleTimebase, summarizeClock, type AnkleStream} from './squat-clock';
 
 export const SQUAT_VERSION = model.version;
 export const SQUAT_HZ = 50;
-export interface AnkleStream { t: Float64Array; values: Float64Array; receive: Float64Array; elapsed: Float64Array }
+export type {AnkleStream};
 export type SquatRep = [number, number, number, number];
 export type SquatResult = {start: number; phase: Int8Array; reps: SquatRep[]; shifts: number[]; valid: number};
 
@@ -192,33 +193,41 @@ function decode(out: Float64Array[]) {
   return y;
 }
 
-function summarizeClock(s: AnkleStream) {
-  if (s.t.length<30) throw new Error('每只脚踝至少需要 30 帧有效 IMU 数据。');
-  const v: number[] = [], e: number[] = [];
-  for(let i=0;i<s.t.length;i++) {
-    if (!Number.isSafeInteger(s.t[i]) || (i>0 && s.t[i]<=s.t[i-1])) throw new Error('踝部采样时间缺失或重复。');
-    if (Number.isSafeInteger(s.receive[i])) v.push((s.receive[i]-s.t[i]*1000)/1e9);
-    if (Number.isSafeInteger(s.elapsed[i])) e.push((s.elapsed[i]-s.t[i])/1e6);
+export function wristOnSquatGrid(wrist: AnkleStream, left: AnkleStream, leftShift: number, offset: number, start: number, n: number) {
+  const [clock]=summarizeClock(wrist,true), [leftClock]=summarizeClock(left,true);
+  const adjusted=(t:number)=>t/1e6+offset+leftShift+(clock-leftClock);
+  const w=new Float64Array(n*6).fill(NaN), t=wrist.t;
+  for (let i=0,j=1;i<n;i++) {
+    const s=start+i/SQUAT_HZ;
+    while(j<t.length-1 && adjusted(t[j])<s) j++;
+    const lo=adjusted(t[j-1]), hi=adjusted(t[j]);
+    if (s<lo-1e-6 || s>hi+1e-6 || (hi-lo>.12 && Math.min(Math.abs(s-lo),Math.abs(s-hi))>1e-6)) continue;
+    const f=clip((s-lo)/(hi-lo),0,1);
+    for (let c=0;c<6;c++) w[i*6+c]=wrist.values[(j-1)*6+c]+f*(wrist.values[j*6+c]-wrist.values[(j-1)*6+c]);
   }
-  if (v.length<30 || v.length<.95*s.t.length) throw new Error('缺少可用于左右踝对时的手机接收时间。');
-  const m=v.length>>1, srt=sorted(v), drift=median(v.slice(m))-median(v.slice(0,m));
-  if (Math.abs(drift)>.06 || quantile(srt,.95)-quantile(srt,.05)>.12) throw new Error('踝部时间轴波动较大，无法可靠对齐。');
-  if (e.length<.95*s.t.length) throw new Error('采样时间无法映射到查看器时间轴。');
-  const se=sorted(e);
-  if (quantile(se,.95)-quantile(se,.05)>.02) throw new Error('会话时间和采样时间之间不是稳定偏移。');
-  return [quantile(srt,.5),quantile(se,.5)];
+  return w;
 }
 
-export function ankleTimebase(streams: [AnkleStream,AnkleStream], origin: number) {
-  const clocks=streams.map(summarizeClock), d=clocks[0][0]-clocks[1][0];
-  if (Math.abs(d)>.12) throw new Error('左右踝的时间轴差异过大，无法可靠对齐。');
-  if (Math.abs(clocks[0][1]-clocks[1][1])>.02) throw new Error('左右踝无法映射到查看器的同一条会话时间轴。');
-  const average=(clocks[0][0]+clocks[1][0])/2, shifts=clocks.map(d=>d[0]-average);
-  const offset=(clocks[0][1]+clocks[1][1])/2-origin/1e6;
-  return {shifts,offset};
+export function deviceAnglesOnSquatGrid(stream: AnkleStream, shift: number, start: number, n: number) {
+  const t=stream.t, maxGap=.12;
+  return stream.angles?.map(raw=>{
+    const out=new Float64Array(n).fill(NaN);
+    for(let i=0,j=1;i<n;i++) {
+      const target=start+i/SQUAT_HZ-shift;
+      while(j<t.length-1 && t[j]/1e6<target) j++;
+      const a=t[j-1]/1e6, b=t[j]/1e6;
+      if(Math.abs(target-a)<1e-6) {out[i]=raw[j-1];continue;}
+      if(Math.abs(target-b)<1e-6) {out[i]=raw[j];continue;}
+      if(target<a || target>b || b-a>maxGap || !Number.isFinite(raw[j-1]) || !Number.isFinite(raw[j])) continue;
+      const delta=((raw[j]-raw[j-1]+540)%360)-180;
+      out[i]=raw[j-1]+(target-a)/(b-a)*delta;
+    }
+    return out;
+  }) as AnkleStream['angles'];
 }
 
-export function predictSquats(streams: [AnkleStream,AnkleStream], origin: number, range: {a:number;b:number}|null): SquatResult {
+export function predictSquats(streams: [AnkleStream,AnkleStream], origin: number, range: {a:number;b:number}|null,
+    onGrid?: (raw: [Float64Array,Float64Array], offset: number) => void): SquatResult {
   const {shifts,offset}=ankleTimebase(streams,origin);
   const parts=streams.map((s,j)=>{
     const t=s.t.map(v=>v/1e6+shifts[j]); let a=0,b=t.length;
@@ -266,5 +275,6 @@ export function predictSquats(streams: [AnkleStream,AnkleStream], origin: number
   }
   const usable=phase.reduce((n,x)=>n+Number(x>=0),0);
   if (!usable) throw new Error('没有连续且足够长的双踝数据可供预测。');
+  onGrid?.([raw[0],raw[1]],offset);
   return {start,phase,reps,shifts,valid:usable};
 }

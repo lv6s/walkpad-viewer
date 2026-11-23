@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>IMU 轴向推断</title>
-<link rel="stylesheet" href="css/app.css?v=3.34.0">
-<link rel="stylesheet" href="css/axis.css?v=3.34.0">
+<link rel="stylesheet" href="css/app.css?v=3.43.0">
+<link rel="stylesheet" href="css/axis.css?v=3.43.0">
 </head>
 <body data-page="axis">
 
@@ -17,35 +17,25 @@
       <a class="entry" href="index.html">波形查看器 →</a>
     </div>
   </div>
-  <p class="sub">拖入维特 <code>.txt</code> 或含 <code>imu_physical_values</code> 的 parquet，反推传感器 x / y / z 的解剖语义与正方向。全部在本地解析，不上传。</p>
+  <p class="sub">导入已录好的 IMU 数据。查看器先检测步行段，再用合格周期估计设备安装轴线。全部在本地计算，不上传。</p>
 </header>
 
 <main>
   <div class="dropzone" id="drop">
     <div class="big">把 IMU 文件拖进来</div>
-    <div class="hint">同一次录制的多份文件一起拖（另一台设备 / 另一只脚），靠一次跳跃或重落地对齐时间戳</div>
+    <div class="hint">支持测量包 ZIP、物理量 parquet、维特 TXT / CSV。多份文件分别分析。</div>
     <button class="pick" id="pick" type="button">选择文件（可多选）</button>
-    <input type="file" id="file" accept=".parquet,.txt,.csv" multiple hidden>
+    <input type="file" id="file" accept=".zip,.parquet,.txt,.csv" multiple hidden>
   </div>
   <div class="err" id="err"></div>
 
   <div class="axfiles" id="fileList" hidden></div>
 
   <div class="ptools" id="axTools" hidden>
-    <div class="ctrl"><span>静止判据</span>
-      <button data-sens="auto" class="on" title="加速度模长滑窗标准差 < 0.04 g 且模长偏离 1 g < 0.08">自动</button>
-      <button data-sens="loose" title="< 0.09 g 且偏离 < 0.16，静止段判定更松">宽松</button>
-      <button data-sens="strict" title="< 0.02 g 且偏离 < 0.05，只认很稳的静止段">严格</button>
-    </div>
-    <span class="sep"></span>
-    <div class="ctrl">
-      <button id="axAgain" title="清掉手动指定的参考，重新按冲击强度自动分工">重新分工</button>
-      <button id="axClear">清空</button>
-    </div>
+    <div class="ctrl"><button id="axClear">清空列表</button></div>
     <span class="chip" id="axNote"></span>
   </div>
 
-  <div id="axSummary"></div>
   <div class="axcards" id="axCards"></div>
 
   <footer>只认 <code>imu_physical_values</code>；<code>imu_raw_values</code> 的通道序与物理轴相差一次置换与变号，推出来的 x/y/z 没有解剖意义。<button class="lnk" id="helpFoot" type="button">推断方法与边界</button></footer>
@@ -63,12 +53,9 @@
       <div class="help-text" id="helpText">
         <section data-help="axis" data-title="轴向推断">
           <h3>推断方法与边界</h3>
-          <p><b>① 垂直轴</b>：找加速度模长稳定的静止段，静止时的加速度方向即重力反方向。<b>② 内外侧轴</b>：扣掉零偏后，在重力系里对非静止帧角速度做 PCA，第一主成分就是内外侧轴（肢体摆动时绕它转），符号不定；零偏取「角速度稳」的静止帧逐轴中位数 —— 支撑相脚不移动但踝在滚动，不算零速样本。<b>③ 前向符号</b>：三项独立判据投票 —— 相邻支撑中点之间的双积分位移（步幅）、支撑末到支撑初的双积分位移（摆动）、以及「若 z 轴是脚背外法线则其水平投影朝脚尖」的几何关系。三项同向才判「高」。</p>
-          <p><b>边界</b>：没有行走段就没有前向符号（纯深蹲只能给垂直轴与内外侧轴）；几何判据只对脚背贴法成立，贴大腿外侧时 z 轴的水平投影指向「外侧」，硬套会把外侧当成前；倒走会让双积分两项整体反向；采样率低或零偏大时位移被低估，前向只能到「中」。</p>
-          <p><b>分段为什么必要</b>：全段一次做 PCA，只要掺进一段转身，绕垂直轴的能量就压过前后摆动，内外侧轴直接定不出来。参考数据贴地时加速度几乎完全静止、落地时有 3 g 以上的尖锐冲击，这两个特征比肢体侧的平滑起伏清楚得多，用来切动作段最可靠。</p>
-          <p><b>自动分工</b>：每份文件按「冲击峰值 + 冲击次数 + 贴地静止占比」打分，最高的一份当参考。实测脚背 16.6 g、大腿 8 g，脚背会被自动挑出来。点角色徽章可以手动改；「重新分工」回到自动结果。</p>
-          <p><b>只认物理量</b>：<code>imu_raw_values</code> 的通道序与物理轴相差一次置换与变号，不是解剖轴，推出来的 x / y / z 没有意义。维特 TXT 的时间戳只到毫秒、同一毫秒里常压着多帧，时间轴是把同一时间戳的帧均匀摊开后重建的。</p>
-          <p>三维图拖动旋转视角（各设备共用同一视角）、滚轮缩放、双击复位。</p>
+          <p><b>先找步行</b>：满足输入条件的双侧数据复用「正常走跑提取」的步行标签；单设备或重建时间轴采用周期筛查。多份文件分别分析，不自动对齐时间轴，也不用选择佩戴部位。</p>
+          <p><b>再定轴</b>：支持的 D56 鞋垫用多个步态周期中前掌与后跟同时承重、转动较小的样本估计向上，普通静止段仅用于陀螺残差。承重参考不足或冲突时不报鞋垫姿态；无压力的 IMU 仍用静止重力估功能轴。结果不是几何安装标定。</p>
+          <p><b>怎么看</b>：灰色水平线没有正负，彩色箭头是设备自身的正轴。结果是步行功能轴线，不是解剖轴或绝对朝向。只用物理量六轴，不用原始计数。</p>
         </section>
       </div>
     </div>
@@ -78,7 +65,7 @@
 
 <div class="busy" id="busy" hidden>解析中…</div>
 
-<script src="dist/app.js?v=3.34.0"></script>
+<script src="dist/app.js?v=3.43.0"></script>
 
 </body>
 </html>

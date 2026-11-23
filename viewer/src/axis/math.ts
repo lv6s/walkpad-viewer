@@ -429,4 +429,4 @@ function infer(src: any, opt?: any): any {
           t0: t[i0], t1: t[i1]};
 }
 
-export {AXES, AX_COL, D2R, G, R2D, SENS, angDeg, angStr, clamp1, cmean, cross, dot, infer, mul, pct, sgn, unit, vec3, vlen};
+export {AXES, AX_COL, D2R, G, R2D, SENS, angDeg, angStr, clamp1, cmean, cross, dot, eig3, infer, mul, pct, sgn, unit, vec3, vlen};

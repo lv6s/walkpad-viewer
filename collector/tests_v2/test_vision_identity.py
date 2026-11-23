@@ -8,7 +8,7 @@ import pytest
 import backend.vision_identity as identity_module
 from backend.vision_actions import LiveActions
 from backend.vision_identity import (
-    FEATURE_DIM, MODEL_STEM, PersonIdentity, clear, load_encoder,
+    FEATURE_DIM, MODEL_STEM, PROTOTYPE_MAX, PersonIdentity, SessionIdentity, clear, load_encoder,
 )
 
 FRAME = np.zeros((540, 960, 3), np.uint8)
@@ -365,3 +365,362 @@ def test_clear_rejects_edges_small_boxes_and_overlap():
     assert not clear(540, 960, (.2, .1, .5, .18))
     assert not clear(540, 960, (.2, .1, .5, .9), [(.2, .1, .4, .9)])
     assert not clear(540, 960, (float('nan'), .1, .5, .9))
+
+
+def session_step(bank, actions, now, detections, features):
+    mapped, recovered = bank.resolve(now, FRAME, detections, features)
+    actions.reset(recovered)
+    return actions.frame(now, mapped)
+
+
+VIEW_A = unit(1, 0, 0)
+VIEW_B = unit(-.5, .866, 0)
+
+
+def test_session_recovery_keeps_count_and_normalizes_features():
+    bank = SessionIdentity()
+    actions = LiveActions(bank.ttl)
+    now = 0.
+    for _ in range(15):
+        now += .12
+        session_step(bank, actions, now, [(1, BOX, standing())], [np.array([7., 0., 0.])])
+    for _ in range(10):
+        now += .12
+        session_step(bank, actions, now, [(1, BOX, lowered())], [np.array([7., 0., 0.])])
+    for _ in range(9):
+        now += .12
+        last = session_step(bank, actions, now, [(1, BOX, standing())], [np.array([7., 0., 0.])])
+    assert last[0]['count'] == 1
+    known = last[0]['id']
+    now += 5.
+    for _ in range(2):
+        now += .12
+        assert session_step(bank, actions, now, [(9, BOX_BACK, standing())],
+                            [np.array([8., .4, 0.])]) == []
+    now += .12
+    last = session_step(bank, actions, now, [(9, BOX_BACK, standing())], [np.array([8., .4, 0.])])
+    assert last[0]['id'] == known and last[0]['count'] == 1
+
+
+def test_session_pending_is_withheld_and_exposed():
+    bank = SessionIdentity()
+    actions = LiveActions(bank.ttl)
+    now = 0.
+    for _ in range(6):
+        now += .12
+        first = session_step(bank, actions, now, [(1, BOX, standing())], [VIEW_A])
+    known = first[0]['id']
+    now += 3.
+    people = session_step(bank, actions, now, [(9, BOX_BACK, standing())], [VIEW_B])
+    assert people == []
+    assert bank.pending == [dict(track_id=9, box=list(BOX_BACK), samples=1)]
+    for _ in range(2):
+        now += .12
+        people = session_step(bank, actions, now, [(9, BOX_BACK, standing())], [VIEW_B])
+    assert people[0]['id'] != known and bank.pending == []
+
+
+def test_session_pending_is_released_when_gallery_expires():
+    bank = SessionIdentity(ttl=2.)
+    actions = LiveActions(bank.ttl)
+    now = 0.
+    for _ in range(6):
+        now += .12
+        session_step(bank, actions, now, [(1, BOX, standing())], [VIEW_A])
+    now += 1.5
+    for _ in range(2):
+        now += .12
+        assert session_step(bank, actions, now, [(9, BOX_BACK, standing())],
+                            [unit(1, 1.333, 0)]) == []
+    for _ in range(20):
+        now += .12
+        people = session_step(bank, actions, now, [(9, BOX_BACK, standing())],
+                              [unit(1, 1.333, 0)])
+        if people:
+            break
+    assert people and bank.pending == []
+
+
+def test_session_pending_without_features_waits_for_evidence():
+    bank = SessionIdentity(ttl=2.)
+    actions = LiveActions(bank.ttl)
+    now = 0.
+    for _ in range(6):
+        now += .12
+        session_step(bank, actions, now, [(1, BOX, standing())], [VIEW_A])
+    now += 1.5
+    for _ in range(10):
+        now += .12
+        assert session_step(bank, actions, now, [(9, BOX_BACK, standing())], [None]) == []
+    for _ in range(3):
+        now += .12
+        people = session_step(bank, actions, now, [(9, BOX_BACK, standing())], [VIEW_A])
+    assert people and bank.pending == []
+
+
+def test_session_multi_prototype_recovers_a_different_view():
+    bank = SessionIdentity()
+    actions = LiveActions(bank.ttl)
+    now = 0.
+    for _ in range(9):
+        now += .12
+        first = session_step(bank, actions, now, [(1, BOX, standing())], [VIEW_A])
+    known = first[0]['id']
+    for _ in range(9):
+        now += .12
+        session_step(bank, actions, now, [(1, BOX, standing())], [VIEW_B])
+    assert len(bank.gallery[known].prototypes) == 2
+    now += 5.
+    for _ in range(2):
+        now += .12
+        assert session_step(bank, actions, now, [(9, BOX_BACK, standing())], [VIEW_B]) == []
+    now += .12
+    assert session_step(bank, actions, now, [(9, BOX_BACK, standing())], [VIEW_B])[0]['id'] == known
+
+
+def test_session_prototypes_stay_bounded():
+    known = identity_module._SessionKnown([VIEW_A], 0.)
+    for vector in (VIEW_B, unit(0, 0, 1), unit(-1, 0, 0), unit(0, -.866, .5)):
+        SessionIdentity._absorb(known, vector)
+    assert len(known.prototypes) == PROTOTYPE_MAX
+    SessionIdentity._absorb(known, unit(1, .02, 0))
+    assert len(known.prototypes) == PROTOTYPE_MAX
+
+
+def test_session_competing_claims_stay_pending():
+    bank = SessionIdentity()
+    actions = LiveActions(bank.ttl)
+    now = 0.
+    for _ in range(6):
+        now += .12
+        first = session_step(bank, actions, now, [(1, BOX, standing())], [VIEW_A])
+    known = first[0]['id']
+    now += 3.
+    for _ in range(20):
+        now += .12
+        assert session_step(bank, actions, now, [(8, BOX, standing()), (9, BOX_OTHER, standing())],
+                            [VIEW_A, VIEW_A]) == []
+    assert {item['track_id'] for item in bank.pending} == {8, 9}
+    assert known in bank.gallery
+
+
+def test_session_ambiguous_return_stays_pending_and_gallery_unchanged():
+    bank = SessionIdentity()
+    actions = LiveActions(bank.ttl)
+    now = 0.
+    for _ in range(6):
+        now += .12
+        session_step(bank, actions, now, [(1, BOX, standing()), (2, BOX_OTHER, standing())],
+                     [unit(1, .1, 0), unit(1, -.1, 0)])
+    known = set(bank.gallery)
+    snapshot = {identity: [item.copy() for item in bank.gallery[identity].prototypes] for identity in known}
+    now += 3.
+    for _ in range(12):
+        now += .12
+        assert session_step(bank, actions, now, [(9, BOX_BACK, standing())], [unit(1, 0, 0)]) == []
+    assert bank.pending[0]['track_id'] == 9
+    for identity, prototypes in snapshot.items():
+        assert len(bank.gallery[identity].prototypes) == len(prototypes)
+        assert np.allclose(bank.gallery[identity].prototypes[0], prototypes[0])
+
+
+def test_session_gray_zone_stays_pending():
+    bank = SessionIdentity()
+    actions = LiveActions(bank.ttl)
+    now = 0.
+    for _ in range(6):
+        now += .12
+        first = session_step(bank, actions, now, [(1, BOX, standing())], [VIEW_A])
+    known = first[0]['id']
+    now += 3.
+    for _ in range(12):
+        now += .12
+        assert session_step(bank, actions, now, [(9, BOX_BACK, standing())], [unit(1, 1.333, 0)]) == []
+    assert bank.pending[0]['track_id'] == 9
+    assert len(bank.gallery) == 1 and bank.gallery[known].last_seen < now
+
+
+def test_session_without_features_stays_pending():
+    bank = SessionIdentity()
+    actions = LiveActions(bank.ttl)
+    now = 0.
+    for _ in range(6):
+        now += .12
+        session_step(bank, actions, now, [(1, BOX, standing())], [VIEW_A])
+    now += 3.
+    for _ in range(12):
+        now += .12
+        assert session_step(bank, actions, now, [(9, BOX_BACK, standing())], [None]) == []
+    assert bank.pending == [dict(track_id=9, box=list(BOX_BACK), samples=0)]
+
+
+def test_session_long_gap_on_same_track_breaks_action_window():
+    bank = SessionIdentity()
+    pose = standing()
+    now = 0.
+    for _ in range(6):
+        now += .12
+        _, recovered = bank.resolve(now, FRAME, [(1, BOX, pose)], [VIEW_A])
+    known = bank.tracks[1].identity
+    for _ in range(4):
+        now += .12
+        bank.resolve(now, FRAME, [], [])
+    now += .12
+    assert bank.resolve(now, FRAME, [(1, BOX, pose)], [VIEW_A])[1] == set()
+    for _ in range(6):
+        now += .12
+        bank.resolve(now, FRAME, [], [])
+    now += .12
+    assert bank.resolve(now, FRAME, [(1, BOX, pose)], [VIEW_A])[1] == {known}
+
+
+def test_session_reuses_only_new_samples():
+    bank = SessionIdentity()
+    actions = LiveActions(bank.ttl)
+    now = 0.
+    for _ in range(6):
+        now += .12
+        session_step(bank, actions, now, [(1, BOX, standing())], [VIEW_A])
+    known = next(iter(bank.gallery))
+    before = bank.gallery[known].prototypes[0].copy()
+    now += .12
+    session_step(bank, actions, now, [(1, BOX, standing())], [unit(1, .3, 0)])
+    after = bank.gallery[known].prototypes[0].copy()
+    assert not np.allclose(before, after)
+    now += .05
+    session_step(bank, actions, now, [(1, BOX, standing())], [unit(1, .3, 0)])
+    assert np.allclose(after, bank.gallery[known].prototypes[0])
+
+
+def test_session_split_votes_are_not_adopted():
+    bank = SessionIdentity()
+    actions = LiveActions(bank.ttl)
+    now = 0.
+    for _ in range(6):
+        now += .12
+        session_step(bank, actions, now, [(1, BOX, standing()), (2, BOX_OTHER, standing())],
+                     [VIEW_A, unit(.707, .707, 0)])
+    known = set(bank.gallery)
+    now += 3.
+    for feature in (VIEW_A, VIEW_A, unit(.707, .707, 0)):
+        now += .12
+        assert session_step(bank, actions, now, [(9, BOX_BACK, standing())], [feature]) == []
+    for _ in range(3):
+        now += .12
+        people = session_step(bank, actions, now, [(9, BOX_BACK, standing())], [VIEW_A])
+    assert people[0]['id'] in known
+
+
+def test_session_recovered_identity_is_not_duplicated_by_stale_track():
+    bank = SessionIdentity()
+    actions = LiveActions(bank.ttl)
+    now = 0.
+    for _ in range(6):
+        now += .12
+        first = session_step(bank, actions, now, [(1, BOX, standing())], [VIEW_A])
+    known = first[0]['id']
+    for _ in range(8):
+        now += .12
+        session_step(bank, actions, now, [], [])
+    for _ in range(2):
+        now += .12
+        assert session_step(bank, actions, now, [(9, BOX_BACK, standing())], [VIEW_A]) == []
+    now += .12
+    assert session_step(bank, actions, now, [(9, BOX_BACK, standing())], [VIEW_A])[0]['id'] == known
+    now += .12
+    people = session_step(bank, actions, now, [(9, BOX_BACK, standing()), (1, BOX, standing())],
+                          [VIEW_A, VIEW_A])
+    ids = [person['id'] for person in people]
+    assert len(ids) == len(set(ids)) and ids.count(known) == 1
+
+
+def test_session_simultaneous_tracks_never_share_an_identity():
+    bank = SessionIdentity()
+    actions = LiveActions(bank.ttl)
+    now = 0.
+    for _ in range(8):
+        now += .12
+        people = session_step(bank, actions, now, [(1, BOX, standing()), (2, BOX_OTHER, standing())],
+                              [VIEW_A, VIEW_A])
+        assert len({person['id'] for person in people}) == 2
+
+
+def test_session_gallery_expires_after_ttl():
+    bank = SessionIdentity(ttl=2.)
+    actions = LiveActions(bank.ttl)
+    now = 0.
+    for _ in range(6):
+        now += .12
+        first = session_step(bank, actions, now, [(1, BOX, standing())], [VIEW_A])
+    known = first[0]['id']
+    now += 3.
+    for _ in range(6):
+        now += .12
+        last = session_step(bank, actions, now, [(9, BOX_BACK, standing())], [VIEW_A])
+    assert last[0]['id'] != known
+
+
+def test_session_ignores_unusable_features_and_checks_alignment():
+    bank = SessionIdentity()
+    actions = LiveActions(bank.ttl)
+    people = session_step(bank, actions, .12, [(1, BOX, standing())],
+                          [np.array([0., 0., 0.])])
+    assert [person['id'] for person in people] == [1]
+    assert not bank.tracks[1].samples
+    session_step(bank, actions, .24, [(1, BOX, standing())], [np.array([np.nan, 1., 0.])])
+    assert not bank.tracks[1].samples
+    with pytest.raises(ValueError, match='身份特征数量'):
+        bank.resolve(.36, FRAME, [(1, BOX, standing())], [])
+
+
+class SlimCv2:
+    COLOR_BGR2GRAY = 6
+    INTER_AREA = 3
+
+    @staticmethod
+    def resize(image, size, fx=1., fy=1., interpolation=None):
+        return image[::2, ::2]
+
+    @staticmethod
+    def cvtColor(image, code):
+        return image[:, :, 0]
+
+    @staticmethod
+    def rectangle(*args):
+        pass
+
+    @staticmethod
+    def goodFeaturesToTrack(*args, **kwargs):
+        return None
+
+
+def test_session_recovery_resets_r4_window_and_keeps_count():
+    from backend.vision_rules_r4 import R4Actions
+
+    bank = SessionIdentity()
+    actions = R4Actions(SlimCv2, bank.ttl)
+    pose = np.asarray(standing())
+    now = 0.
+    for _ in range(6):
+        now += .12
+        mapped, recovered = bank.resolve(now, FRAME, [(1, BOX, pose)], [VIEW_A])
+        actions.reset(recovered)
+        people = actions.frame(now, FRAME, mapped)
+    known = people[0]['id']
+    actions.tracks[known].count = 3
+    for _ in range(10):
+        now += .12
+        mapped, recovered = bank.resolve(now, FRAME, [], [])
+        actions.reset(recovered)
+        actions.frame(now, FRAME, mapped)
+    for _ in range(2):
+        now += .12
+        mapped, recovered = bank.resolve(now, FRAME, [(9, BOX_BACK, pose)], [VIEW_A])
+        assert mapped == []
+    now += .12
+    mapped, recovered = bank.resolve(now, FRAME, [(9, BOX_BACK, pose)], [VIEW_A])
+    assert recovered == {known}
+    actions.reset(recovered)
+    people = actions.frame(now, FRAME, mapped)
+    assert people[0]['id'] == known and people[0]['count'] == 3
+    assert len(actions.tracks[known].samples) == 1

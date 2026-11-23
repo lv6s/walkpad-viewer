@@ -1,5 +1,4 @@
-/* 独立轴向推断页（axis.html）专用：文件清单、汇总表、卡片网格。
-   通用样式（卡片 / 轴表 / 判据表 / 段表）在 app.css。 */
+/* 独立轴向推断页的文件清单与卡片网格。 */
 
 .axfiles{display:flex; flex-direction:column; gap:8px; margin-top:14px}
 /* 有文件之后拖放区收窄：结果才是主角，但随时还能再拖 */
@@ -15,22 +14,8 @@
   flex:1 1 260px; min-width:0; font-weight:600; font-size:13px;
   white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
 }
-button.badge{font:inherit; cursor:pointer}
-button.badge.hi:hover{filter:brightness(.96)}
-.chip.warn{color:var(--warn); border-color:var(--warn)}
-
-#axSummary:not(:empty){
-  margin-top:14px; padding:10px 14px; background:var(--card);
-  border:1px solid var(--line); border-radius:12px; overflow-x:auto;
-}
-.axsumtbl{margin:0}
-.axsumtbl td.ax{white-space:nowrap; max-width:280px; overflow:hidden; text-overflow:ellipsis}
-/* 自动挑出来的那一段：一眼看出「一键」给的是哪条结论 */
-.axseg tr.pick td{background:var(--accent-soft)}
-.axseg tr.pick td:first-child{color:var(--accent)}
-
 .axcards{
-  display:grid; grid-template-columns:repeat(auto-fit, minmax(520px, 1fr));
+  display:grid; grid-template-columns:repeat(auto-fit, minmax(min(100%, 520px), 1fr));
   gap:14px; align-items:start; margin-top:14px;
 }
 .axcards .side{margin-top:0; min-width:0}

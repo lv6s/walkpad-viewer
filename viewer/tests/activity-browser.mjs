@@ -279,7 +279,18 @@ try {
   console.log('PASS long lazy package full-duration inference beyond initial 60s, cancellation and stale-result isolation');
   const walk = new URL('wt_dev_walk_frames.json', fixtures);
   if (fs.existsSync(walk)) {
-    await importFile(wtWalkZip(JSON.parse(fs.readFileSync(walk))['64步.zip'])); await analyze();
+    await importFile(wtWalkZip(JSON.parse(fs.readFileSync(walk))['64步.zip']));
+    await page.locator('[data-tab="axis"]').click();
+    const axes = page.locator('#axisPanels .side');
+    await axes.last().locator('.meta').getByText(/双侧状态检测.*段步行候选/).waitFor();
+    assert.equal(await axes.count(), 2);
+    for (const card of await axes.all()) {
+      assert.match(await card.locator('.meta').textContent(), /双侧状态检测.*[1-9]\d* 段步行候选/);
+      assert.equal(await card.getByRole('combobox').count(), 0);
+    }
+    assert.equal(await page.locator('#activityRows tr').count(), 0);
+    console.log('PASS offline axis uses existing dual-side walk extraction without updating the activity page:', await axes.locator('.axsum').allTextContents());
+    await page.locator('[data-tab="activity"]').click(); await analyze();
     const heads = await page.locator('#activityRows').evaluate(tb => [...tb.closest('table').tHead.rows[0].cells].map(c => c.textContent));
     assert.equal(heads.length, 10);
     assert.match(heads[6], /平均步频/); assert.match(heads[7], /有效步数/); assert.match(heads[9], /双脚支撑 \/ 腾空/);

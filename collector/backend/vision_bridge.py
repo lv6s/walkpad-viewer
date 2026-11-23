@@ -8,14 +8,19 @@ from urllib.parse import urlsplit
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from .vision_worker import HEADER, MAX_FRAME, VISION
-from .vision_workstation import ACTION_RULES, ID_MODELS, close, connect, message, send
+from .vision_worker import COLLECTION_ID_MODE, GPU_ID_MODES, HEADER, MAX_FRAME, VISION
+from .vision_workstation import PROTOCOLS, close, connect, message, send
 
 
-async def receive(ws, frames):
+async def receive(ws, frames, review=False):
+    requested = False
     while True:
         packet = await ws.receive_bytes()
-        if not HEADER.size < len(packet) <= MAX_FRAME:
+        if requested:
+            raise ValueError('复核已请求，识别会话正在结束')
+        if review and packet == bytes(4):
+            requested = True
+        elif not HEADER.size < len(packet) <= MAX_FRAME:
             raise ValueError('识别帧大小无效')
         if frames.full():
             frames.get_nowait()
@@ -30,7 +35,7 @@ async def exchange(ws, frames, reader, writer, local=False):
             return
         while True:
             packet = await frames.get()
-            await send(writer, len(packet).to_bytes(4, 'big') + packet)
+            await send(writer, packet if packet == bytes(4) else len(packet).to_bytes(4, 'big') + packet)
             result = await message(reader, 12.)
             await ws.send_json(result)
             if result['type'] != 'result':
@@ -67,12 +72,14 @@ class VisionBridge:
             await ws.accept(subprotocol='walkpad-vision')
             if target not in ('local', 'workstation'):
                 raise ValueError('不支持的识别位置')
-            if id_model not in ID_MODELS:
+            if not any(id_model == option for option, _ in PROTOCOLS):
                 raise ValueError('不支持的 ID 识别模型')
-            if action_rules not in ACTION_RULES:
-                raise ValueError('不支持的动作规则')
+            if (id_model, action_rules) not in PROTOCOLS:
+                raise ValueError('该 ID 模型不支持所选动作规则')
+            if target == 'local' and id_model in GPU_ID_MODES:
+                raise ValueError('所选 ID 模型需使用工作站 GPU')
             frames = asyncio.Queue(maxsize=1)
-            tasks = [asyncio.create_task(receive(ws, frames)),
+            tasks = [asyncio.create_task(receive(ws, frames, review=id_model == COLLECTION_ID_MODE)),
                      asyncio.create_task(self.run(ws, frames, target, id_model, action_rules))]
             try:
                 done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)

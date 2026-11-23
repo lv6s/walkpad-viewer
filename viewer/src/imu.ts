@@ -26,7 +26,7 @@ const IMU_SRC = {
 };
 const AX_C = {X: '#2E86D6', Y: '#DE7024', Z: '#3A9E62'};
 const TEMP_C = '#B5793A';
-const PITCH_C = '#7A5CC4', TILT_C = '#2A8F83';
+const PITCH_C = '#7A5CC4', TILT_C = '#2A8F83', HEAD_C = '#8A5A2B';
 const TEMP_H = 62, ANG_H = 54, BAND_H = 128;
 
 function activeKinds() { return IMU_KINDS.filter(kd => state.imuKinds.has(kd.k)); }
@@ -58,6 +58,8 @@ function narrowBands(s) {
       arr: ang.pitch, color: PITCH_C});
     if (ang.sideTilt) out.push({key: 'tilt', title: '侧倾角 sideTiltDeg (°)', sub: '设备侧倾，正负按导出定义',
       arr: ang.sideTilt, color: TILT_C});
+    if (ang.heading) out.push({key: 'head', title: '相对航向 relativeHeadingDeg (°)', sub: '同一参考内展开，起点为跟踪建立时',
+      arr: ang.heading, color: HEAD_C});
   }
   const all = [];
   for (const b of out) {
@@ -65,7 +67,7 @@ function narrowBands(s) {
     const r = bandRange(b.arr);
     if (r) all.push({...b, lo: r.lo, hi: r.hi});
   }
-  const shown = all.filter(b => b.key === 'temp' ? state.imuTemp : state.imuAng);
+  const shown = all.filter(b => b.key === 'temp' ? state.imuTemp : b.key === 'head' ? state.imuHead : state.imuAng);
   return {all, shown};
 }
 // 某侧实际可用的数据源：文件可能只有 raw 没有 physical，反之亦然
@@ -715,7 +717,10 @@ function drawImu(entry) {
           : '')
       + (() => {
         const ang = nb.all.filter(b => b.key === 'pitch' || b.key === 'tilt').map(b => b.key === 'pitch' ? '俯仰' : '侧倾');
-        return ang.length ? `　|　设备角 ${ang.join('+')}${state.imuAng ? '' : '（已隐藏）'}` : '';
+        const hd = nb.all.some(b => b.key === 'head');
+        const parts = [ang.length ? `设备角 ${ang.join('+')}${state.imuAng ? '' : '（已隐藏）'}` : '',
+          hd ? `相对航向${state.imuHead ? '' : '（已隐藏）'}` : ''].filter(Boolean);
+        return parts.length ? `　|　${parts.join('　')}` : '';
       })()
       + (s.imu.nPart ? `　|　${s.imu.nPart} 帧单位未确认（加速度为空）` : '')
       + (gs ? (gs.list.length

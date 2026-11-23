@@ -67,8 +67,8 @@ export async function upload(path: string, blob: Blob) {
   return result
 }
 export type VisionTarget = 'workstation' | 'local'
-export type IdModel = 'bytetrack' | 'reid'
-export type ActionRules = 'v1' | 'r4'
+export type IdModel = 'bytetrack' | 'reid' | 'tracktrack-reid' | 'collection-reid'
+export type ActionRules = 'v1' | 'r4' | 'r5'
 
 export function openVisionSocket(target: VisionTarget, idModel: IdModel, actionRules: ActionRules) {
   if (!token) throw new Error('工作台未连接')

@@ -105,3 +105,52 @@ def test_rules_run_on_still_person():
     engine._run(track, times[-1], times, pose, camera, 640, 480)
     assert track.label[0] in ('站立', '未判定')
     assert track.count == 0
+
+
+class StaticCv2:
+    COLOR_BGR2GRAY = 6
+
+    @staticmethod
+    def cvtColor(image, code):
+        return image[:, :, 0]
+
+    @staticmethod
+    def rectangle(*args):
+        pass
+
+    @staticmethod
+    def goodFeaturesToTrack(*args, **kwargs):
+        return None
+
+
+BOX = [.2, .1, .6, .9]
+
+
+def test_reset_keeps_count_and_rebuilds_the_window():
+    engine = r4.R4Actions(StaticCv2)
+    image = np.zeros((480, 480, 3), np.uint8)
+    now = 0.
+    for _ in range(6):
+        now += .1
+        engine.frame(now, image, [(1, BOX, standing_pose())])
+    track = engine.tracks[1]
+    track.count = 2
+    track.counted.append((1.0, 2.0))
+    track.held = (now, ('走路', 'confirmed'))
+    track.label = ('走路', 'confirmed')
+    engine.reset({1})
+    assert not track.samples
+    assert track.label == ('未判定', 'unknown') and track.held[0] == -1e9
+    assert track.count == 2 and list(track.counted) == [(1.0, 2.0)]
+    now += .1
+    engine.frame(now, image, [(1, BOX, standing_pose())])
+    assert len(track.samples) == 1 and track.count == 2
+
+
+def test_reset_then_absence_expires_without_error():
+    engine = r4.R4Actions(StaticCv2, retention=1.)
+    image = np.zeros((480, 480, 3), np.uint8)
+    engine.frame(.1, image, [(1, BOX, standing_pose())])
+    engine.reset({1})
+    engine.frame(1.5, image, [])
+    assert 1 not in engine.tracks

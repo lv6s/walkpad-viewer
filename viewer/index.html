@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>鞋垫数据查看器</title>
-<link rel="stylesheet" href="css/app.css?v=3.34.0">
-<link rel="stylesheet" href="css/axis.css?v=3.34.0">
+<link rel="stylesheet" href="css/app.css?v=3.43.0">
+<link rel="stylesheet" href="css/axis.css?v=3.43.0">
 </head>
 <body data-page="viewer">
 <header>
@@ -16,7 +16,7 @@
       <a class="entry" href="axis.html">IMU 轴向 →</a>
     </div>
   </div>
-  <p class="sub">拖入测量包 <code>.zip</code> / <code>.parquet</code>，或维特 <code>.txt</code> / <code>.csv</code>。全部在本地解析，不上传。</p>
+  <p class="sub">拖入测量包 <code>.zip</code> / <code>.parquet</code>，或维特 <code>.txt</code> / <code>.csv</code>。文件在本地解析；仅视频自动校准使用局域网工作站。</p>
 </header>
 
 <main>
@@ -123,6 +123,7 @@
       <div class="ctrl"><span>显示</span>
         <button id="imuTempOn" class="on" title="六轴下面的温度带。文件没有温度列（或整段为空）时不会多出这一条">温度</button>
         <button id="imuAngOn" class="on" title="设备自报的俯仰角 / 侧倾角。文件没有 pitchDeg / sideTiltDeg（或整段为空）时不会多出这两条">俯仰 / 侧倾</button>
+        <button id="imuHeadOn" class="on" title="设备自报的相对航向，已按 referenceId 展开（跨越 ±180 不跳圈）。参考一变就重新起算；文件没有 relativeHeadingDeg 时不会多出这一条">航向</button>
       </div>
       <div class="ctrl"><span>底色</span>
         <button id="imuRun" title="用「状态与步态」页当前所选模型分析整段，把步行 / 跑步 / 其他铺成波形背后的色带">分析整段</button>
@@ -190,21 +191,6 @@
         <button data-range="win" title="只推断当前时间窗内的数据">当前时间窗</button>
       </div>
       <div class="ctrl"><button id="axisRe">重算</button></div>
-      <div class="ctrl"><span>参考数据</span>
-        <button id="axisRef" title="再选一份同一次录制的 IMU 文件（另一台设备 / 另一只脚）：坐标系不同，轴向结论不能搬，但落地冲击时刻与「贴地时加速度完全静止」能搬 —— 用它对齐时间戳，再按动作分段逐段推断">选择文件</button>
-        <input type="file" id="axisRefFile" accept=".zip,.parquet,.txt,.csv" hidden>
-        <span class="chip" id="axisRefName" hidden></span>
-      </div>
-      <details class="more">
-        <summary>静止判据</summary>
-        <div class="more-body">
-          <div class="ctrl">
-            <button data-sens="auto" class="on" title="加速度模长滑窗标准差 < 0.04 g 且模长偏离 1 g < 0.08">自动</button>
-            <button data-sens="loose" title="< 0.09 g 且偏离 < 0.16，静止段判定更松">宽松</button>
-            <button data-sens="strict" title="< 0.02 g 且偏离 < 0.05，只认很稳的静止段">严格</button>
-          </div>
-        </div>
-      </details>
       <span class="chip" id="axisNote"></span>
     </div>
     <div id="axisPanels"></div>
@@ -299,10 +285,46 @@
       <p class="hint" id="squatVideoTime" hidden></p>
       <h2>逐次事件 <small>点行定位整次；点时间可跳到对应视频帧</small></h2>
       <div class="activity-table"><table>
-        <thead><tr><th scope="col">第几次</th><th scope="col">开始下降（s）</th><th scope="col">进入蹲底（s）</th><th scope="col">开始上升（s）</th><th scope="col">结束上升（s）</th><th scope="col">总时长（s）</th></tr></thead>
+        <thead><tr><th scope="col">第几次</th><th scope="col">开始下降（s）</th><th scope="col">进入蹲底（s）</th><th scope="col">开始上升（s）</th><th scope="col">结束上升（s）</th><th scope="col">总时长（s）</th><th scope="col">双踝提示 / 复核</th></tr></thead>
         <tbody id="squatRows"></tbody>
       </table></div>
       <p class="hint" id="squatEmpty"></p>
+      <h2>逐次三向角 <small>双脚踝 IMU，相对本次蹲前站立的姿态变化</small></h2>
+      <p id="squatAngleStatus" class="hint" role="status" aria-live="polite"></p>
+      <div class="activity-table"><table>
+        <thead><tr><th scope="col">第几次</th><th scope="col">左脚前后°</th><th scope="col">左脚左右°</th><th scope="col">左脚航向°</th><th scope="col">右脚前后°</th><th scope="col">右脚左右°</th><th scope="col">右脚航向°</th><th scope="col">回程前后° 左/右</th><th scope="col">蹲底保持 s</th></tr></thead>
+        <tbody id="squatAngleRows"></tbody>
+      </table></div>
+      <p class="hint">前后角＝蹲到最低点相对本次蹲前站立的前后倾变化；左右角＝同一阶段的内外倾；航向＝两次深蹲之间站立期累计的绕竖直转角，第 1 次为 0；深蹲动作内的屈伸耦合不计入，所以它反映的是站姿朝向有没有变。正方向取包内多数次深蹲的下降方向，两脚口径一致、可直接互比。量的是小腿段姿态，不是髋屈曲角。</p>
+      <p class="hint">左右角的前提是内扣/外翻没有和屈伸同步到位：两者严格同比例时合成一根轴，数学上分不开，会有一部分并进前后角。</p>
+      <h2>逐次质量复核 <small>点「预测」自动给出双踝偏差提示</small></h2>
+      <div class="ptools">
+        <button id="squatScoreExport" type="button" disabled>导出指标与复核</button>
+      </div>
+      <p id="squatScoreStatus" class="hint" role="status" aria-live="polite"></p>
+      <p class="activity-warning">偏差提示看双踝角度和轨迹差，不判断足内外翻、膝内扣或下蹲深度。腕部只展示指标。人工复核只保存在本页当前采集包，换包或关闭前请导出。</p>
+      <div class="ptools">
+        <label>查看第几次 <select id="squatScoreRep" disabled></select></label>
+        <label>人工复核 <select id="squatScoreReview" disabled><option value="">未复核</option><option value="good">好</option><option value="fair">一般</option><option value="bad">不好</option></select></label>
+        <span id="squatScoreResult" class="hint"></span>
+      </div>
+      <details class="note">
+        <summary>高级：评分模型与个人档</summary>
+        <div class="ptools">
+          <button id="squatScoreImport" type="button">导入评分模型 / 个人档</button>
+          <input id="squatScoreFile" type="file" accept=".json,application/json" hidden>
+          <button id="squatScoreBuiltIn" type="button" disabled>使用内置提示</button>
+          <button id="squatScoreFit" type="button" disabled>用本包复核调整偏置</button>
+          <button id="squatScoreReset" type="button" disabled>恢复基础评分</button>
+          <button id="squatScoreProfile" type="button" disabled>导出个人档</button>
+        </div>
+        <p class="hint">个人调整仅用于导入的质量模型，且只使用明确复核的样本。同一人的个人档建议用另一次采集验证。</p>
+      </details>
+      <details id="squatScoreDetails" hidden>
+        <summary>查看本次指标</summary>
+        <p id="squatScoreIssues" class="hint"></p>
+        <div class="activity-table"><table><thead><tr><th scope="col">指标</th><th scope="col">数值</th></tr></thead><tbody id="squatScoreMetrics"></tbody></table></div>
+      </details>
     </section>
   </div>
 
@@ -321,7 +343,7 @@
       <div class="help-text" id="helpText">
         <section data-help="file" data-title="文件与格式">
           <h3>文件与格式</h3>
-          <p>能读四类输入：整包导出的 <code>.zip</code>（<code>manifest</code> + <code>frames</code> + <code>evidence</code>，可含 <code>videos</code>）、<code>standard_measurement_frames</code> parquet、维特 WT901 / JY901 上位机导出的 <code>.txt</code> / <code>.csv</code>、WT 本地版 APP 导出的 ZIP。全部在本地解析与推断，不上传、不连工作站。</p>
+          <p>能读四类输入：整包导出的 <code>.zip</code>（<code>manifest</code> + <code>frames</code> + <code>evidence</code>，可含 <code>videos</code>）、<code>standard_measurement_frames</code> parquet、维特 WT901 / JY901 上位机导出的 <code>.txt</code> / <code>.csv</code>、WT 本地版 APP 导出的 ZIP。解析与预测在本地进行；只有手动点视频「自动校准」时才连接局域网工作站。</p>
           <p><b>纯 IMU 的 parquet</b>（<code>pressure_status = not_applicable</code>，每帧 <code>pressure_values</code> 是空列表）：压力三页禁用，默认落在 IMU 页；时间戳仍是设备硬件时刻，丢帧阈值照用 40 ms。少数没映射到会话时间轴的帧会被丢掉，并在顶栏标出数量。</p>
           <p><b>维特 TXT</b>只有 IMU：压力三页不可用，IMU、丢包、轴向推断照常。它按<code>设备名称</code>分列，侧别取 MAC 尾两段。时间戳只到毫秒、同一毫秒里常压着多帧，所以时间轴是把同一时间戳的帧均匀摊开、再按平均间隔定采样率。这类时间戳是上位机写盘时刻而不是采样时刻（实测 40 帧挤在 16 ms 内写完），逐帧间隔不能当丢包 —— 丢包页因此改按累计帧数估：局部帧率取 ±3 s 窗的回归斜率，整段缺口按名义 50 Hz 折算，分辨率约 0.2%。</p>
           <p><b>一包里多个来源</b>：按 <code>placement</code> 归一 —— 脚垫 / 脚踝 / 脚背 / 鞋一类都算足部，取 left / right；腕、腰等其余位置各占一个键。只有同名位置重复出现才报错。同一份文件里的各条流平移到共用会话轴上，顶栏「最长」报的是时间轴末端，各流自己的时长看「起点」与卡片标题。</p>
@@ -342,6 +364,7 @@
           <p><b>角速度口径按帧取</b>：该帧带扣偏结果（<code>imuCalibration.status = ready</code>）就用扣偏后的值，没有才用采集端换算的原始值，顶栏「角速度」标出两种各占多少帧。原始值不被改写，仍在 <code>angularVelocityRaw</code> 里。</p>
           <p><b>温度带</b>：同一帧还带设备温度，新版导出叫 <code>gyro_temperature_celsius</code>（0.01 ℃ 量化），网页 1.x 导出叫 <code>temperature_c</code>，维特 TXT 取「温度(°C)」列。有就画在六轴下面，纵轴按全段 min–max 定（温度都是正值，按 ±最大值居中会压成一条直线，看不出冷却或自热）；没有这一列（62 列的老文件）就不画，悬停读数与 IMU CSV 也一并带上。</p>
           <p><b>俯仰 / 侧倾角带</b>：设备自报的 <code>pitchDeg</code> / <code>sideTiltDeg</code>，各按自己的 min–max 定量程 —— 这些量带安装偏置，按 ±max 居中同样会压成直线。列存在但整段为空（如维特设备的这两列）不会多出空带。窄带只影响显示，CSV / PNG 导出规则不变。</p>
+          <p><b>航向带</b>：设备自报的 <code>relativeHeadingDeg</code>，按相邻差最小展开成连续角，跨越 ±180 不再跳一整圈；只在同一 <code>referenceId</code> 内展开，参考一变（设备重建姿态基准）就重新起算，之前的角度不可比。它是相对量，起点是姿态跟踪建立的时刻，不是地理方位 —— 包里没有磁力计数据时不能当绝对朝向用。缺这一列（2.4 及更早的导出）就没有这条带。</p>
           <p><b>丢帧标记</b>：相邻两帧时间差超过阈值的区段铺淡红底，栏顶再加一道红杠 —— 缩到全段时区段只有 1 px 宽，靠那道杠才找得到。50 Hz 下一个标称周期 20 ms，阈值 40 ms 就是「至少丢了一帧」。维特 TXT 默认 100 ms：它的时间轴是按写盘批次重建的，填 40 会把写盘节奏的抖动标满屏，真实缺口看「丢包」页。</p>
           <p><b>连线 / 点</b>：连线按采样顺序把点连起来；点只画采样点，点疏的地方就是采样稀疏，点密的地方挤成一片。纵轴留空为自动，填了就按 ± 值；「按窗口」按当前时间窗内最大 |值| 定纵轴，缩放后不削顶。</p>
           <p><b>时间窗三页共用</b>：波形、IMU、轴向推断共用同一个窗口，任一页框选 / 缩放 / 平移，其余跟着走；轴向推断选「当前时间窗」时只吃窗口内的帧。起止秒数可直接输入，只填一头时另一头保持当前跨度，回车生效。</p>
@@ -356,10 +379,9 @@
 
         <section data-help="axis" data-title="轴向推断">
           <h3>轴向推断</h3>
-          <p>三步都只用这份 IMU 自己的数据，不查厂商坐标先验：<b>① 垂直轴</b> —— 找加速度模长稳定的静止段（站立 / 深蹲时脚不转），把静止时的加速度方向当作重力反方向；<b>② 内外侧轴</b> —— 扣掉零偏后，在重力系里对行走段角速度做 PCA，第一主成分就是内外侧轴，符号不定（零偏取「角速度稳」的静止帧逐轴中位数：支撑相脚不移动但踝在滚动，陀螺有 10–30 °/s 的常值电平，整体取中位数会把支撑相电平当零偏）；<b>③ 前向符号</b> —— 三项独立判据投票：相邻支撑中点之间的双积分位移（步幅）、支撑末到支撑初的双积分位移（摆动）、以及「若 z 轴是脚背外法线则其水平投影朝脚尖」的几何关系。三项都同向才判「高」。</p>
-          <p><b>边界</b>：没有行走段就没有前向符号（纯深蹲只能给出垂直轴与内外侧轴）；双积分要求采样率够高、零偏够小，采样率低或零偏大时位移被低估，前向只能到「中」；几何判据要求 z 轴与重力夹角在 15°–75° 之间，几乎水平或垂直时该项自动失效；倒走会让双积分两项整体反向。本页只认 <code>imu_physical_values</code> —— raw 的通道序与物理轴相差一次置换与变号，推出来的 x/y/z 没有解剖意义。</p>
-          <p>左右脚并排各一张<b>三维轴投影</b>：灰 = 解剖轴（前 / 左 / 上），彩 = 传感器 x / y / z。拖动旋转视角（两脚共用同一视角）、滚轮缩放、双击复位；PNG 导出当前视角。三项判据各自的偏角写在下方「判据明细」里。</p>
-          <p><b>参考数据</b>：同一次录制里另一台设备、或另一只脚的文件可以一起拖进来（一次拖两个文件，第二个即参考），也可点「选择文件」单独选。两份数据贴的部位不同、坐标系不同，<b>轴向结论不能互相搬</b>；能搬的只有<b>落地冲击的时刻</b>和<b>贴地时加速度完全静止</b>。前者是瞬时事件，两边撞在同一时刻几乎不可能，所以用各自最强的那次冲击配对对齐时间戳（录标定动作时<b>故意跳一次</b>最省事）；后者用来切动作段再逐段推断 —— 全段一次做 PCA，只要掺进一段转身，绕垂直轴的能量就压过前后摆动，内外侧轴直接定不出来。表格里点任意一行把那一段结果换成上方详情，点「✕」清除参考数据。</p>
+          <p><b>先找步行</b>：打开已有录制即可。满足输入条件的双侧数据复用「正常走跑提取」的步行标签，单设备或重建时间轴用周期筛查。两条路径的证据来源会写在结果里，不用选佩戴部位。</p>
+          <p><b>再定轴</b>：支持的 D56 鞋垫用多个步态周期中前掌与后跟同时承重、转动较小的样本估计向上，普通静止段仅用于陀螺残差。承重参考不足或冲突时不报鞋垫姿态；无压力的 IMU 仍用静止重力估功能轴。结果不是几何安装标定。</p>
+          <p><b>边界</b>：结果是步行功能轴线，不是解剖轴，也不能分辨前后正负或安装位置。只使用物理量六轴 IMU，原始计数不参与。</p>
         </section>
 
         <section data-help="activity" data-title="状态与步态">
@@ -382,7 +404,7 @@
         <section data-help="video" data-title="现场视频">
           <h3>现场视频</h3>
           <p>测量包里有 <code>videos/*.mp4</code> 时，右下角浮出播放器，可与波形同时看：拖动标题栏挪位置，顶栏「视频」收起或再打开。视频在本地解码，不上传。</p>
-          <p>已核验的采集包打开即应用已知起点。其他双踝包可点「自动校准」，将首段视频和对时所需的双踝数据加密发送到公司局域网内的工作站，用 GPU 识别视频姿态；工作站不保存本次数据和结果。适用于 5–120 秒、双侧膝踝清楚可见的单段视频；节奏太重复或证据不足时保留原值。也可将视频暂停在第一次完整深蹲最深的画面，再点「首次蹲底对时」：查看器将该画面与整段双踝预测的第 1 次蹲底中点对齐，无需先点预测。两种方式都不需要跳跃，也可手填起点。单点对时只更新起点，不校正漂移。</p>
+          <p>已核验的采集包打开即应用已知起点。其他双踝包可点「自动校准」，无需额外配置，即可将首段视频和对时所需的双踝数据加密发送到公司采集网内的工作站，用 GPU 识别视频姿态；工作站不保存本次数据和结果。适用于 5–120 秒、双侧膝踝清楚可见的单段视频；节奏太重复或证据不足时保留原值。也可将视频暂停在第一次完整深蹲最深的画面，再点「首次蹲底对时」：查看器将该画面与整段双踝预测的第 1 次蹲底中点对齐，无需先点预测。两种方式都不需要跳跃，也可手填起点。单点对时只更新起点，不校正漂移。</p>
           <p>会话时刻 = 视频时刻 + 起点；「跳到会话」只接受视频覆盖到的区间。</p>
           <p>视频在播或拖动进度时，IMU 和深蹲专项的橙色游标会跟随；暂停时停在原处。浮窗收起或换文件后游标同时隐藏；视频播到当前窗口外时，用边缘箭头提示。</p>
         </section>
@@ -413,7 +435,7 @@
   <p class="vid-note" id="vidSeekStatus" role="status" hidden></p>
 </div>
 
-<script src="dist/app.js?v=3.34.0"></script>
+<script src="dist/app.js?v=3.43.0"></script>
 
 
 </body>

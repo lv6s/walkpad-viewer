@@ -2,6 +2,7 @@ import {activityEngine} from './activity-engine';
 import {analyzeGaitWindow} from './gait-window';
 import {analyzeMoticonTas} from './moticon-tas';
 import {analyzeGaitExtraction} from './turn-rule';
+import {inferOffline, walkingRanges} from './axis/offline';
 import {ACTIVITY_STILL} from './core/constants';
 import {ictoDetectRows} from './icto/core';
 import {gaitIctoInput, gaitMetrics} from './gait/core';
@@ -38,15 +39,22 @@ const dispatch = (contract, inputs, duration, progress) =>
   contract.kind === 'moticon-tas' ? analyzeMoticonTas(engine, inputs, duration, progress)
     : contract.kind === 'gait-window' ? analyzeGaitWindow(engine, contract.id, inputs, duration, progress, contract.reviewGait)
     : engine.analyze(contract, inputs, duration, progress);
-self.onmessage = async ({data: {contract, inputs, duration, receiptTiming}}) => {
+self.onmessage = async ({data: {contract, inputs, duration, receiptTiming, axis}}) => {
   try {
     const progress = (value: number) => self.postMessage({progress: value});
+    const axisResult = (walking?) => inputs.map(s => inferOffline({t: s.t, n: s.t.length,
+      imu: {phys: s.axes}, activityIn: s}, {win: axis.win, walking, support: s.support}));
+    if (axis && !contract) { self.postMessage({axes: axisResult()}); return; }
     let result;
     if (contract.kind === 'gait-extraction') {
       const base = await analyzeMoticonTas(engine, inputs, duration, p => progress(Math.round(p * .7)));
       result = await analyzeGaitExtraction(engine, inputs, duration, p => progress(Math.round(70 + p * .3)), contract.id, base);
     } else {
       result = await dispatch(contract, inputs, duration, progress);
+    }
+    if (axis) {
+      self.postMessage({axes: axisResult(walkingRanges(result.labels)), validTicks: result.validTicks});
+      return;
     }
     const segments = buildSegments(result);
     self.postMessage({phase: 'gait'});

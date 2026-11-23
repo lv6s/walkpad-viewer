@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {pathToFileURL, fileURLToPath} from 'node:url';
 import {chromium} from 'playwright-core';
 import {clampRange} from '../src/core/window-range.ts';
+import {fixture as axisFixture} from './axis-offline.mjs';
 
 assert.deepEqual(clampRange(-10, 50, 100), {a: 0, b: 60});
 assert.deepEqual(clampRange(90, 150, 100), {a: 40, b: 100});
@@ -143,10 +144,45 @@ try {
     assert.equal(await page.locator('#err').textContent(), '');
     console.log('PASS real file:', file, '|', await page.locator('#chips').innerText());
   }
+  const sample = axisFixture({mode: 'mixed'});
+  const ts = Date.UTC(2026, 10, 9);
+  const axisRows = [rows[0], ...Array.from(sample.t, (t, i) => [new Date(ts + Math.round((t - sample.t[0]) * 1000)).toISOString(),
+    'IMU', ...sample.imu.phys.map(ch => ch[i].toFixed(6))].join('\t'))];
+  const axisFile = {name: 'axis-straight.txt', mimeType: 'text/plain', buffer: Buffer.from(axisRows.join('\n'))};
+  async function checkAxis(section) {
+    const card = page.locator(`${section} .side`).first();
+    await card.locator('.axsum').getByText('水平轴线已推断 · 前后正负未定').waitFor({timeout: 10000});
+    assert.match(await card.locator('.meta').textContent(), /单设备周期筛查.*1 段步行候选/);
+    assert.equal(await card.getByRole('combobox', {name: '设备佩戴部位'}).count(), 0);
+    await card.locator('summary').click();
+    assert.match(await card.locator('.axev').textContent(), /实际采用.*有效同侧周期/);
+    await card.locator('canvas').waitFor({state: 'visible'});
+    assert.ok(await card.getByRole('button', {name: 'PNG'}).isEnabled());
+  }
+  await page.goto(entry);
+  await page.locator('#file').setInputFiles(axisFile);
+  await page.locator('[data-tab="axis"]').click({timeout: 10000});
+  await checkAxis('#axisPanels');
+  await jump(0, 1.8);
+  await page.locator('#axisTools [data-range="win"]').click();
+  await page.locator('#axisPanels .axsum').getByText(/仅垂直/).waitFor();
+  await page.locator('#axisTools [data-range="all"]').click();
+  await page.locator('#axisPanels .axsum').getByText(/水平轴线已推断/).waitFor();
   await page.goto(new URL('axis.html', entry).href);
+  await page.locator('#file').setInputFiles(axisFile);
+  await checkAxis('#axCards');
+  assert.match(await page.locator('#fileList').textContent(), /水平轴线已推断/);
+  const still = {name: 'axis-still.txt', mimeType: 'text/plain', buffer: Buffer.from(axisRows.slice(0, 91).join('\n'))};
+  await page.locator('#file').setInputFiles(still);
+  const second = page.locator('#axCards .side').nth(1);
+  await second.getByRole('status').getByText(/仅垂直/).waitFor();
+  assert.match(await second.locator('.axwarn').textContent(), /没有检测到/);
+  assert.equal(await second.locator('canvas').isVisible(), false);
+  await page.locator('#fileList .axfrow').first().getByRole('button', {name: '移除'}).click();
+  assert.equal(await page.locator('#axCards .side').count(), 1);
   assert.equal(await page.locator('#err').textContent(), '');
   assert.deepEqual(errors, []);
-  console.log('PASS standalone page and zero browser errors');
+  console.log('PASS both offline axis pages: automatic walk screening, unsigned plots, no-walk result and independent files');
 } finally {
   await browser.close();
 }

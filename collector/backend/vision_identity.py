@@ -26,6 +26,10 @@ MATCH_MARGIN = .05
 GALLERY_BLEND = .15
 TRACK_TTL = 2.
 WAIT_CAP = 1.
+PROTOTYPE_MAX = 4
+PROTOTYPE_MERGE = .85
+REJECT_SIM = .55
+BREAK_GAP = .7
 
 
 def _unit(vector):
@@ -126,6 +130,7 @@ class _Track:
     last_sample: float = -1.
     samples: deque = field(default_factory=lambda: deque(maxlen=MAX_SAMPLES))
     adopted: bool = False
+    fresh: deque = field(default_factory=lambda: deque(maxlen=MAX_SAMPLES))
 
 
 class PersonIdentity:
@@ -229,6 +234,195 @@ class PersonIdentity:
             known.last_seen = now
         else:
             known.feature, known.last_seen = vector, now
+
+    def _expire(self, now, active):
+        self.gallery = {identity: known for identity, known in self.gallery.items()
+                        if now-known.last_seen <= self.ttl}
+        if len(self.gallery) <= self.max_identities:
+            return
+        for identity, _ in sorted(self.gallery.items(), key=lambda item: item[1].last_seen):
+            if identity not in active:
+                del self.gallery[identity]
+                if len(self.gallery) <= self.max_identities:
+                    break
+
+
+@dataclass
+class _SessionKnown:
+    prototypes: list
+    last_seen: float
+
+
+class SessionIdentity:
+    """单摄像机采集会话内的匿名编号；外观特征由调用方提供，不跨会话保留身份。
+
+    features 与 detections 等长且同序，元素为向量或 None；内部做 L2 归一化。
+    有 gallery 身份缺席时新轨迹先待定：只有证据明确不像任何已知身份才发新号，
+    强候选但分差不足、多人竞争、特征缺失都长期待定，不进入动作输出。
+    同一 raw 轨迹跨过 BREAK_GAP 空白后复现时，把原编号放进 recovered 让动作窗口断开。
+    """
+
+    def __init__(self, ttl=120., max_identities=128):
+        self.ttl, self.max_identities = ttl, max_identities
+        self.gallery, self.tracks, self.next_identity = {}, {}, 1
+        self.dimension = 0
+        self.pending = []
+
+    def resolve(self, now, image, detections, features):
+        if len(features) != len(detections):
+            raise ValueError('身份特征数量与检测数量不一致')
+        self.pending = []
+        self.tracks = {key: track for key, track in self.tracks.items() if now-track.seen <= TRACK_TTL}
+        boxes = [item[1] for item in detections]
+        present, created, broken = {}, set(), set()
+        for index, (track_id, box, _) in enumerate(detections):
+            track = self.tracks.get(track_id)
+            if track is None:
+                track = self.tracks[track_id] = _Track(0, now, now+WAIT_CAP)
+                created.add(track_id)
+            elif track.identity and now-track.seen > BREAK_GAP:
+                broken.add(track.identity)
+            track.seen = now
+            present[track_id] = track
+            self._observe(track, now, image, box, boxes[:index]+boxes[index+1:], features[index])
+        active = {track.identity for track in present.values() if track.identity}
+        self._expire(now, active)
+        if not self._absent(active):
+            for track_id in created:
+                present[track_id].identity = self._allocate()
+        recovered = self._recover(present, active)
+        for track in present.values():
+            if (not track.identity and len(track.samples) >= MIN_SAMPLES
+                    and (not self.gallery or self._unfamiliar(track))):
+                track.identity = self._allocate()
+            self._publish(track, now)
+        output = []
+        for track_id, box, pose in detections:
+            identity = present[track_id].identity
+            if identity:
+                output.append((identity, box, pose))
+            else:
+                self.pending.append(dict(track_id=track_id, box=[float(value) for value in box],
+                                         samples=len(present[track_id].samples)))
+        return output, recovered | broken
+
+    def _allocate(self):
+        identity, self.next_identity = self.next_identity, self.next_identity+1
+        return identity
+
+    def _absent(self, active):
+        return any(identity not in active for identity in self.gallery)
+
+    def _vector(self, value):
+        if value is None:
+            return None
+        try:
+            array = np.asarray(value, dtype=np.float32).reshape(-1)
+        except (TypeError, ValueError):
+            return None
+        vector = _unit(array)
+        if vector is None or (self.dimension and vector.size != self.dimension):
+            return None
+        self.dimension = vector.size
+        return vector
+
+    def _observe(self, track, now, image, box, others, feature):
+        height, width = image.shape[:2]
+        if (not clear(height, width, box, others)
+                or (track.samples and now-track.last_sample < SAMPLE_GAP)):
+            return
+        vector = self._vector(feature)
+        if vector is not None:
+            track.samples.append(vector)
+            track.fresh.append(vector)
+            track.last_sample = now
+
+    @staticmethod
+    def _mean(track):
+        return _unit(np.mean(track.samples, axis=0)) if track.samples else None
+
+    def _recover(self, present, active):
+        proposals = {}
+        for track in present.values():
+            if not track.identity and len(track.samples) >= MIN_SAMPLES:
+                known = self._match(track, active)
+                if known is not None:
+                    proposals.setdefault(known, []).append(track)
+        recovered = set()
+        for known, tracks in proposals.items():
+            if len(tracks) == 1:
+                tracks[0].identity = known
+                recovered.add(known)
+                self.tracks = {key: item for key, item in self.tracks.items()
+                               if key in present or item.identity != known}
+        return recovered
+
+    def _profile(self, track):
+        """最近样本对各身份的聚合分、单帧下限与逐帧归属票；样本不足或 gallery 空时返回 None。"""
+        recent = list(track.samples)[-MIN_SAMPLES:]
+        if len(recent) < MIN_SAMPLES or not self.gallery:
+            return None
+        totals, floors, votes = {}, {}, set()
+        for sample in recent:
+            scores = [(max(float(prototype @ sample) for prototype in known.prototypes), identity)
+                      for identity, known in self.gallery.items()]
+            _, vote = max(scores)
+            votes.add(vote)
+            for value, identifier in scores:
+                totals[identifier] = totals.get(identifier, 0.) + value
+                floors[identifier] = min(floors.get(identifier, 1.), value)
+        ranked = sorted(((total/len(recent), identity) for identity, total in totals.items()), reverse=True)
+        return ranked, floors, votes
+
+    def _match(self, track, active):
+        """多帧聚合：最近样本必须一致指向同一身份，均值过阈值且与次优拉开分值，单帧也不得塌陷。"""
+        profile = self._profile(track)
+        if profile is None:
+            return None
+        ranked, floors, votes = profile
+        if len(votes) != 1:
+            return None
+        aggregate, best = ranked[0]
+        if aggregate < MATCH_SIM or floors[best] < MATCH_SIM:
+            return None
+        if len(ranked) > 1 and aggregate-ranked[1][0] < MATCH_MARGIN:
+            return None
+        if best in active:
+            return None
+        return best
+
+    def _unfamiliar(self, track):
+        profile = self._profile(track)
+        return profile is not None and profile[0][0][0] < REJECT_SIM
+
+    @staticmethod
+    def _absorb(known, vector):
+        scores = [float(prototype @ vector) for prototype in known.prototypes]
+        best = max(range(len(scores)), key=scores.__getitem__)
+        if scores[best] >= PROTOTYPE_MERGE:
+            merged = _unit((1-GALLERY_BLEND)*known.prototypes[best] + GALLERY_BLEND*vector)
+            if merged is not None:
+                known.prototypes[best] = merged
+            return
+        if len(known.prototypes) < PROTOTYPE_MAX:
+            known.prototypes.append(vector)
+        # 满额后不替换：离群样本不能挤掉已确认的视角。
+
+    def _publish(self, track, now):
+        if not track.identity or len(track.samples) < MIN_SAMPLES:
+            return
+        known = self.gallery.get(track.identity)
+        if known is None:
+            vector = self._mean(track)
+            if vector is None:
+                return
+            self.gallery[track.identity] = _SessionKnown([vector], now)
+            track.fresh.clear()
+            return
+        # 只吸收新观测：同一批样本每帧重复混合会把 gallery 反复洗向窗口均值。
+        while track.fresh:
+            self._absorb(known, track.fresh.popleft())
+        known.last_seen = now
 
     def _expire(self, now, active):
         self.gallery = {identity: known for identity, known in self.gallery.items()

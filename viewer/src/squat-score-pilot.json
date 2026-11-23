@@ -1,0 +1,12 @@
+{
+  "schema": "walkpad-squat-score-model-v1",
+  "featureSchema": "walkpad-squat-features-v1",
+  "modelId": "ankle-deviation-pilot-1",
+  "features": [
+    {"name": "device_pitch_lr_deg", "weight": -0.333333333, "center": 3.818491550, "scale": 3.091273894},
+    {"name": "device_tilt_lr_deg", "weight": -0.333333333, "center": 4.174398813, "scale": 3.822351749},
+    {"name": "device_motion_lr_ratio", "weight": -0.333333333, "center": 0.222023990, "scale": 0.137386822}
+  ],
+  "thresholds": [-1.409952424, -0.503529333],
+  "clamp": {"min": -12, "max": 12}
+}

@@ -1,6 +1,6 @@
 /* 全局状态与各视图的缓存。视图条目的形状由各自的绘图模块决定，这里只标注键。 */
 
-import type {DetailRef, ImuY, Overview, RefData, Side, SideId, SrcInfo, TabName, VideoInfo, Win} from '../types';
+import type {DetailRef, ImuY, Overview, Side, SideId, SrcInfo, TabName, VideoInfo, Win} from '../types';
 
 export interface State {
   name: string;
@@ -46,8 +46,6 @@ export interface State {
   /** 整段状态分段的唯一结果：分段页表格与 IMU 底色共用；null = 还没分析 */
   seg: {busy: boolean; status: string; modelId: string; list: any[]} | null;
   axisRange: string;
-  axisSens: string;
-  ref: RefData | null;
   /** 包里带的现场视频；null = 这份文件没有视频 */
   video: VideoInfo | null;
   /** 视频游标的会话时间（秒），无可见视频时为 null */
@@ -55,6 +53,7 @@ export interface State {
   /** IMU 页的窄带开关：温度、设备俯仰/侧倾角 */
   imuTemp: boolean;
   imuAng: boolean;
+  imuHead: boolean;
   gaitFocus: {side: SideId; ic: number; to: number; nextIc: number; peak?: number; algorithm: string;
     icUncertain?: boolean; nextIcUncertain?: boolean; note?: string} | null;
   icto: Map<SideId, any> | null;
@@ -79,9 +78,7 @@ export const state: State = {
   // 手动纵轴（±值）按数据源分开存：raw 的数是 g 的 2048/4096 倍，共用一份必然错
   imuY: {phys: {acc: null, gyro: null}, raw: {acc: null, gyro: null}},
   imuFit: false, imuDraw: 'line', imuGap: true, imuGapMs: 40, imuSeg: true, seg: null,
-  axisRange: 'all', axisSens: 'auto',
-  // 同一次录制的另一份 IMU：坐标系不同、轴向结论不能搬，但落地冲击时刻能搬，用来对齐和切段
-  ref: null, video: null, videoT: null, imuTemp: true, imuAng: true,
+  axisRange: 'all', video: null, videoT: null, imuTemp: true, imuAng: true, imuHead: true,
   gaitFocus: null, icto: null, ictoOn: false, ictoListOn: false
 };
 
@@ -92,7 +89,7 @@ export const seekView = new Map<SideId, any>();
 export const zeroView = new Map<SideId, any>();
 export const gapView = new Map<SideId, any>();
 export const imuView = new Map<SideId, any>();
-export const axisView = new Map<SideId, any>();
+export const axisView = new Map<string | HTMLElement, any>();
 
 /** 全程缩略条数据按侧挂在这里，不放进 state（它只是渲染缓存） */
 export type OvMap = Map<SideId, Overview>;

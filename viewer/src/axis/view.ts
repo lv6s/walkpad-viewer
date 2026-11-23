@@ -1,4 +1,4 @@
-/* 三维轴投影的绘制与视角交互：解剖系 (前, 左, 上) 为参考，传感器三轴叠在上面。 */
+/* 无符号水平轴使用双向线，设备自身的 +x/+y/+z 仍用箭头。 */
 
 import {axisView} from '../core/state';
 import {AXES, AX_COL, D2R, R2D, cross, dot, unit} from './math';
@@ -72,7 +72,7 @@ function paint3d(cv, res) {
   const pr = v => ({x: ox + sc * dot(v, basis.r), y: oy - sc * dot(v, basis.u)});
 
   g.font = `${11 * k}px system-ui,"Microsoft YaHei",sans-serif`;
-  caption(g, W, '三维轴投影（灰=解剖轴，彩=传感器轴）', '拖动旋转 · 滚轮缩放 · 双击复位');
+  caption(g, W, '三维轴投影（灰=功能轴，彩=传感器轴）', '拖动旋转 · 滚轮缩放 · 双击复位');
 
   // 地面网格：只作深度参照
   g.strokeStyle = cGrid; g.lineWidth = 1; g.globalAlpha = .9;
@@ -84,15 +84,24 @@ function paint3d(cv, res) {
   }
   g.globalAlpha = 1;
 
-  // 解剖轴
-  const anat: [number[], string][] = [[[1, 0, 0], '前'], [[0, 1, 0], '左'], [[0, 0, 1], '上']];
+  const axes: [number[], string][] = [[[1, 0, 0], '前后轴'], [[0, 1, 0], '左右轴'], [[0, 0, 1], '上']];
   g.font = `${11.5 * k}px system-ui,"Microsoft YaHei",sans-serif`;
-  for (const [v, nm] of anat) {
+  for (const [v, nm] of axes) {
     const q = pr(v);
-    arrow(g, ox, oy, q.x, q.y, cFaint, 1.1, [4, 3]);
+    if (v[2]) arrow(g, ox, oy, q.x, q.y, cFaint, 1.1, [4, 3]);
+    else {
+      const p = pr(v.map(x => -x));
+      g.save(); g.strokeStyle = cFaint; g.setLineDash([4, 3]);
+      g.beginPath(); g.moveTo(p.x, p.y); g.lineTo(q.x, q.y); g.stroke(); g.restore();
+    }
     const lab = pr([v[0] * 1.16, v[1] * 1.16, v[2] * 1.16]);
     g.fillStyle = cMuted; g.textAlign = 'center';
     g.fillText(nm, lab.x, lab.y);
+    // 水平轴无正负：两端标同样的字，避免把标签所在端误读成「前 / 左」
+    if (!v[2]) {
+      const neg = pr([-v[0] * 1.16, -v[1] * 1.16, -v[2] * 1.16]);
+      g.fillText(nm, neg.x, neg.y);
+    }
   }
 
   // 传感器轴

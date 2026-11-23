@@ -1,10 +1,11 @@
 /* parquet / 维特 TXT 读列、按侧分组、展开成通道数组。 */
 
 import {ParquetHQ} from './data/parquet';
+import {headingCursor} from './data/heading';
 import {spreadNotified} from './data/notification-time';
 import {renderAll, setTab, updateChips} from './app';
-import {renderAxis} from './axis';
-import {NCH, SIDE_CN} from './core/constants';
+import {GRID, NCH, SIDE_CN} from './core/constants';
+import type {AxisSupport} from './axis/offline';
 import {el} from './core/dom';
 import {state} from './core/state';
 import {blkOf, clearErr, fail, niceMax} from './core/util';
@@ -17,8 +18,6 @@ import type {PkgFile} from './types';
 import {attachVideo, clearVideo, verifiedVideoOffset} from './video';
 
 // ---------------------------------------------------------------- 解析
-// 本次解析的结果存成参考数据而不是主数据：只用来给轴向页对齐时间戳、切动作段
-let asRef = false;
 // 意外异常只报「一句话 + 哪个文件哪一行」：整段栈太长，但只报英文消息又没法定位
 function errLoc(e) {
   const st = (e && e.stack) ? String(e.stack) : '';
@@ -30,16 +29,14 @@ function errLoc(e) {
 }
 
 // 读列与展开通道都是同步阻塞的，先让遮罩画出来再开工
-async function parse(file: File, opt?: {asRef?: boolean}) {
-  asRef = !!(opt && opt.asRef);
+async function parse(file: File) {
   el.busy.hidden = false;
-  // 上一份文件的视频不能留到这一份：解析失败时更要收掉
-  if (!asRef) clearVideo();
+  clearVideo();
   await new Promise(r => setTimeout(r, 30));
   try { await parseFile(file); }
   // 解析里的意外异常（而不是显式 fail）也得让人看见：否则页面只是「什么都没发生」
   catch (e) { fail('解析失败：' + ((e && e.message) || e) + errLoc(e)); }
-  finally { el.busy.hidden = true; asRef = false; }
+  finally { el.busy.hidden = true; }
 }
 
 async function parseFile(file) {
@@ -272,7 +269,9 @@ function expandSides(groups) {
       // 六轴里有空值就不给 IC/TO：算法全程用插值前的原始值，NaN 会一路污染到门限
       if (!nBad) ictoIn = inp;
     }
+    const support = g.axisPressure ? collectAxisSupport(side, g.v) : undefined;
     const activityIn = {t: Float64Array.from(spreadNotified(g.eff), (v: number) => (v - t0) / 1e6),
+      support,
       deviceAngles: deviceAngleArrays(g.deviceAngles),
       seq: Float64Array.from(g.ns.map((v, i) => Number.isFinite(v) ? v : g.fno[i])),
       ok: Uint8Array.from(g.eff, (v, i) => Number.isFinite(v) && (!g.st[i] || g.st[i] === 'mapped') && g.ist[i] === 'confirmed' ? 1 : 0),
@@ -319,47 +318,92 @@ function rebaseCommon(sides) {
 // 所以先按 sourceId 找到各自的帧文件，把新列映射成 expandSides 认的那套字段再走同一条展开。
 // 56 格布局与旧包同源（d56-14x5-56-side-mirrored-candidate-v3），core.js 的 GRID 直接可用。
 const DEVICE_ANGLE_COLS = ['pitchDeg', 'sideTiltDeg'];
+const HEADING_COLS = ['relativeHeadingDeg', 'referenceId'];
 const PKG_COLS = ['effectiveElapsedUs', 'timeUs', 'validity', 'frameType', 'pressureAdc', 'accelerationG',
   'angularVelocityDps', 'accelerationRaw', 'angularVelocityRaw', 'deviceSequence', 'temperatureCelsius',
-  'imuCalibration', ...DEVICE_ANGLE_COLS];
+  'imuCalibration', ...DEVICE_ANGLE_COLS, ...HEADING_COLS];
 const SQUAT_COLS = ['timeUs', 'effectiveElapsedUs', 'nativeReceiveNs', 'validity', 'accelerationG', 'imuCalibration'];
+const SQUAT_HEAD_COLS = HEADING_COLS;
+const WRIST_RAW_COLS = SQUAT_COLS.map(c=>c==='imuCalibration' ? 'angularVelocityDps' : c);
 type SquatFile = PkgFile & {squat: string[]};
-const squatFiles = new WeakMap<object, SquatFile[][]>();
+const squatFiles = new WeakMap<object, [SquatFile[],SquatFile[]]>();
+const squatMeta = new WeakMap<object, {recordId: string|null; wrist?: {files: SquatFile[]; placement: string; family: string}}>();
 
 export function squatPackage(sides: object) { return squatFiles.get(sides); }
+export function squatCaptureMeta(sides: object) { return squatMeta.get(sides); }
 
-export async function squatInput(files: SquatFile[], alive: () => boolean) {
-  const rows: number[][] = [];
+function collapseWristBatches(rows: number[][]) {
+  const out: number[][]=[];
+  for(let i=0,j;i<rows.length;i=j) {
+    const r=rows[i];
+    for(j=i+1;j<rows.length && r[0]===rows[j][0] && r[1]===rows[j][1] && r[2]===rows[j][2];j++);
+    // 维特同一 BLE 通知可含两帧但无独立时间戳，只合并同批，不臆造间隔。
+    const batch=rows.slice(i,j);
+    out.push(batch.length===1 ? r : r.map((v,c)=>c<3 ? v : batch.reduce((s,x)=>s+x[c],0)/batch.length));
+  }
+  return out;
+}
+
+export async function squatInput(files: SquatFile[], alive: () => boolean, mode: 'ankle'|'wrist-comp'|'wrist-raw'='ankle') {
+  const rows: number[][] = [], required=mode==='wrist-raw' ? WRIST_RAW_COLS : SQUAT_COLS;
+  const hasAngles=mode==='ankle' && files.every(f=>DEVICE_ANGLE_COLS.every(c=>f.cols.includes(c)));
+  const hasHead=mode==='ankle' && files.every(f=>SQUAT_HEAD_COLS.every(c=>f.squat.includes(c)));
+  const columns=[...required,...(hasAngles?DEVICE_ANGLE_COLS:[]),...(hasHead?SQUAT_HEAD_COLS:[])];
   for (const f of files) {
     if (!alive()) throw new Error('读取已取消。');
-    if (SQUAT_COLS.some(c => !f.squat.includes(c))) throw new Error('缺少双踝时间戳、加速度或补偿角速度列。');
+    if (required.some(c => !f.squat.includes(c))) throw new Error(mode==='ankle' ? '缺少双踝时间戳、加速度或补偿角速度列。' : '腕部缺少时间戳或所需六轴列。');
     for (const [rowStart, rowEnd] of f.rgs) {
       if (!alive()) throw new Error('读取已取消。');
-      const part = await ParquetHQ.parquetReadObjects({file: f.ab, columns: SQUAT_COLS, rowStart, rowEnd});
+      const part = await ParquetHQ.parquetReadObjects({file: f.ab, columns, rowStart, rowEnd});
       for (const r of part) {
         if (r.validity !== 'valid' || r.accelerationG == null) continue;
-        const gyro = r.imuCalibration?.angularVelocityCompensatedDps;
+        const gyro = mode==='wrist-raw' ? r.angularVelocityDps : r.imuCalibration?.angularVelocityCompensatedDps;
         const v = struct6(r.accelerationG, gyro);
-        if (!gyro || !v.every(Number.isFinite)) throw new Error('双踝数据有帧缺少补偿角速度或有效加速度，不能用原始角速度代替。');
-        rows.push([numOrNaN(r.timeUs), numOrNaN(r.nativeReceiveNs), numOrNaN(r.effectiveElapsedUs), ...v]);
+        if (!gyro || !v.every(Number.isFinite)) {
+          if (mode==='ankle') throw new Error('双踝数据有帧缺少补偿角速度或有效加速度，不能用原始角速度代替。');
+          continue;
+        }
+        rows.push([numOrNaN(r.timeUs), numOrNaN(r.nativeReceiveNs), numOrNaN(r.effectiveElapsedUs), ...v,
+          ...(hasAngles ? [numOrNaN(r.pitchDeg),numOrNaN(r.sideTiltDeg)] : []),
+          ...(hasHead ? [numOrNaN(r.relativeHeadingDeg), r.referenceId] : [])]);
       }
     }
   }
   rows.sort((a,b)=>a[0]-b[0]);
-  const axis = (c: number) => Float64Array.from(rows, r=>r[c]);
-  const values = new Float64Array(rows.length*6);
-  rows.forEach((r,i)=>{for(let j=0;j<6;j++) values[i*6+j]=r[3+j];});
-  return {t:axis(0),receive:axis(1),elapsed:axis(2),values};
+  const samples=mode==='wrist-raw' ? collapseWristBatches(rows) : rows;
+  const axis = (c: number) => Float64Array.from(samples, r=>r[c]);
+  const values = new Float64Array(samples.length*6);
+  samples.forEach((r,i)=>{for(let j=0;j<6;j++) values[i*6+j]=r[3+j];});
+  const aOff=hasAngles ? 9 : -1, hOff=hasAngles ? 9+DEVICE_ANGLE_COLS.length : 9;
+  let head: Float64Array;
+  if (hasHead) {
+    const cur=headingCursor();
+    head=Float64Array.from(samples, r=>cur(numOrNaN(r[hOff] as number), r[hOff+1] as unknown as string));
+  }
+  return {t:axis(0),receive:axis(1),elapsed:axis(2),values,
+    angles:hasAngles ? [axis(aOff),axis(aOff+1)] as [Float64Array,Float64Array] : undefined,
+    heading:head};
 }
-const hasDeviceAngles = files => files.some(f => DEVICE_ANGLE_COLS.some(c => f.cols.includes(c)));
-const collectAngles = files => hasDeviceAngles(files) ? {pitch: [], sideTilt: []} : undefined;
+const hasDeviceAngles = (files, cols = DEVICE_ANGLE_COLS) => files.some(f => cols.some(c => f.cols.includes(c)));
+const collectAngles = files => {
+  const pitch = hasDeviceAngles(files), head = hasDeviceAngles(files, HEADING_COLS);
+  if (!pitch && !head) return undefined;
+  return {pitch: [], sideTilt: [], heading: [], head: headingCursor()};
+};
 function appendDeviceAngles(angles, r) {
   if (!angles) return;
   angles.pitch.push(numOrNaN(r.pitchDeg));
   angles.sideTilt.push(numOrNaN(r.sideTiltDeg));
+  if (angles.heading) angles.heading.push(angles.head(numOrNaN(r.relativeHeadingDeg), r.referenceId));
+}
+function angleArr(list) {
+  const a = Float64Array.from(list);
+  return a.some(Number.isFinite) ? a : null;
 }
 function deviceAngleArrays(angles) {
-  return angles && {pitch: Float64Array.from(angles.pitch), sideTilt: Float64Array.from(angles.sideTilt)};
+  if (!angles) return null;
+  return {pitch: Float64Array.from(angles.pitch), sideTilt: Float64Array.from(angles.sideTilt),
+    heading: angles.heading ? angleArr(angles.heading) : null};
 }
 const IMU_COLS = ['accelerationG', 'angularVelocityDps', 'accelerationRaw', 'angularVelocityRaw', 'imuCalibration'];
 
@@ -550,7 +594,9 @@ async function parsePackage(file) {
       const foot = sideOfPlacement(src.placement), placement = String(src.placement || '').toLowerCase();
       const side = !nch && pressureSides.has(foot) && /^(left|right)ankle$/.test(placement) ? placement : foot;
       registerSideLabel(side, src);
-      const job = {side, sourceId: src.sourceId, placement, family: src.deviceFamily, nch, files: [], nAll: 0};
+      const axisPressure = src.deviceFamily === 'd56' && nch === NCH && /^(left|right)insole$/.test(placement) &&
+        src.pressureLayoutId === 'd56-14x5-56-side-mirrored-candidate-v3';
+      const job = {side, sourceId: src.sourceId, placement, family: src.deviceFamily, nch, axisPressure, files: [], nAll: 0};
       for (const path of paths) {
         const ab = await parquetBuffer(zf, path);
         const md = ParquetHQ.parquetMetadata(ab);
@@ -565,7 +611,7 @@ async function parsePackage(file) {
           const nr = Number(rg.num_rows);
           if (nr > 0) { rgs.push([acc, acc + nr]); acc += nr; }
         }
-        job.files.push({ab, base: job.nAll, rows, rgs, cols: PKG_COLS.filter(c => names.has(c)), squat: SQUAT_COLS.filter(c => names.has(c))});
+        job.files.push({ab, base: job.nAll, rows, rgs, cols: PKG_COLS.filter(c => names.has(c)), squat: [...new Set([...SQUAT_COLS,...WRIST_RAW_COLS,...SQUAT_HEAD_COLS])].filter(c => names.has(c))});
         job.nAll += rows;
       }
       jobs.push(job);
@@ -597,10 +643,16 @@ async function parsePackage(file) {
   rebaseCommon(sides);
   sides.sort((a, b) => a.side.localeCompare(b.side));
   const ankles = ['leftankle','rightankle'].map(p => jobs.filter(j => j.family === 'walkpadImu' && j.placement?.toLowerCase() === p));
-  if (ankles.every(a => a.length === 1)) squatFiles.set(sides, ankles.map(([a]) => a.files));
-  const verified = media && !asRef ? await verifiedVideoOffset(archive) : undefined;
+  if (ankles.every(a => a.length === 1)) {
+    squatFiles.set(sides, [ankles[0][0].files,ankles[1][0].files]);
+    const wrists=jobs.filter(j=>/^(left|right)wrist$/.test(j.placement) && /^(walkpadImu|witWt9011dcl)$/.test(j.family));
+    const [w]=wrists;
+    squatMeta.set(sides, {recordId:typeof manifest.recordId==='string' && manifest.recordId ? manifest.recordId : null,
+      wrist:wrists.length===1 ? {files:w.files, placement:w.placement, family:w.family} : undefined});
+  }
+  const verified = media ? await verifiedVideoOffset(archive) : undefined;
   applySides(sides, file.name, 'pressure', {rebuilt: false, src: srcInfo});
-  if (media && !asRef) {
+  if (media) {
     try { attachVideo(media.u8, media.name, media.total, verified); } catch { /* 视频挂不上就只没有视频 */ }
   }
   // 全段统计放后台跑，不挡住首屏；换文件时代数一变，旧扫描自己退出
@@ -615,9 +667,30 @@ const LAZY_MIN = 30000;
 const LAZY_WIN = 60;   // 懒加载时的默认窗口长度 s
 const LAZY_PAD = 5;    // 窗口前后各多读的余量 s，平移时不必每动一下就重读
 
+const axisLoads = (side: string, p?: ArrayLike<number>) => {
+  if (p?.length !== NCH || !GRID[side]) return [NaN, NaN, NaN];
+  let heel = 0, fore = 0, total = 0;
+  for (let i = 0; i < NCH; i++) {
+    const adc = numOrNaN(p[i]), row = GRID[side][i][0];
+    if (!Number.isFinite(adc)) return [NaN, NaN, NaN];
+    // ADC 基线可以为负；承重证据只累加正载荷，不改原始压力。
+    const x = Math.max(0, adc);
+    total += x;
+    if (row <= 3) heel += x;
+    if (row >= 8) fore += x;
+  }
+  return [heel, fore, total];
+};
+function collectAxisSupport(side: string, rows: ArrayLike<number>[]): AxisSupport {
+  const out: AxisSupport = [new Float32Array(rows.length), new Float32Array(rows.length), new Float32Array(rows.length)];
+  rows.forEach((p, i) => axisLoads(side, p).forEach((x, k) => { out[k][i] = x; }));
+  return out;
+}
+
 // 短片段：整段读进对象数组再交给共用展开
 async function readAllRows(job) {
   const g = {eff: [], obs: [], v: [], iph: [], irw: [], ist: [], fno: [], tmp: [], st: [], ns: [], al: [], sfo: [],
+    axisPressure: job.axisPressure,
     cal: {ready: 0, raw: 0}, deviceAngles: collectAngles(job.files)};
   let rows = 0;
   for (const f of job.files) {
@@ -631,9 +704,13 @@ async function readAllRows(job) {
 // 行号必须一起留 —— validity 非 valid 的帧被丢掉后，数组下标与文件行号对不上了。
 async function buildLazySide(job) {
   const base = ['effectiveElapsedUs', 'validity', 'deviceSequence'];
-  const t = [], row = [], seq = [];
+  const t = [], row = [], seq = [], head = [];
+  const headCursor = headingCursor();
+  // 同一侧可能由多个文件拼成：只有全都有航向列时才做全段展开，否则数组与 t 错位
+  const allHead = job.files.every(f => HEADING_COLS.every(c => f.cols.includes(c)));
   for (const f of job.files) {
-    const cols = base.concat(f.cols.indexOf('frameType') >= 0 ? ['frameType'] : []);
+    const hasHead = allHead;
+    const cols = base.concat(f.cols.indexOf('frameType') >= 0 ? ['frameType'] : [], hasHead ? HEADING_COLS : []);
     for (const [r0, r1] of f.rgs) {
       const part = await ParquetHQ.parquetReadObjects({
         file: f.ab, compressors: ParquetHQ.compressors, columns: cols, rowStart: r0, rowEnd: r1
@@ -644,6 +721,7 @@ async function buildLazySide(job) {
         const e = numOrNaN(r.effectiveElapsedUs);
         if (!Number.isFinite(e)) continue;
         t.push(e); row.push(f.base + r0 + i); seq.push(numOrNaN(r.deviceSequence));
+        if (hasHead) head.push(headCursor(numOrNaN(r.relativeHeadingDeg), r.referenceId));
       }
     }
   }
@@ -657,12 +735,14 @@ async function buildLazySide(job) {
   let nch = job.nch;
   if (!nch) { for (const f of job.files) { nch = 56; break; } }
   const s = {
-    side: job.side, lazy: true, files: job.files, nch,
+    side: job.side, lazy: true, files: job.files, nch, axisPressure: job.axisPressure,
     n, nAll: job.nAll, t: tt, fno, row: rr, t0,
     dur: tt[n - 1], span: tt[n - 1], fs: n > 1 ? 1 / ((tt[n - 1] - tt[0]) / (n - 1)) : NaN,
     nT: job.nAll - n,
     // 全段统计（零值率 / 最大 / 温度范围 / 丢包）要扫一遍全表，扫描完成前留空
     ch: null, mx: null, mn: null, zc: null, miss: null,
+    // 全段展开好的航向（与 t 同序）：块只切片，换窗口不重新起算
+    head: allHead ? Float32Array.from(head) : null,
     imu: null, temp: null, tLo: NaN, tHi: NaN, ictoIn: null, cal: {ready: 0, raw: 0},
     blk: null, statPending: true
   };
@@ -691,7 +771,8 @@ async function loadBlock(s, a, b) {
       rows.push(r);
     }
   }
-  s.blk = makeBlock(rows, s.nch, s.t0);
+  s.blk = makeBlock(rows, s.nch, s.t0, s.head && s.head.length === s.n && rows.length === i1 - i0
+    ? s.head.subarray(i0, i1) : null);
   // ⚠ IMU / 温度 / IC-TO 输入跟着块走，压力通道留在 blk.ch 里。这里把块内容挂回全段对象只是让
   // 「有没有 IMU 列」这类判空继续可用：s.imu.n 是块内帧数、s.n 是全段帧数，两者不能互相索引。
   // 取值一律走 blkOf(s)，下标必须与它所读的数组来自同一块。
@@ -740,7 +821,8 @@ function maxOfImu(im) {
 }
 
 // 块内数据：时间转成与全段同一起点的绝对秒，绘图与时间窗直接用
-function makeBlock(rows, nch, t0) {
+// head：全段展开好的航向（与 rows 同序），块里直接切片，避免每块各自起算导致换窗口时差整圈
+function makeBlock(rows, nch, t0, head = null) {
   const n = rows.length;
   if (!n) return emptyBlock();
   const t = new Float64Array(n);
@@ -769,7 +851,10 @@ function makeBlock(rows, nch, t0) {
     if (Number.isFinite(tv2)) { tlt[k] = tv2; nTlt++; }
   }
   const imu = (hasPhys || hasRaw) ? {nch: 6, phys: hasPhys ? ph : null, raw: hasRaw ? rw : null, n, nPart: 0} : null;
-  const deviceAngles = (nPit || nTlt) ? {pitch: nPit ? pit : null, sideTilt: nTlt ? tlt : null} : null;
+  const hd = head ? Float32Array.from(head) : null;
+  const nHead = hd ? hd.reduce((c, v) => c + (Number.isFinite(v) ? 1 : 0), 0) : 0;
+  const deviceAngles = (nPit || nTlt || nHead)
+    ? {pitch: nPit ? pit : null, sideTilt: nTlt ? tlt : null, heading: nHead ? hd : null} : null;
   return {
     n, t, ch, imu, temp: tHi >= tLo ? tp : null, deviceAngles, ictoIn: null,
     a: t[0], b: t[n - 1], tLo, tHi,
@@ -1145,15 +1230,8 @@ function witBatches(tRaw) {
 
 // ---------------------------------------------------------------- 收尾
 function applySides(sides, name, mode, opt) {
-  if (asRef) {
-    state.ref = {name, sides, mode};
-    renderAxis();
-    setTab('axis');
-    return;
-  }
   // 换主数据 = 旧数据集的异步任务全部作废（短文件也要 +1：之前只有长包会作废扫描）
   dataGen++;
-  state.ref = null;   // 换主文件时旧的参考数据失去意义
   state.sides = sides;
   state.receiptTiming = false;
   // 纵轴定标要的是全段每轴最大 |值|：短文件就地算一次，长文件由后台扫描给
@@ -1205,15 +1283,17 @@ function gridDims(W) {
   return {padL, padR, gapX, gapY, C, R: Math.ceil(NCH / C)};
 }
 
-export async function activityInput(s, alive = () => true) {
+export async function activityInput(s, alive = () => true, withSupport = false) {
   if (s.activityIn) return s.activityIn;
   if (!s.lazy) throw new Error('没有可信的物理量与会话时间；不使用重建时间轴或原始计数推断');
   const raw = [], seq = [], ok = [], rails = [], axes = Array.from({length: 6}, () => []);
+  const loads: [number[], number[], number[]] | undefined = withSupport && s.axisPressure ? [[], [], []] : undefined;
   const angles = collectAngles(s.files);
   for (const f of s.files) for (const [r0, r1] of f.rgs) {
     if (!alive()) throw new Error('已取消');
     const cols = ['effectiveElapsedUs', 'timeUs', 'validity', 'frameType', 'accelerationG', 'angularVelocityDps',
-      'accelerationRaw', 'deviceSequence', 'imuCalibration', ...DEVICE_ANGLE_COLS].filter(c => f.cols.includes(c));
+      'accelerationRaw', 'deviceSequence', 'imuCalibration', ...DEVICE_ANGLE_COLS,
+      ...(loads ? ['pressureAdc'] : [])].filter(c => f.cols.includes(c));
     const rows = await ParquetHQ.parquetReadObjects({file: f.ab, compressors: ParquetHQ.compressors, columns: cols, rowStart: r0, rowEnd: r1});
     for (const r of rows) {
       if (!isSignalType(r.frameType)) continue;
@@ -1224,13 +1304,15 @@ export async function activityInput(s, alive = () => true) {
       const a = r.accelerationRaw;
       rails.push(a && [a.x, a.y, a.z].some(v => Math.abs(numOrNaN(v)) >= 32760) ? 1 : 0);
       for (let j = 0; j < 6; j++) axes[j].push(ph?.[j] ?? NaN);
+      if (loads) axisLoads(s.side, r.pressureAdc).forEach((x, k) => loads[k].push(x));
       appendDeviceAngles(angles, r);
     }
     await new Promise(r => setTimeout(r, 0));
   }
   const t = Float64Array.from(spreadNotified(raw), v => (v - s.t0) / 1e6);
   return {t, seq: Float64Array.from(seq), ok: Uint8Array.from(ok), accAtRail: Uint8Array.from(rails),
-    deviceAngles: deviceAngleArrays(angles), axes: axes.map(a => Float32Array.from(a))};
+    deviceAngles: deviceAngleArrays(angles), axes: axes.map(a => Float32Array.from(a)),
+    support: loads && [Float32Array.from(loads[0]), Float32Array.from(loads[1]), Float32Array.from(loads[2])] as AxisSupport | undefined};
 }
 
 export {ensureWin, gridDims, LAZY_WIN as lazyWin, parse};

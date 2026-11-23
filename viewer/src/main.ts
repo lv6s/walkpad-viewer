@@ -5,7 +5,7 @@
 import {analyzeActivity, initActivity, onActivityChange} from './activity';
 import {initSquat} from './squat';
 import {setTab} from './app';
-import {drawAxis, syncAxisUi} from './axis';
+import {drawAxis} from './axis';
 import {initAxisPage} from './axis/page';
 import {copSegBaseRef, jumpSeg, renderCop, setCopTime, togglePlay} from './cop';
 import {APP_VER} from './core/constants';
@@ -134,7 +134,7 @@ function bindViewer(): void {
   el.imuYfit.addEventListener('click', () => imuAuto(true));
 
   // 窄带开关：温度、设备角度各一条，关掉只是不画（数据仍在，CSV 导出不受影响）
-  for (const [btn, key] of [[el.imuTempOn, 'imuTemp'], [el.imuAngOn, 'imuAng']] as const) {
+  for (const [btn, key] of [[el.imuTempOn, 'imuTemp'], [el.imuAngOn, 'imuAng'], [el.imuHeadOn, 'imuHead']] as const) {
     btn.addEventListener('click', () => {
       state[key] = !state[key];
       btn.classList.toggle('on', state[key]);
@@ -164,40 +164,25 @@ function bindViewer(): void {
   bindScrub();
   bindVideo();
 
-  // 轴向推断页：区间与静止判据都只影响本页，改完就地重算
   el.axisTools.addEventListener('click', (e: MouseEvent) => {
-    const b = (e.target as HTMLElement).closest('button[data-range],button[data-sens]') as HTMLButtonElement | null;
+    const b = (e.target as HTMLElement).closest('button[data-range]') as HTMLButtonElement | null;
     if (!b || b.disabled) return;
-    if (b.dataset.range) state.axisRange = b.dataset.range;
-    if (b.dataset.sens) state.axisSens = b.dataset.sens;
-    syncAxisUi();
+    state.axisRange = b.dataset.range;
     drawAxis();
   });
-  el.axisTools.querySelector('#axisRe').addEventListener('click', () => drawAxis());
+  el.axisTools.querySelector('#axisRe').addEventListener('click', () => drawAxis(true));
 
   ['dragenter', 'dragover'].forEach(t => el.drop.addEventListener(t, (e: DragEvent) => {
     e.preventDefault(); el.drop.classList.add('hot');
   }));
   el.drop.addEventListener('dragleave', () => el.drop.classList.remove('hot'));
-  // 一次拖两个：第一个当主数据，第二个当参考数据（同一次录制的另一台设备）
-  const takeFiles = async (fs: FileList) => {
-    if (!fs || !fs.length) return;
-    await parse(fs[0]);
-    if (fs.length > 1) await parse(fs[1], {asRef: true});
-  };
+  const takeFiles = (fs: FileList) => { if (fs?.length) void parse(fs[0]); };
   el.drop.addEventListener('drop', (e: DragEvent) => {
     e.preventDefault(); el.drop.classList.remove('hot');
     takeFiles(e.dataTransfer.files);
   });
   el.pick.addEventListener('click', (e: MouseEvent) => { e.stopPropagation(); el.file.click(); });
   el.file.addEventListener('change', () => { if (el.file.files[0]) parse(el.file.files[0]); });
-
-  if (el.axisRef) el.axisRef.addEventListener('click', () => el.axisRefFile.click());
-  if (el.axisRefFile) el.axisRefFile.addEventListener('change', () => {
-    const f = el.axisRefFile.files[0];
-    if (f) parse(f, {asRef: true});
-    el.axisRefFile.value = '';
-  });
 
   // 整个窗口都能接住拖入（结果出来之后）
   window.addEventListener('dragover', e => e.preventDefault());

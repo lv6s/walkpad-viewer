@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { api, clearBuffers, connect, disconnect, dropBuffers, error, idleExit, number, online, places, where, status, type Device } from './store'
+import { api, clearBuffers, connect, disconnect, dropBuffers, error, idleExit, number, online, places, where, status, type Device, type Status } from './store'
 import WaveChart from './components/WaveChart.vue'
 import PressureMap from './components/PressureMap.vue'
 import CameraPanel from './components/CameraPanel.vue'
@@ -20,7 +20,10 @@ const channels = ref<Record<string, number>>({})
 const commandLink = ref('v2')
 const showPressure = ref(true)
 const compensate = ref(true)
-const sessions = ref<Record<string, any>[]>([])
+type Session = { session_id: string; status: string; frames: number; source?: string; interrupted?: boolean }
+const sessions = ref<Session[]>([])
+const savedSession = ref<Session | null>(null)
+const savingRecord = ref(false)
 const phoneConfig = ref<Record<string, any> | null>(null)
 const camera = ref<InstanceType<typeof CameraPanel>>()
 const showCamera = ref(false)
@@ -29,6 +32,9 @@ const message = ref('')
 const closed = ref(false)
 const devices = computed(() => status.value?.devices.filter(device => device.source === status.value?.source || device.connected) || [])
 const recording = computed(() => status.value?.recorder.recording)
+const recordBusy = computed(() => savingRecord.value || !!status.value?.recorder.draining)
+const latestSession = computed(() => savedSession.value || sessions.value.find(session => session.status === 'complete' || session.status === 'failed' || session.interrupted))
+const canExport = computed(() => online.value && !recording.value && !recordBusy.value && !busy.value)
 const result = computed(() => status.value?.algorithm.result || {})
 const label = computed(() => ({ walk: '步行', run: '跑步', other: '其他' }[result.value.label as string] || '—'))
 const sourceText: Record<string, string> = { direct: '电脑蓝牙直连', phone: '手机局域网采集', demo: '模拟数据', replay: '离线回放' }
@@ -63,16 +69,40 @@ async function forget(device: Device) {
   }
 }
 async function record() {
-  if (recording.value) {
+  if (busy.value || recordBusy.value || !online.value) return
+  if (!recording.value) {
+    if (await run('record_start')) savedSession.value = null
+    return
+  }
+  savingRecord.value = busy.value = true
+  error.value = ''
+  let cameraError = ''
+  try {
     try { await camera.value?.stop() }
-    catch (exception) { error.value = String(exception) }
-    await run('record_stop')
+    catch (exception) { cameraError = String(exception) }
+    const stopped = await api<Status['recorder']>('record_stop')
+    if (!stopped.session_id) return
+    selectedSession.value = stopped.session_id
+    savedSession.value = { session_id: stopped.session_id, frames: stopped.frames, status: stopped.error ? 'failed' : 'complete' }
     await loadSessions()
-  } else await run('record_start')
+  } catch (exception) { error.value = String(exception) }
+  finally {
+    savingRecord.value = busy.value = false
+    if (cameraError && !error.value) error.value = cameraError
+  }
 }
 async function loadSessions() {
-  try { sessions.value = await (await fetch('/api/sessions')).json(); if (!selectedSession.value && sessions.value.length) selectedSession.value = sessions.value[0]!.session_id }
-  catch (e) { error.value = String(e) }
+  try {
+    const response = await fetch('/api/sessions')
+    if (!response.ok) throw new Error('无法读取历史记录，请重试')
+    sessions.value = await response.json()
+    if (!selectedSession.value && sessions.value.length) selectedSession.value = sessions.value[0]!.session_id
+  } catch (e) { error.value = String(e) }
+}
+function openRecords(session?: string) {
+  if (session) selectedSession.value = session
+  panel.value = 'records'
+  void loadSessions()
 }
 async function algorithm() { await run('algorithm', { profile: protocol.value, enabled: !status.value?.algorithm.enabled }) }
 async function bias(device: Device, action: string) { await run('bias', { bias_key: device.bias_key, bias_action: action }) }
@@ -109,11 +139,23 @@ onUnmounted(disconnect)
 
 <template>
   <div class="workbench">
-    <header class="app-header"><div class="brand"><div class="brand-mark">W</div><div><h1>Walkpad <span>采集工作台</span></h1><p>传感器实时采集 · 本地持久化 · 在线算法</p></div></div><div class="header-right"><span class="connection"><i :class="{ connected: online }"></i>{{ online ? '后台已连接' : '连接后台中' }}</span><span class="version">v{{ status?.version ?? '—' }}</span><button :class="recording ? 'danger' : 'primary'" :disabled="busy || !online" @click="record">{{ recording ? '停止并保存' : '开始记录' }}</button><button :disabled="busy || !online" title="立即停止记录、断开全部设备并结束后台进程（含算法子进程）；直接关闭页面时后台也会在宽限期后自动退出" @click="shutdownServer">关闭后台</button></div></header>
+    <header class="app-header"><div class="brand"><div class="brand-mark">W</div><div><h1>Walkpad <span>采集工作台</span></h1><p>传感器实时采集 · 本地持久化 · 在线算法</p></div></div><div class="header-right"><span class="connection"><i :class="{ connected: online }"></i>{{ online ? '后台已连接' : '连接后台中' }}</span><span class="version">v{{ status?.version ?? '—' }}</span><button :class="recording ? 'danger' : 'primary'" :disabled="busy || recordBusy || !online" @click="record">{{ recordBusy ? '正在保存…' : recording ? '停止并保存' : '开始记录' }}</button><button :disabled="busy || recordBusy || !online" title="立即停止记录、断开全部设备并结束后台进程（含算法子进程）；直接关闭页面时后台也会在宽限期后自动退出" @click="shutdownServer">关闭后台</button></div></header>
     <div v-if="closed" class="alert warning">后台服务已关闭：记录、蓝牙连接与算法进程都已退出。继续采集请重新运行启动入口。</div>
     <div v-if="error || status?.error || status?.recorder.error" class="alert error" role="alert">{{ error || status?.recorder.error || status?.error }}<button @click="error = ''">关闭提示</button></div>
     <div v-if="status?.source === 'demo'" class="alert warning">当前为模拟数据，仅用于验证软件链路，不是设备实测。</div>
     <div v-if="status?.recorder.recovered.length" class="alert warning">检测到 {{ status.recorder.recovered.length }} 个异常中断记录。已写出的原始日志与Parquet分段仍在记录目录，可在历史记录导出。</div>
+    <section v-if="recordBusy || (!recording && latestSession)" class="panel record-export" aria-label="最近记录与导出">
+      <div>
+        <h2 role="status">{{ recordBusy ? '正在保存记录…' : latestSession?.status === 'complete' ? (savedSession ? '本次记录已保存' : '最近保存的记录') : '最近记录未完整保存' }}</h2>
+        <p v-if="recordBusy" class="muted">正在等待录像和采集数据写盘完成。</p>
+        <p v-else-if="latestSession" class="muted">{{ latestSession.session_id }} · {{ latestSession.frames || 0 }} 帧{{ latestSession.status !== 'complete' ? ' · 可导出已写盘部分' : '' }}</p>
+      </div>
+      <div v-if="!recordBusy && latestSession" class="toolbar">
+        <button class="primary" :disabled="!canExport" @click="download('zip', latestSession.session_id)">导出原始 ZIP</button>
+        <button :disabled="!canExport" @click="download('package', latestSession.session_id)">导出测量包（查看器）</button>
+        <button @click="openRecords(latestSession.session_id)">更多格式与历史记录</button>
+      </div>
+    </section>
 
     <section class="summary-grid"><div class="summary"><span>采集来源</span><strong>{{ sourceText[status?.source || 'direct'] }}</strong><small>{{ idleExit ? `关闭页面 ${idleExit} 秒后自动退出后台（记录进行期间不退出）` : '页面可重新连接，后台独立运行' }}</small></div><div class="summary"><span>在线设备</span><strong>{{ status?.devices.filter(device => device.connected).length || 0 }} <em>台</em></strong><small>每个连接独立协议缓冲与记录标识</small></div><div class="summary"><span>{{ recording ? '记录中 · 后台记录帧数' : '最近记录 · 后台记录帧数' }}</span><strong>{{ (status?.recorder.frames || 0).toLocaleString() }} <em>帧</em></strong><small>{{ status?.recorder.chunks || 0 }} 个Parquet分段 · 待写 {{ status?.recorder.queued || 0 }} 条</small></div><div class="summary"><span>状态推断</span><strong>{{ status?.algorithm.enabled && result.valid && online ? label : '—' }}</strong><small>{{ status?.algorithm.enabled ? (result.valid ? '有效结果 · ' + number(result.latency_ms, 1) + ' ms推断' : reasonText[result.reason] || result.reason || '等待数据') : '尚未启用' }}</small></div></section>
 
@@ -125,10 +167,15 @@ onUnmounted(disconnect)
 
     <section v-if="panel === 'algorithm'" class="panel algorithm-panel"><div class="panel-head"><h2>在线状态推断</h2><span class="badge">{{ status?.algorithm.profile === 'wt' ? 'WT脚背 R1' : '自研鞋垫' }}</span><button class="primary" :disabled="busy" @click="algorithm">{{ status?.algorithm.enabled ? '停止推断' : '开始推断' }}</button></div><div class="classification"><strong>{{ result.valid && online ? label : '—' }}</strong><div><p>{{ result.valid ? '当前结果有效' : reasonText[result.reason] || result.reason || '等待开始' }}</p><p class="muted">推断 {{ number(result.latency_ms, 1) }} ms · 算法丢弃 {{ status?.algorithm.dropped || 0 }} · {{ status?.algorithm.error || '无算法异常' }}</p></div></div><div v-for="(text, index) in ['步行', '跑步', '其他']" :key="text" class="probability"><span>{{ text }}</span><div><i :style="{ width: (result.valid && online ? (result.probabilities?.[index] || 0) * 100 : 0) + '%' }"></i></div><b>{{ result.valid && online ? number((result.probabilities?.[index] || 0) * 100, 1) + '%' : '—' }}</b></div><p class="muted">{{ status?.algorithm.model?.axis_label || '模型仅在启用推断时加载，采集不依赖推断成功。' }}</p><p class="micro">自研先在后台估计零偏，再进入原有ONNX处理契约；WT不套用自研补偿。断流和过期结果不沿用旧类别。模型迁移一致性不代表现场分类准确率。</p></section>
 
-    <section v-if="panel === 'records'" class="panel"><div class="panel-head"><h2>记录与回放</h2><button @click="loadSessions">刷新列表</button></div><p class="muted">{{ status?.recorder.path || '记录默认保存到工具目录 records。' }}</p><div class="toolbar"><select v-model="selectedSession"><option value="">选择记录</option><option v-for="session in sessions" :key="session.session_id" :value="session.session_id">{{ session.session_id }} · {{ session.status }} · {{ session.frames || 0 }}帧{{ session.interrupted ? ' · 异常中断' : '' }}</option></select><button class="primary" :disabled="!selectedSession || recording" @click="download('package')">测量包（app 格式）</button><button :disabled="!selectedSession || recording" @click="download('zip')">原始 ZIP</button><button :disabled="!selectedSession || recording" @click="download('parquet')">自研标准 Parquet</button><button :disabled="!selectedSession || recording" @click="download('txt')">WT官方列 TXT</button><button :disabled="!selectedSession || recording" @click="run('replay', { session_id: selectedSession }); panel = 'devices'">按原始通知回放</button></div><p class="micro">测量包与 app 导出一致：manifest.json 的 sources/outputs 指向 frames/&lt;设备&gt;/frame-00001.parquet（camelCase 列、struct 六轴），录像在 videos/，可直接拖进查看器。原始 ZIP 存原始通知 JSONL、分段 Parquet、算法决策与录像。标准 Parquet 保留既有列名，没有独立时钟同步依据时有效对齐时间留空，不把接收时刻伪装成采样时间。异常中断的记录可导出已保存部分。</p><div class="record-list"><div v-for="session in sessions.slice(0, 12)" :key="session.session_id"><code>{{ session.session_id }}</code><span>{{ session.source }} · {{ session.status }} · {{ session.frames || 0 }} 帧</span><button :disabled="recording" @click="download('zip', session.session_id)">导出</button></div></div></section>
+    <section v-if="panel === 'records'" class="panel"><div class="panel-head"><h2>记录与回放</h2><button @click="loadSessions">刷新列表</button></div><p class="muted">{{ status?.recorder.path || '记录默认保存到工具目录 records。' }}</p><div class="toolbar"><select v-model="selectedSession"><option value="">选择记录</option><option v-for="session in sessions" :key="session.session_id" :value="session.session_id">{{ session.session_id }} · {{ session.status }} · {{ session.frames || 0 }}帧{{ session.interrupted ? ' · 异常中断' : '' }}</option></select><button class="primary" :disabled="!selectedSession || !canExport" @click="download('package')">测量包（app 格式）</button><button :disabled="!selectedSession || !canExport" @click="download('zip')">原始 ZIP</button><button :disabled="!selectedSession || !canExport" @click="download('parquet')">自研标准 Parquet</button><button :disabled="!selectedSession || !canExport" @click="download('txt')">WT官方列 TXT</button><button :disabled="!selectedSession || !canExport" @click="run('replay', { session_id: selectedSession }); panel = 'devices'">按原始通知回放</button></div><p class="micro">测量包与 app 导出一致：manifest.json 的 sources/outputs 指向 frames/&lt;设备&gt;/frame-00001.parquet（camelCase 列、struct 六轴），录像在 videos/，可直接拖进查看器。原始 ZIP 存原始通知 JSONL、分段 Parquet、算法决策与录像。标准 Parquet 保留既有列名，没有独立时钟同步依据时有效对齐时间留空，不把接收时刻伪装成采样时间。异常中断的记录可导出已保存部分。</p><div class="record-list"><div v-for="session in sessions.slice(0, 12)" :key="session.session_id"><code>{{ session.session_id }}</code><span>{{ session.source }} · {{ session.status }} · {{ session.frames || 0 }} 帧</span><button :disabled="!canExport" @click="download('zip', session.session_id)">导出</button></div></div></section>
 
     <CameraPanel v-if="showCamera" ref="camera"/>
     <section class="panel log-panel"><div class="panel-head"><h2>运行日志</h2><span class="micro">原始采集不依赖图表刷新</span></div><p v-if="!status?.logs.length" class="micro">后台就绪后可扫描设备或接入手机。</p><div v-for="(log, index) in status?.logs.slice(-8).reverse()" :key="index" class="log-line" :class="log.level"><time>{{ new Date(log.time).toLocaleTimeString('zh-CN', { hour12: false }) }}</time><span>{{ log.text }}</span></div></section>
     <footer><span>LOCAL FIRST · {{ status?.warning }}</span><span>旧版回退：使用工具目录中的旧版启动入口；勿同时连接同一设备</span></footer>
   </div>
 </template>
+
+<style scoped>
+.record-export { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px 20px; margin-bottom: 14px; }
+.record-export .toolbar { padding: 0; }
+</style>

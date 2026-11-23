@@ -1,8 +1,11 @@
 import SquatWorker from './squat-worker?worker&inline';
-import type {SquatResult} from './squat-core';
+import type {AnkleStream, SquatResult} from './squat-core';
+import type {SideAngles} from './squat-axis';
+import type {RepFeatures} from './squat-score-features';
+import {initSquatScore, renderSquatScore, resetSquatScore, selectSquatScore, setSquatScore, squatScoreLabel} from './squat-score-ui';
 import {version as modelVersion} from './squat-v03-model.json';
 import {state} from './core/state';
-import {squatInput, squatPackage} from './parse';
+import {squatCaptureMeta, squatInput, squatPackage} from './parse';
 import {applyWin, winOf} from './timewin';
 import {seekVideoSession} from './video';
 
@@ -11,10 +14,12 @@ const labels=['非深蹲','下降','蹲底','上升'];
 const events=['开始下降','进入蹲底','开始上升','结束上升'];
 const $=<T extends HTMLElement=HTMLElement>(id:string)=>document.getElementById(id) as T;
 let source: typeof state.sides, worker: Worker, result: SquatResult, token=0, selected=-1, busy=false, clips: [number,number,number][]=[];
+let angles: SideAngles[] = [];
 let message='';
 
-function reset() {
-  token++; worker?.terminate(); worker=null; busy=false; result=null; selected=-1; clips=[]; message='';
+function reset(newCapture=false) {
+  token++; worker?.terminate(); worker=null; busy=false; result=null; selected=-1; clips=[]; message=''; angles=[];
+  resetSquatScore(newCapture);
 }
 
 async function run() {
@@ -25,12 +30,21 @@ async function run() {
   busy=true; message='正在读取双踝数据…'; renderSquat();
   try {
     const inputs=[await squatInput(files[0],alive),await squatInput(files[1],alive)];
+    const meta=squatCaptureMeta(source), w=meta?.wrist;
+    const wristMode=w?.family==='walkpadImu' ? 'wrist-comp' : 'wrist-raw';
+    let wrist: AnkleStream, wristReadIssue='';
+    if(w) {
+      try {wrist=await squatInput(w.files,alive,wristMode);}
+      catch {wristReadIssue='腕部所需六轴或时间戳不可用；不影响双踝分段。';}
+    }
     if (!alive()) return;
     worker=new SquatWorker(); message='正在本地预测深蹲…'; renderSquat();
-    const finish=(value?:SquatResult,error?:string)=>{
+    const finish=(value?:SquatResult,error?:string,features?:RepFeatures[],featureIssue?:string,wristIssue?:string,
+        repAngles?:SideAngles[])=>{
       if (!alive()) return;
       worker?.terminate(); worker=null; busy=false;
       result=value ?? null;
+      angles=repAngles ?? [];
       if (!result) message='预测失败：'+error;
       else {
         const {phase,start,valid}=result;
@@ -40,11 +54,15 @@ async function run() {
         }
         message=`预测完成 · ${result.reps.length} 次完整深蹲 · 实际范围 ${start.toFixed(3)}–${(start+(phase.length-1)/HZ).toFixed(3)} s · 可判断 ${(valid/HZ).toFixed(2)} / ${(phase.length/HZ).toFixed(2)} s`;
       }
+      setSquatScore(result,features,{recordId:meta?.recordId ?? null,
+        wrist:w ? {placement:w.placement,family:w.family,gyro:wristMode==='wrist-comp' ? 'compensated' : 'raw'} : undefined},
+        [featureIssue,wristReadIssue,wristIssue].filter(Boolean).join(' · '));
       renderSquat();
     };
-    worker.onmessage=ev=>finish(ev.data.result,ev.data.error);
+    worker.onmessage=ev=>finish(ev.data.result,ev.data.error,ev.data.features,ev.data.scoreIssue,ev.data.wristIssue,ev.data.repAngles);
     worker.onerror=ev=>{ev.preventDefault();finish(undefined,ev.message || '后台计算不可用。');};
-    worker.postMessage({inputs,origin:source[0].t0,range},inputs.flatMap(s=>[s.t.buffer,s.receive.buffer,s.elapsed.buffer,s.values.buffer]));
+    const streams=wrist ? [...inputs,wrist] : inputs;
+    worker.postMessage({inputs,wrist,origin:source[0].t0,range},streams.flatMap(s=>[s.t,s.receive,s.elapsed,s.values,...(s.angles ?? [])].map(a=>a.buffer)));
   } catch(e) {
     if (!alive()) return;
     reset(); message='预测失败：'+(e instanceof Error ? e.message : e); renderSquat();
@@ -53,6 +71,7 @@ async function run() {
 
 function focus(i:number) {
   selected=i; const r=result?.reps[i]; if (!r) return;
+  selectSquatScore(i);
   applyWin(r[0]-.20,r[3]+.20); drawSquat();
   $('squatRows').querySelectorAll('tr').forEach((row,j)=>row.classList.toggle('selected',i===j));
 }
@@ -119,7 +138,7 @@ export function drawSquat() {
 
 export function renderSquat() {
   if (!$('viewSquat')) return;
-  if(source!==state.sides) {reset();source=state.sides;}
+  if(source!==state.sides) {reset(true);source=state.sides;}
   const enabled=!!squatPackage(source);
   $<HTMLButtonElement>('squatRun').disabled=!enabled || busy;
   $<HTMLSelectElement>('squatScope').disabled=busy;
@@ -143,15 +162,61 @@ export function renderSquat() {
       } else cell.textContent=val;
       tr.append(cell);
     }
+    const score=document.createElement('td'); score.textContent=squatScoreLabel(i); tr.append(score);
     rows.append(tr);
   });
   $('squatEmpty').textContent=!result ? '暂无预测结果' : result.reps.length ? '' : '该范围未识别到完整深蹲。';
+  renderSquatAngles();
+  renderSquatScore();
   drawSquat();
+}
+
+const CONF_CN = {hi: '高', mid: '中', lo: '低'};
+const signed = (v: number, d = 1) => (v < 0 ? '−' : '+') + Math.abs(v).toFixed(d);
+const num = (v: number | null | undefined, d = 1) => Number.isFinite(v) ? signed(v as number, d) : '—';
+
+function angleNote(a: SideAngles) {
+  if (!a?.ok) return a?.reason || '未计算';
+  const src = a.upSource === 'stand' ? '蹲前站立定竖直' : `静止段 ${a.quietDur.toFixed(1)} s`;
+  const axis = a.axisSource === 'net-turn' ? '净旋转定轴' : '屈伸主轴';
+  return `${src}（离散 ${a.upSpread.toFixed(1)}°）· ${axis} 能量占比 ${(a.ratio*100).toFixed(0)}% · 逐次离散 ${a.spread.toFixed(1)}° · 可信度${CONF_CN[a.conf]}`;
+}
+
+function renderSquatAngles() {
+  const rows = $('squatAngleRows');
+  if (!rows) return;
+  rows.replaceChildren();
+  const L = angles[0], R = angles[1];
+  const status: string[] = [];
+  for (const [name, a] of [['左脚', L], ['右脚', R]] as [string, SideAngles][]) {
+    if (a?.ok) status.push(`${name} ${angleNote(a)}`);
+    else if (a) status.push(`${name} 无法给出三向角：${a.reason}`);
+  }
+  if (!angles.length) status.push('点「预测」后给出逐次三向角。');
+  const diffs = (L?.ok ? L.reps : []).map(x => x.headingApp).filter(v => Number.isFinite(v)) as number[];
+  if (diffs.length) {
+    const worst = Math.max(...diffs.map(Math.abs));
+    status.push(`APP 航向与陀螺积分最大差 ${worst.toFixed(1)}°${worst > 5 ? '（口径可能不一致，航向只作参考）' : ''}`);
+  } else if (L?.ok) {
+    status.push('本包没有航向列，航向由陀螺积分得到，会随时间累积漂移。');
+  }
+  const warn = [L, R].flatMap(a => a?.ok ? a.warns ?? [] : []).filter((v, i, xs) => xs.indexOf(v) === i);
+  $('squatAngleStatus').textContent = [...status, ...warn].join('　·　');
+  const reps = result?.reps ?? [];
+  for (let i = 0; i < reps.length; i++) {
+    const l = L?.ok ? L.reps[i] : undefined, r = R?.ok ? R.reps[i] : undefined;
+    const tr = document.createElement('tr');
+    const cells = [String(i+1), num(l?.ap), num(l?.ml), num(l?.heading), num(r?.ap), num(r?.ml), num(r?.heading),
+      `${num(l?.back)} / ${num(r?.back)}`, num(l?.hold ?? r?.hold, 2)];
+    for (const v of cells) { const td = document.createElement('td'); td.textContent = v; tr.append(td); }
+    rows.append(tr);
+  }
 }
 
 export function initSquat() {
   const cv=$<HTMLCanvasElement>('squatTimeline'); if (!cv) return;
-  $('squatVersion').textContent=`模型 v${modelVersion} · ${HZ} Hz`;
+  initSquatScore(renderSquat);
+  $('squatVersion').textContent=`分段模型 v${modelVersion} · ${HZ} Hz`;
   $('squatRun').onclick=()=>void run();
   $('squatCancel').onclick=()=>{reset();message='预测已取消。';renderSquat();};
   new ResizeObserver(drawSquat).observe(cv);

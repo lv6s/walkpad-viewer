@@ -7,27 +7,30 @@ import sys
 from pathlib import Path
 
 from .vision_actions import LiveActions
-from .vision_identity import PersonIdentity, load_encoder
+from .vision_identity import BREAK_GAP, PersonIdentity, load_encoder
 
 VISION = Path(__file__).resolve().parents[1] / 'runtime' / 'vision'
 WEIGHT_HASH = 'a083adb42303728ae14c4bd6bd56d80da46f82fb2564dbd6f31dcc92ea321646'
 HEADER = struct.Struct('!Id')
 MAX_FRAME = 1024 * 1024
-IDENTITY_MODES = ('bytetrack', 'reid')
-ACTION_RULES = ('v1', 'r4')
+GPU_ID_MODE = 'tracktrack-reid'
+COLLECTION_ID_MODE = 'collection-reid'
+GPU_ID_MODES = (GPU_ID_MODE, COLLECTION_ID_MODE)
+IDENTITY_MODES = ('bytetrack', 'reid', *GPU_ID_MODES)
+ACTION_RULES = ('v1', 'r4', 'r5')
 
 
 def identity_mode():
     mode = os.environ.get('WALKPAD_VISION_ID_MODEL', 'bytetrack').strip().lower()
     if mode not in IDENTITY_MODES:
-        raise ValueError('跨帧身份模式 WALKPAD_VISION_ID_MODEL 只支持 bytetrack 或 reid')
+        raise ValueError(f'不支持的身份模式，可选：{", ".join(IDENTITY_MODES)}')
     return mode
 
 
 def action_rules():
     mode = os.environ.get('WALKPAD_VISION_ACTION_RULES', 'r4').strip().lower()
     if mode not in ACTION_RULES:
-        raise ValueError('动作规则 WALKPAD_VISION_ACTION_RULES 只支持 v1 或 r4')
+        raise ValueError(f'动作规则只支持 {", ".join(ACTION_RULES)}')
     return mode
 
 
@@ -36,7 +39,10 @@ def send(out, message):
     out.flush()
 
 
-def setup():
+def setup(mode):
+    require_gpu = os.environ.get('WALKPAD_VISION_REQUIRE_GPU') == '1'
+    if mode in GPU_ID_MODES and not require_gpu:
+        raise ValueError('TrackTrack + ReID（GPU）需选择工作站推理')
     weights = VISION / 'yolo26s-pose.pt'
     if not weights.is_file():
         raise ValueError('本机缺少视觉权重 yolo26s-pose.pt')
@@ -56,7 +62,6 @@ def setup():
 
     cv2.setNumThreads(1)
     device = 0 if torch.cuda.is_available() else 'cpu'
-    require_gpu = os.environ.get('WALKPAD_VISION_REQUIRE_GPU') == '1'
     if device == 'cpu':
         if require_gpu:
             raise ValueError('工作站 CUDA 不可用')
@@ -64,11 +69,24 @@ def setup():
     model = YOLO(str(weights))
     if model.task != 'pose':
         raise ValueError('权重不是姿态模型')
+    tracker = str(Path(__file__).with_name('vision_bytetrack.yaml'))
+    if mode in GPU_ID_MODES:
+        from .vision_tracktrack import TrackTrackReID
+
+        tracked = TrackTrackReID(cv2, VISION, device)
+
+        def infer(image):
+            result = model.predict(image, device=device, imgsz=960, conf=.10, verbose=False, classes=[0])[0]
+            return tracked.update(result)
+    else:
+        def infer(image):
+            result = model.track(image, persist=True, tracker=tracker, device=device,
+                                 imgsz=960, conf=.10, verbose=False, classes=[0])[0]
+            return result, None
+
     if require_gpu:
-        model.track(np.zeros((540, 960, 3), dtype=np.uint8), persist=True,
-                    tracker=str(Path(__file__).with_name('vision_bytetrack.yaml')),
-                    device=device, imgsz=960, conf=.10, verbose=False, classes=[0])
-    return cv2, np, model, device
+        infer(np.zeros((540, 960, 3), dtype=np.uint8))
+    return cv2, np, infer, device
 
 
 def detections(result, width, height):
@@ -108,19 +126,39 @@ def main():
     try:
         mode = identity_mode()
         rules = action_rules()
-        cv2, np, model, device = setup()
-        identity = PersonIdentity(load_encoder(cv2, VISION)) if mode == 'reid' else None
+        cv2, np, infer, device = setup(mode)
+        identity, pose_gate = None, None
+        if mode == COLLECTION_ID_MODE:
+            from .vision_session import CollectionIdentity
+
+            identity = CollectionIdentity()
+        elif mode == 'reid':
+            identity = PersonIdentity(load_encoder(cv2, VISION))
+        elif mode == GPU_ID_MODE:
+            from .vision_identity import SessionIdentity
+
+            identity = SessionIdentity()
+        if rules == 'r5' and mode != COLLECTION_ID_MODE:
+            from .vision_session import PoseGate
+
+            pose_gate = PoseGate()
+        last_seen = {}
         retention = identity.ttl if identity else 3.
-        if rules == 'r4':
+        if rules in ('r4', 'r5'):
             from .vision_rules_r4 import R4Actions
             actions = R4Actions(cv2, retention)
         else:
             actions = LiveActions(retention)
-        tracker = Path(__file__).with_name('vision_bytetrack.yaml')
-        send(out, {'type': 'ready', 'device': 'GPU' if device == 0 else 'CPU', 'rules': rules})
+        ready = {'type': 'ready', 'device': 'GPU' if device == 0 else 'CPU', 'rules': rules, 'identity': mode}
+        if mode in GPU_ID_MODES:
+            ready['reid_device'] = 'GPU'
+        send(out, ready)
         last_seq, last_t = 0, -1.
         while size := pin.read(4):
             length = int.from_bytes(size, 'big')
+            if length == 0 and mode == COLLECTION_ID_MODE:
+                send(out, identity.review())
+                return
             if not HEADER.size < length <= MAX_FRAME:
                 raise ValueError('识别帧大小无效')
             packet = pin.read(length)
@@ -133,15 +171,29 @@ def main():
             if image is None:
                 raise ValueError('识别帧不是有效图片')
             h, w = image.shape[:2]
-            result = model.track(image, persist=True, tracker=str(tracker), device=device,
-                                 imgsz=960, conf=.10, verbose=False, classes=[0])[0]
+            result, features = infer(image)
             state = detections(result, w, h)
-            if identity is not None:
+            pending_count = 0
+            recovered = set()
+            if pose_gate is not None:
+                state, _, pending_count = pose_gate.frame(t, image, state)
+            if mode == COLLECTION_ID_MODE:
+                state, recovered, pending_count = identity.resolve(t, image, state, features)
+            elif mode == GPU_ID_MODE:
+                state, recovered = identity.resolve(t, image, state, [features[key] for key, _, _ in state])
+                pending_count += len(identity.pending)
+            elif identity is not None:
                 state, recovered = identity.resolve(t, image, state)
-                actions.reset(recovered)
-            people = (actions.frame(t, image, state) if rules == 'r4'
+            if rules == 'r5':
+                last_seen = {pid: at for pid, at in last_seen.items() if t - at <= retention}
+                for pid, _, _ in state:
+                    if t - last_seen.get(pid, t) > BREAK_GAP:
+                        recovered.add(pid)
+                    last_seen[pid] = t
+            actions.reset(recovered)
+            people = (actions.frame(t, image, state) if rules in ('r4', 'r5')
                       else actions.frame(t, state))
-            send(out, {'type': 'result', 'seq': seq, 't': t, 'people': people})
+            send(out, {'type': 'result', 'seq': seq, 't': t, 'people': people, 'pending_count': pending_count})
             last_seq, last_t = seq, t
     except Exception as exc:
         if isinstance(exc, ImportError):
