@@ -6,7 +6,6 @@ import struct
 import sys
 from pathlib import Path
 
-from .vision_actions import LiveActions
 from .vision_identity import BREAK_GAP, PersonIdentity, load_encoder
 
 VISION = Path(__file__).resolve().parents[1] / 'runtime' / 'vision'
@@ -17,7 +16,9 @@ GPU_ID_MODE = 'tracktrack-reid'
 COLLECTION_ID_MODE = 'collection-reid'
 GPU_ID_MODES = (GPU_ID_MODE, COLLECTION_ID_MODE)
 IDENTITY_MODES = ('bytetrack', 'reid', *GPU_ID_MODES)
-ACTION_RULES = ('v1', 'r4', 'r5')
+LIVE_RULES = 'live'
+DEFAULT_RULES = 'r10'
+ACTION_RULES = (DEFAULT_RULES, LIVE_RULES)
 
 
 def identity_mode():
@@ -28,7 +29,7 @@ def identity_mode():
 
 
 def action_rules():
-    mode = os.environ.get('WALKPAD_VISION_ACTION_RULES', 'r4').strip().lower()
+    mode = os.environ.get('WALKPAD_VISION_ACTION_RULES', DEFAULT_RULES).strip().lower()
     if mode not in ACTION_RULES:
         raise ValueError(f'动作规则只支持 {", ".join(ACTION_RULES)}')
     return mode
@@ -138,17 +139,20 @@ def main():
             from .vision_identity import SessionIdentity
 
             identity = SessionIdentity()
-        if rules == 'r5' and mode != COLLECTION_ID_MODE:
+        if mode != COLLECTION_ID_MODE:
             from .vision_session import PoseGate
 
             pose_gate = PoseGate()
         last_seen = {}
         retention = identity.ttl if identity else 3.
-        if rules in ('r4', 'r5'):
-            from .vision_rules_r4 import R4Actions
-            actions = R4Actions(cv2, retention)
+        if rules == LIVE_RULES:
+            from .vision_rules_live import LiveRules
+
+            actions = LiveRules(cv2, retention)
         else:
-            actions = LiveActions(retention)
+            from .vision_rules_r10 import R10Actions
+
+            actions = R10Actions(cv2, retention)
         ready = {'type': 'ready', 'device': 'GPU' if device == 0 else 'CPU', 'rules': rules, 'identity': mode}
         if mode in GPU_ID_MODES:
             ready['reid_device'] = 'GPU'
@@ -184,20 +188,18 @@ def main():
                 pending_count += len(identity.pending)
             elif identity is not None:
                 state, recovered = identity.resolve(t, image, state)
-            if rules == 'r5':
-                last_seen = {pid: at for pid, at in last_seen.items() if t - at <= retention}
-                for pid, _, _ in state:
-                    if t - last_seen.get(pid, t) > BREAK_GAP:
-                        recovered.add(pid)
-                    last_seen[pid] = t
+            last_seen = {pid: at for pid, at in last_seen.items() if t - at <= retention}
+            for pid, _, _ in state:
+                if t - last_seen.get(pid, t) > BREAK_GAP:
+                    recovered.add(pid)
+                last_seen[pid] = t
             actions.reset(recovered)
-            people = (actions.frame(t, image, state) if rules in ('r4', 'r5')
-                      else actions.frame(t, state))
+            people = actions.frame(t, image, state)
             send(out, {'type': 'result', 'seq': seq, 't': t, 'people': people, 'pending_count': pending_count})
             last_seq, last_t = seq, t
     except Exception as exc:
         if isinstance(exc, ImportError):
-            prefix = '动作规则 r4 依赖不可用：' if rules == 'r4' else '本机视觉依赖不可用：'
+            prefix = '视觉识别依赖不可用：'
             message = prefix + str(exc)
         else:
             message = '本机识别失败：' + str(exc)

@@ -4,11 +4,13 @@ import collections
 import json
 import math
 import re
+import statistics
 import time
 import uuid
 from pathlib import Path
 
 from bleak import BleakClient, BleakScanner
+from bleak.exc import BleakError
 
 from .algorithm import Algorithm
 from .protocol import Decoder, command_packet, crc_ccitt, crc_measurement, demo_packet, slot_map
@@ -20,6 +22,7 @@ INSOLE_NOTIFY = '00002a37-0000-1000-8000-00805f9b34fb'
 INSOLE_WRITE = '0000ffe1-0000-1000-8000-00805f9b34fb'
 WT_NOTIFY = '0000ffe4-0000-1000-8000-00805f9a34fb'
 WT_WRITE = '0000ffe9-0000-1000-8000-00805f9a34fb'
+WT_SERVICE = '0000ffe5-0000-1000-8000-00805f9a34fb'
 
 # 位置 -> (显示名, 脚别)；只有左右脚背带脚别进左右脚算法，其余位置照常采集与零偏
 PLACEMENTS = {'leftInstep':('左脚背','l'),'rightInstep':('右脚背','r'),
@@ -33,6 +36,8 @@ FOOT_PLACEMENT = {'l':'leftInstep','r':'rightInstep'}
 ADVERTISEMENT_COMPANY_ID = 0x1111
 PRODUCT_KINDS = {1:'insole',3:'imu'}
 PRODUCT_SIDES = {1:'l',2:'r'}
+SCAN_SECONDS = 5
+SCAN_CONFIDENCE = {None:0,'name':1,'service':2,'manufacturer':3}
 
 
 def advertisement_identity(advertisement):
@@ -44,7 +49,21 @@ def advertisement_identity(advertisement):
         return None,None,None
     kind = PRODUCT_KINDS.get(data[1] >> 4)
     foot = PRODUCT_SIDES.get(data[1] & 15) if kind == 'insole' else None
-    return kind,foot,data[2:4].hex()
+    return (kind,foot,data[2:4].hex()) if kind else (None,None,None)
+
+
+def scan_identity(name, adv):
+    kind,foot,pair = advertisement_identity(adv)
+    if kind:
+        return 'insole',kind,foot,pair,'manufacturer'
+    if WT_SERVICE in (value.lower() for value in adv.service_uuids):
+        return 'wt','wt',None,None,'service'
+    upper = name.upper()
+    if re.match(r'^B?WT\d',upper):
+        return 'wt',None,None,None,'name'
+    if re.match(r'^(?:D56(?!\d)|W0\d|IMU(?:$|[-_ ]|\d))',upper):
+        return 'insole',None,None,None,'name'
+    return None,None,None,None,None
 
 
 class Capture:
@@ -56,7 +75,6 @@ class Capture:
         self.algorithm.on_decision = lambda result:self.recorder.put('decision',result)
         self.devices = {}
         self.found = {}
-        self.found_identity = {}
         self.ingress = asyncio.Queue(maxsize=10000)
         self.sequence = 0
         self.cursor = 0
@@ -80,7 +98,8 @@ class Capture:
         except (OSError,ValueError):
             saved = []
         for d in saved:
-            self._device(d['id'],d['name'],d['profile'],d.get('foot'),d.get('address',''),kind=d.get('kind'))
+            self._device(d['id'],d['name'],d['profile'],d.get('foot'),d.get('address',''),
+                         placement=d.get('placement'),label=d.get('placement_label'),kind=d.get('kind'))
 
     async def start(self):
         self.loop = asyncio.get_running_loop()
@@ -154,27 +173,40 @@ class Capture:
     async def scan(self):
         if self.source != 'direct':
             raise ValueError('先切换到电脑直连来源')
+        radio = {}
+
+        def detected(device, adv):
+            address = device.address
+            previous = radio.get(address)
+            name = (adv.local_name or '').strip() or (previous[1] if previous else '')
+            identity = scan_identity(name or (device.name or '').strip(),adv)
+            samples = previous[3] if previous else collections.deque(maxlen=7)
+            samples.append(adv.rssi)
+            # 后到的空广播不能抹掉同一次扫描已观察到的厂商/服务标识。
+            if previous and SCAN_CONFIDENCE[previous[2][4]] > SCAN_CONFIDENCE[identity[4]] and previous[2][4] != 'name':
+                identity = previous[2]
+            radio[address] = (device,name,identity,samples)
+
         async with self.connect_lock:
-            found = await BleakScanner.discover(timeout=5,return_adv=True)
-        result = []
-        for address,(device,adv) in found.items():
-            name = device.name or adv.local_name or address
-            upper = name.upper()
-            kind,foot,pair = advertisement_identity(adv)
-            if kind:
-                # 已登记广播优先：产品类型决定协议，脚位只对鞋垫有意义
-                profile = 'insole'
-            elif upper.startswith('WT'):
-                kind,profile = 'wt','wt'
-            elif upper.startswith(('IMU','W0','D56')):
-                # 广播未登记时不冒认独立 IMU，只按名称给出鞋垫协议，缺压通道靠实采确认
-                kind,profile = None,'insole'
-            else:
-                kind,profile = 'wt','wt'
-            self.found[address] = device
-            self.found_identity[address] = (kind,foot,pair)
-            result.append(dict(address=address,name=name,rssi=adv.rssi,profile=profile,kind=kind,foot=foot,pair_id=pair))
-        return sorted(result,key=lambda x:x['rssi'],reverse=True)
+            try:
+                async with BleakScanner(detection_callback=detected):
+                    await asyncio.sleep(SCAN_SECONDS)
+            except (BleakError,OSError) as exc:
+                self.log('蓝牙扫描失败：'+str(exc),'warning')
+                raise ValueError('无法扫描蓝牙，请确认电脑蓝牙已开启、适配器可用，再重试') from exc
+            registered = {d['address']:d for d in self.devices.values() if d['source'] == 'direct'}
+            found = {}
+            for address,(device,name,identity,samples) in radio.items():
+                saved = registered.get(address)
+                profile,kind,foot,pair,evidence = identity
+                if saved and evidence not in ('manufacturer','service'):
+                    profile,kind,evidence = saved['profile'],saved['kind'],'saved'
+                name = name or (device.name or '').strip() or (saved['name'] if saved else '') or '未广播名称'
+                row = dict(address=address,name=name,rssi=round(statistics.median(samples)),profile=profile,
+                           kind=kind,foot=foot,pair_id=pair,evidence=evidence,connected=bool(saved and saved['connected']))
+                found[address] = (device,row)
+            self.found = found
+        return sorted((row for _,row in found.values()),key=lambda row:(-row['rssi'],row['address']))
 
     async def connect(self, address, profile, placement=None, key=None, label=None, kind=None):
         if self.source != 'direct':
@@ -183,43 +215,56 @@ class Capture:
             raise ValueError('invalid profile')
         if kind not in (None,'insole','imu','wt'):
             raise ValueError('invalid kind')
-        known,adv_foot,_ = self.found_identity.get(address,(None,None,None))
-        kind = kind or known or ('wt' if profile == 'wt' else 'insole')
-        profile = 'wt' if kind == 'wt' else 'insole'
-        placement, text, foot = self.resolve_placement(placement or adv_foot, label)
-        if kind == 'imu':
-            # 独立 IMU 无压力通道，不进左右脚步态引擎；位置只作采集标注
-            foot = None
-        for other in self.devices.values():
-            if other['connected'] and other['source'] == 'direct' and other['address'] == address:
-                if other['profile'] != profile or other['placement'] != placement:
-                    raise ValueError('该设备已连接；更换协议或位置前先停止记录并断开')
-                return self.public(other)
-            if other['connected'] and other['placement'] == placement and other['address'] != address:
-                raise ValueError('该位置已有设备连接')
         async with self.connect_lock:
-            device = self.found.get(address)
+            device,scan = self.found.get(address,(None,{}))
+            if scan.get('evidence') in ('manufacturer','service'):
+                kind = scan['kind']
+            kind = kind or ('wt' if profile == 'wt' else 'insole')
+            profile = 'wt' if kind == 'wt' else 'insole'
+            placement, text, foot = self.resolve_placement(placement or scan.get('foot'),label)
+            if kind == 'imu':
+                foot = None
+            for other in self.devices.values():
+                if other['connected'] and other['source'] == 'direct' and other['address'] == address:
+                    if other['profile'] != profile or other['placement'] != placement:
+                        raise ValueError('该设备已连接；更换协议或位置前先停止记录并断开')
+                    return self.public(other)
+                if other['connected'] and other['placement'] == placement and other['address'] != address:
+                    raise ValueError('该位置已有设备连接')
             if not device:
                 device = await BleakScanner.find_device_by_address(address,timeout=8)
             if not device:
                 raise ValueError('未扫描到设备，请确认上电且未被其他程序占用')
-            d = self._device(key or profile+':'+address,device.name or address,profile,foot,address,placement=placement,label=text,kind=kind)
-            if d['connected']:
-                return self.public(d)
-            d['manual'] = False
-            d['generation'] += 1
-            generation = d['generation']
-            d['connection'] = uuid.uuid4().hex
+            d = None
+            generation = None
             def gone(client):
-                self.loop.call_soon_threadsafe(lambda:asyncio.create_task(self._lost(d,generation)))
+                if d is not None and d['connected'] and generation == d['generation']:
+                    self.loop.call_soon_threadsafe(lambda:asyncio.create_task(self._lost(d,generation)))
             client = BleakClient(device,disconnected_callback=gone,timeout=20)
-            d['client'] = client
-            d['decoder'] = Decoder(profile)
-            d['control_buffer'] = b''
-            d['format'] = None
-            d['format_status'] = '未回读，单位未知'
             try:
                 await client.connect()
+                notify = client.services.get_characteristic(INSOLE_NOTIFY if profile == 'insole' else WT_NOTIFY)
+                char = client.services.get_characteristic(INSOLE_WRITE if profile == 'insole' else WT_WRITE)
+                if char and not set(char.properties).intersection(('write','write-without-response')):
+                    char = None
+                # 标准心率设备也有 2A37，不能单凭它确认自研协议。
+                if not notify or not set(notify.properties).intersection(('notify','indicate')) or (profile == 'insole' and not char):
+                    protocol_name = '自研鞋垫 / 独立 IMU' if profile == 'insole' else '维特 BLE'
+                    raise ValueError('设备未提供 '+protocol_name+' 所需的蓝牙通道，请检查设备和所选协议')
+                name = scan.get('name')
+                if not name or name == '未广播名称':
+                    name = device.name or address
+                d = self._device(key or profile+':'+address,name,profile,foot,address,placement=placement,label=text,kind=kind)
+                d['manual'] = False
+                d['generation'] += 1
+                generation = d['generation']
+                d['connection'] = uuid.uuid4().hex
+                d['client'] = client
+                d['decoder'] = Decoder(profile)
+                d['control_buffer'] = b''
+                d['format'] = None
+                d['format_status'] = '未回读，单位未知'
+                d['write_char'] = char
                 d['connected'] = True; d['reconnecting'] = False
                 self.emit(d,'connect',dict(name=d['name'],address=address))
                 def receive(sender, data):
@@ -227,9 +272,7 @@ class Capture:
                     epoch = time.time()*1000
                     if generation == d['generation']:
                         self.loop.call_soon_threadsafe(self.submit,d['id'],bytes(data),receipt,epoch,None,None,False,generation)
-                await client.start_notify(INSOLE_NOTIFY if profile == 'insole' else WT_NOTIFY,receive)
-                char = client.services.get_characteristic(INSOLE_WRITE if profile == 'insole' else WT_WRITE)
-                d['write_char'] = char
+                await client.start_notify(notify,receive)
                 if profile == 'insole' and char and any(x in char.properties for x in ('notify','indicate')):
                     def reply(sender,data):
                         if generation == d['generation']:
@@ -238,7 +281,9 @@ class Capture:
                 self.persist_devices()
                 self.log('已连接 '+d['name'])
             except Exception:
-                d['connected'] = False
+                if d is not None:
+                    d['connected'] = False
+                    d['client'] = d['write_char'] = None
                 if client.is_connected:
                     await client.disconnect()
                 raise

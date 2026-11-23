@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from .vision_worker import COLLECTION_ID_MODE, GPU_ID_MODES, HEADER, MAX_FRAME, VISION
+from .vision_worker import COLLECTION_ID_MODE, DEFAULT_RULES, GPU_ID_MODES, HEADER, MAX_FRAME, VISION
 from .vision_workstation import PROTOCOLS, close, connect, message, send
 
 
@@ -66,7 +66,7 @@ class VisionBridge:
         self.active = True
         target = ws.query_params.get('target', 'local')
         id_model = ws.query_params.get('id_model', 'bytetrack')
-        action_rules = ws.query_params.get('action_rules', 'r4')
+        action_rules = ws.query_params.get('action_rules', DEFAULT_RULES)
         label = '工作站' if target == 'workstation' else '本机'
         try:
             await ws.accept(subprotocol='walkpad-vision')

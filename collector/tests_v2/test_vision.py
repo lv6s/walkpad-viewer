@@ -105,14 +105,26 @@ def test_bridge_auth_frames_and_reconnect(monkeypatch):
                     pass
 
 
-def test_tracktrack_reid_alpn_selection_keeps_legacy():
-    from backend.vision_workstation import PROTOCOLS, selection
-    assert selection('walkpad-vision-tracktrack-reid/1') == ('tracktrack-reid', 'v1')
-    assert selection('walkpad-vision-tracktrack-reid-r4/1') == ('tracktrack-reid', 'r4')
-    assert selection('walkpad-vision-reid-r4/1') == ('reid', 'r4')
-    assert selection('walkpad-vision-r4/1') == ('bytetrack', 'r4')
-    assert selection(None) == ('bytetrack', 'v1')
-    assert ('tracktrack-reid', 'r4') in PROTOCOLS and ('tracktrack-reid', 'v1') in PROTOCOLS
+def test_action_protocols_upgrade_r5_clients_without_running_retired_rules():
+    from backend.vision_workstation import ID_MODELS, PROTOCOLS, selection
+    assert set(PROTOCOLS) == {(mode, rule) for mode in ID_MODELS for rule in ('r10', 'live')}
+    for pair, protocol in PROTOCOLS.items():
+        assert selection(protocol) == pair
+    assert selection('walkpad-vision-r5/1') == ('bytetrack', 'r10')
+    assert selection('walkpad-vision-collection-reid-r5/1') == ('collection-reid', 'r10')
+    assert selection('walkpad-vision-r4/1') is None
+    assert selection(None) is None
+
+
+@pytest.mark.parametrize('snapshot, expected', [
+    ('0,GPU-a,914,47490,0\n1,GPU-b,531,47873,0', (1, 'GPU-b')),
+    ('0,GPU-a,0,49000,44\n1,GPU-b,531,47873,0', (1, 'GPU-b')),
+    ('0,GPU-a,100,4096,0\n1,GPU-b,4096,46100,0', None),
+    ('0,GPU-a,100,45000,N/A\n1,GPU-b,1000,45000,4\n2,GPU-c,888,45000,7', (1, 'GPU-b')),
+])
+def test_gpu_selection_allows_light_residency_but_avoids_busy_cards(snapshot, expected):
+    from backend.vision_workstation import select_gpu
+    assert select_gpu(snapshot) == expected
 
 
 @pytest.mark.parametrize('override', [None, 'default', 'custom-tls', 'custom-mutual'])
@@ -129,7 +141,7 @@ def test_workstation_tls_client_config(monkeypatch, tmp_path, override):
             data['client_auth'] = False
         config.write_text(json.dumps(data), encoding='utf-8')
     writer = Mock()
-    writer.get_extra_info.return_value.selected_alpn_protocol.return_value = service.PROTOCOLS['collection-reid', 'r5']
+    writer.get_extra_info.return_value.selected_alpn_protocol.return_value = service.PROTOCOLS['collection-reid', 'r10']
     dial = AsyncMock(return_value=(None, writer))
     context = Mock()
     trust = Mock(return_value=context)
@@ -137,7 +149,7 @@ def test_workstation_tls_client_config(monkeypatch, tmp_path, override):
     assert real_context.check_hostname and real_context.verify_mode == ssl.CERT_REQUIRED
     monkeypatch.setattr(service.ssl, 'create_default_context', trust)
     monkeypatch.setattr(service.asyncio, 'open_connection', dial)
-    asyncio.run(service.connect(config, 'collection-reid', 'r5'))
+    asyncio.run(service.connect(config, 'collection-reid', 'r10'))
     trust.assert_called_once_with(cafile=str(tmp_path / 'tls' / 'ca.crt' if custom else service.LAN_CA))
     dial.assert_awaited_once_with(host, port, ssl=context)
     if mutual:
@@ -172,7 +184,7 @@ def test_workstation_rejects_out_of_network_before_gpu(monkeypatch):
     assert not worker.active
 
 
-@pytest.mark.parametrize('model,rules', [('reid', 'r4'), ('tracktrack-reid', 'r4')])
+@pytest.mark.parametrize('model,rules', [('reid', 'r10'), ('tracktrack-reid', 'r10')])
 def test_workstation_bridge_routes_and_reports_disconnect(monkeypatch, model, rules):
     import backend.vision_bridge as bridge_module
 
@@ -213,12 +225,13 @@ def test_workstation_bridge_routes_and_reports_disconnect(monkeypatch, model, ru
             assert '工作站识别连接已断开' in ws.receive_json()['message']
 
 
-def test_collection_stop_relays_review_without_turning_it_into_an_action(monkeypatch):
+@pytest.mark.parametrize('rule', ['r10', 'live'])
+def test_collection_stop_relays_review_without_turning_it_into_an_action(monkeypatch, rule):
     import backend.vision_bridge as bridge_module
 
     async def infer(reader, writer):
         try:
-            writer.write(b'{"type":"ready","identity":"collection-reid","rules":"r5"}\n')
+            writer.write((json.dumps(dict(type='ready', identity='collection-reid', rules=rule)) + '\n').encode())
             assert await reader.readexactly(4) == bytes(4)
             writer.write(b'{"type":"review","overflow":false,"tracks":[{"person_id":null,"suggested_id":2}]}\n')
             await writer.drain()
@@ -227,7 +240,7 @@ def test_collection_stop_relays_review_without_turning_it_into_an_action(monkeyp
             await writer.wait_closed()
 
     async def stub_connect(config, id_model, action_rules):
-        assert (id_model, action_rules) == ('collection-reid', 'r5')
+        assert (id_model, action_rules) == ('collection-reid', rule)
         async with await asyncio.start_server(infer, '127.0.0.1', 0) as server:
             return await asyncio.open_connection(*server.sockets[0].getsockname())
 
@@ -236,7 +249,7 @@ def test_collection_stop_relays_review_without_turning_it_into_an_action(monkeyp
     app.state.token = 'sample-secret'
     app.websocket('/ws/vision')(VisionBridge().serve)
     with TestClient(app) as client:
-        with client.websocket_connect('/ws/vision?target=workstation&id_model=collection-reid&action_rules=r5',
+        with client.websocket_connect(f'/ws/vision?target=workstation&id_model=collection-reid&action_rules={rule}',
                                       headers={'origin': 'http://testserver'},
                                       subprotocols=['walkpad-vision', 'sample-secret']) as ws:
             assert ws.receive_json()['type'] == 'ready'

@@ -5,6 +5,7 @@ from .action_rules import clean_mask
 from .activity_rules import runs
 from .gait_phase import classify_windows
 from .running_rebound import detect as detect_short_running
+from .personal_short_run import detect as detect_personal_short_run
 from .gait_ground import advancing_walk, bracketed_walk_gaps, continuity, grounded_walk, motion_above_own_baseline, nearby_transition, walk_edges
 
 def scale_for_motion(f, valid):
@@ -111,7 +112,9 @@ def judge(f, camera, pose, frame_rows, config):
     short_window_camera = (cam < .12) | (~np.isfinite(cam) & (f['camera_speed'] < .12))
     gait_window = ~event & f['torso_visible'] & quiet_cam
     regimes, phase, report = classify_windows(t, pose, valid, scale, gait_window, quiet_cam, stable, speed)
-    new_run, slow_conflict, new_hz, rebound = detect_short_running(t, pose, valid, gait_window & ~part, scale)
+    step_batches = []
+    new_run, slow_conflict, new_hz, rebound = detect_short_running(
+        t, pose, valid, gait_window & ~part, scale, step_batches=step_batches)
     conflicts = np.zeros(len(t),bool)
     for a,b in runs(regimes == 'running'):
         if not new_run[a:b].any() and slow_conflict[a:b].mean() >= .60:
@@ -228,4 +231,13 @@ def judge(f, camera, pose, frame_rows, config):
                                 gait_hip_oscillation_torso_ratio=float(phase['hip_oscillation'][i]) if np.isfinite(phase['hip_oscillation'][i]) else None,
                                 gait_inferred=int(bool(turn_fill[i] or edge_fill[i] or short_fill[i] or (phase['inferred'][i] and regimes[i]))),
                                 locomotion_partial=int(bool(part[i] and tag in ('walking', 'body_motion')))))
+    unresolved = np.array([r['gait_evidence'] == 'gait_type_unresolved' for r in assessments])
+    short_candidate = detect_personal_short_run(t, pose, valid, scale, step_batches,
+                                                walking_anchors | step_override, new_run,
+                                                unresolved & gait_window & ~part)
+    for i in np.flatnonzero(short_candidate):
+        assessments[i].update(activity='running',
+                              activity_reason='same_fragment_walking_running_profiles_favor_short_run',
+                              gait_evidence='personal_short_running_candidate',
+                              action_hypotheses=('running',), ambiguous_gait=1)
     return assessments, report

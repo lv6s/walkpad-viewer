@@ -6,12 +6,13 @@ import re
 import shutil
 import uuid
 import zipfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from .lab_attitude import ACC_SCALE, GYRO_SCALE, LabAttitude, measured_axes
 from .protocol import WT_HEADER, slot_map
 from .version import VERSION
 
@@ -128,7 +129,7 @@ def export_standard(path):
 
 
 # ---------------------------------------------------------------- 测量包
-# 与 labpad 导出的 lab_measurement_package.v2.3 同构：manifest.json 的 sources/outputs
+# Lab v2.5 测量包：manifest.json 的 sources/outputs
 # 指向 frames/<设备目录>/frame-00001.parquet，周期与片段写在 timeline/footer.parquet。
 # 列名、struct 六轴、目录命名都按 walkpad_measurement_core 的定义，改名会让 app 侧读包失败。
 
@@ -139,6 +140,7 @@ LAB_V2_COLUMNS = {
         'deviceTimeRaw':'VARCHAR','deviceTimeDefinition':'VARCHAR','deviceSequence':'BIGINT',
         'timeUs':'BIGINT','deviceTimeUs':'BIGINT','nativeReceiveNs':'BIGINT','connectionEpoch':'BIGINT',
         'periodId':'VARCHAR','effectiveElapsedUs':'BIGINT','validity':'VARCHAR',
+        'pitchDeg':'DOUBLE','sideTiltDeg':'DOUBLE','relativeHeadingDeg':'DOUBLE','referenceId':'VARCHAR',
         'pressureAdc':'INTEGER[]',
         'accelerationRaw':'STRUCT(x INTEGER,y INTEGER,z INTEGER)',
         'accelerationG':'STRUCT(x DOUBLE,y DOUBLE,z DOUBLE)',
@@ -173,6 +175,9 @@ LAB_V2_COLUMNS = {
 }
 
 LAB_UNITS = {
+    'pitchDeg':'degrees about body X','sideTiltDeg':'degrees about body Y',
+    'relativeHeadingDeg':'relative yaw in degrees [-180,180]; null until tracking',
+    'referenceId':'attitude scope and generation; compare headings only within the same source and reference',
     'pressureAdc':'ADC count','accelerationRaw':'device count','accelerationG':'g including gravity',
     'angularVelocityRaw':'device count','angularVelocityDps':'deg/s',
     'imuCalibration.angularVelocityCompensatedDps':'deg/s','imuCalibration.gyroBiasDps':'deg/s in output axes',
@@ -204,6 +209,7 @@ PKG_FRAME_SCHEMA = pa.schema([
     ('deviceTimeRaw',pa.string()),('deviceTimeDefinition',pa.string()),('deviceSequence',pa.int64()),
     ('timeUs',pa.int64()),('deviceTimeUs',pa.int64()),('nativeReceiveNs',pa.int64()),('connectionEpoch',pa.int64()),
     ('periodId',pa.string()),('effectiveElapsedUs',pa.int64()),('validity',pa.string()),
+    ('pitchDeg',pa.float64()),('sideTiltDeg',pa.float64()),('relativeHeadingDeg',pa.float64()),('referenceId',pa.string()),
     ('pressureAdc',pa.list_(pa.int32())),
     ('accelerationRaw',_tri(pa.int32())),('accelerationG',_tri(pa.float64())),
     ('angularVelocityRaw',_tri(pa.int32())),('angularVelocityDps',_tri(pa.float64())),
@@ -211,7 +217,7 @@ PKG_FRAME_SCHEMA = pa.schema([
                                  ('accelerationG',_tri(pa.float64())),('angularVelocityCompensatedDps',_tri(pa.float64())),
                                  ('gyroBiasDps',_tri(pa.float64())),('accelerationCompensated',pa.bool_())])),
     ('temperatureRaw',pa.int32()),('temperatureCelsius',pa.float64()),
-    ('magneticRaw',_tri(pa.int32())),('magneticMicroTesla',_tri(pa.float64())),
+    ('magneticRaw',_tri(pa.int32())),('magneticMicrotesla',_tri(pa.float64())),
     ('quaternionRaw',_quad(pa.int32())),('quaternion',_quad(pa.float64())),
 ])
 
@@ -225,7 +231,8 @@ def _tri_of(values):
 def _device_stamp(ms):
     if ms is None:
         return None
-    return datetime.fromtimestamp(ms/1000).strftime('%Y%m%d%H%M%S')+'%03d' % int(ms % 1000)
+    seconds, millis = divmod(round(ms),1000)
+    return datetime.fromtimestamp(seconds,timezone.utc).strftime('%Y%m%d%H%M%S')+'%03d' % millis
 
 
 def _lab_placement(value, kind, foot=None):
@@ -277,7 +284,7 @@ def _package_source(row, known, used):
                 directory=_lab_directory(family,name,address,used),
                 pressure=kind != 'imu',
                 topology='d56-14x5-56-legacy-v1' if row.get('sensor_topology') == 'v1' else 'd56-14x5-56-side-mirrored-candidate-v3',
-                rows=0,part=0,pending=[],index={})
+                rows=0,part=0,pending=[],index={},attitude={})
 
 
 def _package_row(r, src, zero, period_id):
@@ -289,8 +296,11 @@ def _package_row(r, src, zero, period_id):
     else:
         elapsed = None
         device_us = None
-    phys = r['imu_physical_values'] or []
     raw = r['imu_raw_values'] or []
+    # Packaged physical values use the Lab scaling; live channels and raw records stay untouched.
+    acc_raw, gyro_raw = _tri_of(raw[:3]), _tri_of(raw[3:6])
+    acc = measured_axes(raw[:3],ACC_SCALE) if acc_raw is not None else None
+    gyro = measured_axes(raw[3:6],GYRO_SCALE) if gyro_raw is not None else None
     pressure = r['pressure_raw_values'] or []
     if src['pressure'] and pressure:
         pressure = [pressure[i] for i in slot_map(r['foot'],r['sensor_topology'])]
@@ -298,9 +308,13 @@ def _package_row(r, src, zero, period_id):
     # 偏置与角速度同在 (y,-x,z) 输出坐标，直接相减即可，不需要再做轴变换
     bias = r.get('imu_bias_dps')
     ready = bool(r.get('imu_bias_ready')) and bias is not None and len(bias) == 3
-    compensated = [phys[3+i]-bias[i] for i in range(3)] if ready and len(phys) >= 6 else None
+    compensated = [value - offset for value, offset in zip(gyro,bias)] if ready and gyro is not None else None
     revision = int(r.get('imu_bias_revision') or 0)
     segment = r['connection']
+    attitude = src['attitude'].get(segment)
+    if attitude is None:
+        attitude = src['attitude'][segment] = LabAttitude(f'{src["sourceId"]}/{segment}')
+    pitch, side, heading, reference = attitude.add(raw,device_us) or (None,None,None,None)
     index = src['index'].get(segment,0)
     src['index'][segment] = index+1
     src['rows'] += 1
@@ -312,14 +326,15 @@ def _package_row(r, src, zero, period_id):
                 nativeReceiveNs=int(round(r['receipt_monotonic_ms']*1e6)),connectionEpoch=0,
                 periodId=period_id,effectiveElapsedUs=elapsed,
                 validity='valid' if elapsed is not None else 'unknown',
+                pitchDeg=pitch,sideTiltDeg=side,relativeHeadingDeg=heading,referenceId=reference,
                 pressureAdc=[int(x) for x in pressure] if src['pressure'] else None,
-                accelerationRaw=_tri_of(raw[:3]),accelerationG=_tri_of(phys[:3]),
-                angularVelocityRaw=_tri_of(raw[3:6]),angularVelocityDps=_tri_of(phys[3:6]),
+                accelerationRaw=acc_raw,accelerationG=_tri_of(acc),
+                angularVelocityRaw=gyro_raw,angularVelocityDps=_tri_of(gyro),
                 # 偏置来自采集时的在线静止估计，逐帧冻结；没有偏置的帧不拿零值冒充
                 imuCalibration=dict(status='ready' if ready else 'uncalibrated',
                                     initializationId='%s-bias-%d' % (src['sourceId'],revision) if ready else None,
                                     biasRevision=revision if ready else 0,
-                                    accelerationG=_tri_of(phys[:3]),
+                                    accelerationG=_tri_of(acc),
                                     angularVelocityCompensatedDps=_tri_of(compensated) if compensated else None,
                                     gyroBiasDps=_tri_of(bias) if ready else None,
                                     accelerationCompensated=False),
@@ -488,7 +503,8 @@ def export_package(path):
         guide = [
             '设备目录对照表',
             'frames/ 存放标准帧，evidence/ 存放对应证据。sourceId 是帧中使用的数据源编号。',
-            '角速度原值 angularVelocityDps 和原始六轴不变；补偿结果见同帧 imuCalibration.angularVelocityCompensatedDps（°/s）。',
+            '测量包按 Lab 换算原始六轴；在线偏置补偿结果见同帧 imuCalibration.angularVelocityCompensatedDps（°/s）。',
+            '姿态由各连接段的原始六轴和设备采样时间重算；航向未跟踪时为空，只在同一 sourceId、同一 referenceId 内比较。',
             'imuCalibration.gyroBiasDps 是该帧实际采用的三轴零偏（输出坐标 °/s）；biasRevision 在重连、偏置跳变或复位时递增。',
             'imuCalibration.accelerationG 仅透传加速度（g），accelerationCompensated=false；不可用结果为 null。',
             '偏置由采集时的在线静止估计得到，工作台不保存静置原件：initializationId 是偏置会话标识（<sourceId>-bias-<biasRevision>），不对应 calibration/ 原件，manifest.calibrationOriginals 为空；偏置未就绪的帧 status 为 uncalibrated，补偿与偏置列为 null。',
@@ -501,7 +517,7 @@ def export_package(path):
         outputs.append(dict(path='设备目录对照.txt',bytes=(staging/'设备目录对照.txt').stat().st_size,
                             sha256=hashlib.sha256((staging/'设备目录对照.txt').read_bytes()).hexdigest()))
         manifest = dict(
-            schemaVersion='lab_measurement_package.v2.3',recordId=uuid.uuid4().hex.upper()[:26],
+            schemaVersion='lab_measurement_package.v2.5',recordId=uuid.uuid4().hex.upper()[:26],
             title=meta.get('session_id'),inputManifestId=meta.get('session_id'),
             normalizationVersion='lab-normalization.1',
             sources=[dict(sourceId=s['sourceId'],deviceFamily=s['family'],placement=s['placement'],

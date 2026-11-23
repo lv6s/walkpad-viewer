@@ -5,17 +5,96 @@ import struct
 import time
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pyarrow.parquet as pq
 import pytest
 from fastapi.testclient import TestClient
 
 from backend.app import create_app
+from backend import capture as capture_module
 from backend.capture import Capture
 from backend.exports import export_standard, export_txt
 from backend.phone import Phone, validate
 from backend.protocol import Decoder, RAW_V1, RAW_V2, command_packet, demo_packet, slot_map
 from backend.storage import Recorder
+
+
+def test_ble_scan_classifies_evidence_and_replaces_results(tmp_path,monkeypatch):
+    c = Capture(tmp_path)
+    c._device('old','Old WT','wt',None,'saved',placement='rightWrist')
+
+    def advertisement(address,name='',rssi=-65,data=b'',uuids=(),cached=None):
+        return SimpleNamespace(address=address,name=cached),SimpleNamespace(local_name=name,rssi=rssi,service_uuids=uuids,manufacturer_data={0x1111:data})
+
+    packets = [advertisement('unknown','ESLinker',-41),advertisement('unnamed',rssi=-49),
+               advertisement('insole',data=b'\x01\x12\x34\x56',rssi=-60),
+               advertisement('insole','D56-01',-62,cached='WT old name'),advertisement('insole',rssi=-31),
+               advertisement('imu','IMU',data=b'\x01\x32\x12\x34'),
+               advertisement('wt_service',uuids=(capture_module.WT_SERVICE.upper(),)),
+               advertisement('wt_name','WT901BLE68',cached='Stale name'),
+               advertisement('old_insole','W01234'),advertisement('saved'),
+               advertisement('not_wt','WTHome'),advertisement('not_imu','iMusic'),
+               advertisement('invalid','',data=b'\x01\x91\x00\x00')]
+
+    class Scanner:
+        def __init__(self,detection_callback): self.detected = detection_callback
+        async def __aenter__(self):
+            for packet in packets: self.detected(*packet)
+            return self
+        async def __aexit__(self,*exc): pass
+
+    monkeypatch.setattr(capture_module,'BleakScanner',Scanner)
+    monkeypatch.setattr(capture_module,'SCAN_SECONDS',0)
+    rows = asyncio.run(c.scan())
+    result = {item['address']:item for item in rows}
+    assert len(result) == len(rows) == 11
+    assert rows[0]['address'] == 'unknown'
+    assert result['unknown']['profile'] is result['unknown']['kind'] is None
+    assert result['unnamed']['name'] == '未广播名称'
+    assert result['insole'] == dict(address='insole',name='D56-01',rssi=-60,profile='insole',kind='insole',foot='r',pair_id='3456',evidence='manufacturer',connected=False)
+    assert result['imu']['kind'] == 'imu' and result['imu']['foot'] is None
+    assert result['wt_service']['kind'] == 'wt' and result['wt_service']['evidence'] == 'service'
+    assert result['wt_name']['name'] == 'WT901BLE68' and result['wt_name']['kind'] is None and result['wt_name']['profile'] == 'wt'
+    assert result['old_insole']['profile'] == 'insole' and result['old_insole']['kind'] is None
+    assert result['saved']['kind'] == 'wt' and result['saved']['evidence'] == 'saved'
+    assert all(result[key]['profile'] is None for key in ('not_wt','not_imu','invalid'))
+    packets.clear()
+    assert asyncio.run(c.scan()) == [] and not c.found
+
+
+def test_ble_connect_checks_gatt_before_registering(tmp_path,monkeypatch):
+    seen = []
+    characteristics = {capture_module.INSOLE_NOTIFY:SimpleNamespace(properties=['notify'])}
+
+    class Client:
+        def __init__(self,device,disconnected_callback,timeout):
+            self.callback = disconnected_callback
+            self.is_connected = False
+            self.services = SimpleNamespace(get_characteristic=characteristics.get)
+        async def connect(self): self.is_connected = True
+        async def disconnect(self):
+            self.is_connected = False
+            self.callback(self)
+        async def start_notify(self,char,callback): seen.append(char)
+
+    monkeypatch.setattr(capture_module,'BleakClient',Client)
+
+    async def run():
+        c = Capture(tmp_path)
+        raw_device = SimpleNamespace(name='Raw name')
+        c.found['device'] = (raw_device,dict(name='Chosen device',kind=None,evidence=None))
+        with pytest.raises(ValueError,match='所需的蓝牙通道'):
+            await c.connect('device','insole','leftAnkle',kind='imu')
+        assert not c.devices and not seen
+        characteristics[capture_module.INSOLE_WRITE] = SimpleNamespace(properties=['write-without-response'])
+        d = await c.connect('device','insole','leftAnkle',kind='imu')
+        assert d['connected'] and d['kind'] == 'imu' and d['name'] == 'Chosen device'
+        assert seen == [characteristics[capture_module.INSOLE_NOTIFY]]
+        saved = Capture(tmp_path).devices[d['id']]
+        assert saved['placement'] == 'leftAnkle' and saved['kind'] == 'imu'
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize('profile',['insole','wt'])

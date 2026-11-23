@@ -1,8 +1,4 @@
-"""实时动作规则 v4.9.8-r4：在滚动窗口上复用离线规则代码。
-
-离线版按整段视频估计基线，这里只能用最近可见窗口，因此同一动作的候选/确认时机
-可能与离线成片不同；判据代码本身与 r4 一致。
-"""
+"""v4.9.8-r10 的实时窗口适配。"""
 
 import json
 from collections import deque
@@ -10,15 +6,10 @@ from pathlib import Path
 
 import numpy as np
 
-from .rules_r4 import action_features as features
-from .rules_r4 import action_rules as rules
-from .rules_r4.action_calibration import calibrate
-from .rules_r4.gait_evidence import judge
-from .rules_r4.squat_bouts import adaptive_cycle_recovery, normalize_squat_cycles
-from .rules_r4.stair_evidence import detect as detect_stairs
+from .rules_r10 import multi_action_analysis as analysis
 
 
-CONFIG = json.loads((Path(__file__).resolve().parent / 'rules_r4' / 'action_config.json')
+CONFIG = json.loads((Path(__file__).resolve().parent / 'rules_r10' / 'action_config.json')
                     .read_text(encoding='utf-8'))
 WINDOW_S = 12.
 INTERVAL_S = 1.
@@ -26,17 +17,11 @@ LAG_S = .7
 HOLD_S = .9
 MIN_SPAN_S = 5.
 MIN_FRAMES = 24
+MAX_GAP_S = .6
 CAMERA_WIDTH = 480
 COVERAGE_FLOOR = .5
-
-TEXT = {'standing': '站立', 'walking': '走路', 'gait_walk': '走路', 'running': '跑步',
-        'squat': '深蹲', 'split_squat': '深蹲', 'stairs_up': '上楼梯', 'stairs_down': '下楼梯',
-        'stepping': '迈步', 'fast_stepping': '快速迈步', 'body_motion': '持续运动',
-        'arm_activity': '手部动作', 'bending': '俯身', 'between_reps': '组内回位',
-        'unknown': '未判定'}
-SURE = frozenset(('standing', 'walking', 'running', 'squat', 'split_squat', 'stairs_up', 'stairs_down'))
-FALLBACK = frozenset(('unknown', 'standing', 'walking', 'gait_walk', 'stepping',
-                      'fast_stepping', 'body_motion'))
+SQUAT = ('squat', 'split_squat')
+UNKNOWN = ('其他', 'unknown')
 IDENTITY = np.array([[1., 0., 0.], [0., 1., 0.]])
 
 
@@ -123,14 +108,16 @@ class Track:
         self.counted = deque(maxlen=40)
         self.seen = -1e9
         self.count = 0
-        self.label = ('未判定', 'unknown')
-        self.held = (-1e9, ('未判定', 'unknown'))
+        self.label = UNKNOWN
+        self.held = (-1e9, UNKNOWN)
         self.completed = -1e9
         self.analysed = -1e9
         self.failed = 0
 
 
-class R4Actions:
+class R10Actions:
+    """按 R10 规则分析最近的窗口，并只回报滞后一帧的结论。"""
+
     def __init__(self, cv2, retention=3., window=WINDOW_S, interval=INTERVAL_S):
         self.camera = Camera(cv2)
         self.tracks = {}
@@ -144,13 +131,16 @@ class R4Actions:
         self.index += 1
         height, width = image.shape[:2]
         self.size = (width, height)
-        self.camera.update(self.index, image, [box for _, box, _ in detections])
+        self.camera.update(self.index, image, [np.asarray(box) * [width, height, width, height]
+                                              for _, box, _ in detections])
         self.tracks = {i: p for i, p in self.tracks.items() if now - p.seen <= self.retention}
         output = []
         for identity, box, pose in detections:
             track = self.tracks.setdefault(identity, Track())
             track.seen = now
-            track.samples.append((now, pose * max(width, height), self.index))
+            pixel = pose.copy()
+            pixel[:, :2] *= max(width, height)
+            track.samples.append((now, pixel, self.index, np.asarray(box, float), float(pose[:, 2].mean())))
             while now - track.samples[0][0] > self.window:
                 track.samples.popleft()
             if now - track.analysed >= self.interval:
@@ -166,8 +156,8 @@ class R4Actions:
             if track is not None:
                 # 计数与已计数周期保留，避免同一周期在新窗口里被重复计数。
                 track.samples.clear()
-                track.held = (-1e9, ('未判定', 'unknown'))
-                track.label = ('未判定', 'unknown')
+                track.held = (-1e9, UNKNOWN)
+                track.label = UNKNOWN
                 track.analysed = -1e9
 
     def _analyze(self, track, now):
@@ -180,33 +170,28 @@ class R4Actions:
         if camera is None:
             return
         width, height = self.size
+        boxes = np.array([s[3] for s in samples], float)
+        confidence = np.array([s[4] for s in samples], float)
         try:
-            self._run(track, now, times, pose, camera, width, height)
+            self._run(track, now, times, pose, camera, width, height, boxes, confidence)
         except (ValueError, IndexError, KeyError, TypeError, np.linalg.LinAlgError):
             track.failed += 1
             if track.failed == 1:
-                track.label = ('未判定', 'unknown')
+                track.label = UNKNOWN
 
-    def _run(self, track, now, times, pose, camera, width, height):
-        f = features.pose_features(dict(time_s=times, keypoints=pose), CONFIG)
-        f = features.camera_features(f, camera, CONFIG, width, height)
-        rules.period_features(f, CONFIG)
-        local, _ = calibrate(f, CONFIG)
-        _, frames, events, _, _ = rules.classify_raw(f, local, arm_semantics=False)
-        events, _ = adaptive_cycle_recovery(f, events, frames, local)
-        assessments, _ = judge(f, camera, pose, frames, local)
-        rows = [{**row, **evidence} for row, evidence in zip(frames, assessments)]
-        normalize_squat_cycles(f, np.ones(len(times), bool), events, rows, local)
-        calm = np.isfinite(f['camera_speed']) & (f['camera_speed'] <= .16)
-        blocked = np.array([row['action_event_id'] > 0 for row in rows])
-        stairs, _, _ = detect_stairs(times, pose, f['raw_valid'], f['torso_px'], calm, blocked, height)
-        for row, tag in zip(rows, stairs):
-            if tag and row['activity'] in FALLBACK:
-                row['activity'] = str(tag)
-                row['action_hypotheses'] = ()
-        self._count(track, events, now)
-        index = max(0, min(int(np.searchsorted(times, now - LAG_S, side='right')) - 1, len(rows) - 1))
-        track.label = self._describe_row(rows[index])
+    def _run(self, track, now, times, pose, camera, width, height, boxes, confidence):
+        count = len(times)
+        step = float(np.median(np.diff(times)))
+        data = dict(time_s=times, frame_end_s=times + step, frame_index=np.arange(count),
+                    track_id=np.zeros(count, np.int64), keypoints=pose,
+                    boxes=boxes, confidence=confidence, width=float(width), height=float(height))
+        result, _ = analysis.analyze(data, camera, CONFIG, MIN_SPAN_S, MAX_GAP_S)
+        self._count(track, result['action_events'], now)
+        rows = {int(row['video_frame']): row for row in result['frame_labels']}
+        if not rows:
+            return
+        frame = int(np.searchsorted(times, now - LAG_S, side='right'))
+        track.label = self._describe_row(rows.get(max(1, min(frame, count))))
         if track.label[1] != 'unknown':
             track.held = (now, track.label)
 
@@ -225,17 +210,13 @@ class R4Actions:
 
     @staticmethod
     def _describe_row(row):
-        label = str(row['activity'])
-        if label in ('squat', 'split_squat'):
+        if str(row['activity']) in SQUAT:
             return '深蹲中', 'candidate'
-        text = TEXT.get(label, '未判定')
-        if label == 'unknown':
-            return text, 'unknown'
-        weak = (bool(row.get('action_hypotheses')) or bool(row.get('ambiguous_gait'))
-                or bool(row.get('gait_inferred')) or bool(row.get('locomotion_partial')))
-        if label.startswith('stairs_') and not row.get('stair_sequence_supported'):
-            weak = True
-        return (text, 'confirmed') if label in SURE and not weak else (text + '候选', 'candidate')
+        status = row.get('activity_status')
+        if status not in ('supported', 'candidate', 'transition'):
+            return UNKNOWN
+        text = str(row.get('annotation') or '其他')
+        return (text, 'confirmed') if status == 'supported' else (text, 'candidate')
 
     @staticmethod
     def _describe(track, now):

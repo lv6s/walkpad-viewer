@@ -53,5 +53,8 @@
   "continuity_gap_s": 0.6,
   "continuity_anchor_s": 0.35,
   "continuity_walk_motion_gap_s": 0.3,
-  "continuity_walk_candidate_anchor_s": 0.22
+  "continuity_walk_candidate_anchor_s": 0.22,
+  "person_pose_confirm_s": 0.08,
+  "person_pose_max_sample_gap_s": 0.19,
+  "person_unsupported_span_s": 0.9
 }

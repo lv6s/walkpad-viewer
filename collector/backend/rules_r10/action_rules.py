@@ -398,7 +398,7 @@ def classify_raw(f, config, *, arm_semantics=True):
 
 
 def classify(f, config):
-    from action_temporal import assemble
+    from .action_temporal import assemble
     segments, frames, events, boundaries, rejected = classify_raw(f, config)
     f['raw_segments'], f['raw_frame_labels'] = segments, frames
     segments, frames, events, boundaries = assemble(f, segments, frames, events, config, ACTIVITY_LABELS)

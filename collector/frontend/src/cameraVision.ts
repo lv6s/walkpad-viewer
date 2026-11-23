@@ -95,7 +95,8 @@ export function cameraVision(video: () => HTMLVideoElement | undefined, draw: (c
           ? ['TrackTrack/ReID', event.reid_device].filter(Boolean).join(' ')
           : identity === 'reid' ? 'ReID' : ''
         const rules = event.rules || actionRules
-        source = [event.device, mode, rules !== 'v1' ? `规则 ${rules}` : '',
+        const ruleName = rules === 'live' ? '实时分相' : `规则 ${rules}`
+        source = [event.device, mode, ruleName,
           event.server_version ? `服务 v${event.server_version}` : ''].filter(Boolean).join(' · ')
         message.value = `${source} · 等待画面`
         videoCallback = v.requestVideoFrameCallback(frame)

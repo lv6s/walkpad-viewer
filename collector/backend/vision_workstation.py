@@ -10,39 +10,33 @@ from pathlib import Path
 
 from .version import VERSION
 from .vision_worker import (
-    ACTION_RULES, COLLECTION_ID_MODE, HEADER, IDENTITY_MODES as ID_MODELS, MAX_FRAME, VISION,
+    ACTION_RULES, COLLECTION_ID_MODE, DEFAULT_RULES, HEADER, IDENTITY_MODES as ID_MODELS, MAX_FRAME, VISION,
 )
 
 DEFAULT_ENDPOINT = ('192.168.100.29', 18843)
 LAN_CA = Path(__file__).with_name('vision_lan_ca.crt')
-REID_ALPN = 'walkpad-vision-reid/1'
-R4_ALPN = 'walkpad-vision-r4/1'
-REID_R4_ALPN = 'walkpad-vision-reid-r4/1'
-TRACKTRACK_ALPN = 'walkpad-vision-tracktrack-reid/1'
-TRACKTRACK_R4_ALPN = 'walkpad-vision-tracktrack-reid-r4/1'
-PROTOCOLS = {('bytetrack', 'v1'): None, ('reid', 'v1'): REID_ALPN,
-             ('bytetrack', 'r4'): R4_ALPN, ('reid', 'r4'): REID_R4_ALPN,
-             ('tracktrack-reid', 'v1'): TRACKTRACK_ALPN,
-             ('tracktrack-reid', 'r4'): TRACKTRACK_R4_ALPN,
-             ('bytetrack', 'r5'): 'walkpad-vision-r5/1',
-             ('reid', 'r5'): 'walkpad-vision-reid-r5/1',
-             ('tracktrack-reid', 'r5'): 'walkpad-vision-tracktrack-reid-r5/1',
-             (COLLECTION_ID_MODE, 'r5'): 'walkpad-vision-collection-reid-r5/1'}
+PROTOCOLS = {(mode, rules): f'walkpad-vision-{mode}-{rules}/1'
+             for mode in ID_MODELS for rules in ACTION_RULES}
 
 
 class WorkstationError(ValueError):
     pass
 
 
+# 已发布的 r5/r6 客户端可继续连接，ready 中回报实际的规则版本。
+NEGOTIATED = {name: pair for pair, name in PROTOCOLS.items()}
+NEGOTIATED.update({f'walkpad-vision-{prefix}r5/1': (mode, DEFAULT_RULES)
+                   for mode, prefix in (('bytetrack', ''), ('reid', 'reid-'),
+                                        ('tracktrack-reid', 'tracktrack-reid-'),
+                                        (COLLECTION_ID_MODE, 'collection-reid-'))})
+NEGOTIATED.update({f'walkpad-vision-{mode}-r6/1': (mode, DEFAULT_RULES) for mode in ID_MODELS})
+
+
 def selection(protocol):
-    """把协商出的 ALPN 还原成 (ID 模型, 动作规则)。"""
-    for pair, name in PROTOCOLS.items():
-        if name == protocol:
-            return pair
-    return ('bytetrack', 'v1')
+    return NEGOTIATED.get(protocol)
 
 
-async def connect(config_path, id_model='bytetrack', action_rules='v1'):
+async def connect(config_path, id_model='bytetrack', action_rules=DEFAULT_RULES):
     if id_model not in ID_MODELS:
         raise WorkstationError('不支持的 ID 识别模型')
     if (id_model, action_rules) not in PROTOCOLS:
@@ -104,10 +98,26 @@ async def encode(writer, payload):
     await send(writer, (json.dumps(payload, ensure_ascii=True, allow_nan=False) + '\n').encode('ascii'))
 
 
+def select_gpu(snapshot):
+    eligible = []
+    for row in snapshot.splitlines():
+        fields = [v.strip() for v in row.split(',')]
+        if len(fields) != 5 or not fields[1].startswith('GPU-'):
+            continue
+        try:
+            index = int(fields[0])
+            used, free, utilization = map(int, fields[2:])
+        except ValueError:
+            continue
+        if 0 <= utilization < 10 and 0 <= used <= 2048 and free >= 8192:
+            eligible.append((utilization, used, -free, index, fields[1]))
+    return min(eligible)[-2:] if eligible else None
+
+
 async def available_gpu():
     proc = await asyncio.create_subprocess_exec(
-        'nvidia-smi', '--query-gpu=index,memory.used,utilization.gpu', '--format=csv,noheader,nounits',
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        'nvidia-smi', '--query-gpu=index,uuid,memory.used,memory.free,utilization.gpu',
+        '--format=csv,noheader,nounits', stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), 3.)
     finally:
@@ -117,15 +127,13 @@ async def available_gpu():
             await proc.wait()
     if proc.returncode:
         raise OSError('nvidia-smi failed')
-    cards = [tuple(map(int, line.split(','))) for line in out.decode('ascii').splitlines()]
-    idle = [(used, index) for index, used, utilization in cards if used < 512 and utilization < 10]
-    return min(idle)[1] if idle else None
+    return select_gpu(out.decode('ascii'))
 
 
 def service_context(tls, *, require_client_cert=True):
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
-    context.set_alpn_protocols([name for name in PROTOCOLS.values() if name])
+    context.set_alpn_protocols(list(NEGOTIATED))
     context.load_cert_chain(tls / 'server.crt', tls / 'server.key')
     if require_client_cert:
         context.load_verify_locations(cafile=str(tls / 'ca.crt'))
@@ -155,6 +163,14 @@ class VisionService:
                 finally:
                     await close(writer)
                 return
+        protocol = writer.get_extra_info('ssl_object').selected_alpn_protocol()
+        selected = selection(protocol)
+        if selected is None:
+            try:
+                await encode(writer, {'type': 'error', 'message': '工作站仅支持 r10 和实时分相，请更新采集器'})
+            finally:
+                await close(writer)
+            return
         if self.active:
             try:
                 await encode(writer, {'type': 'error', 'message': '工作站已有一个实时识别会话'})
@@ -164,21 +180,26 @@ class VisionService:
         self.active = True
         proc = None
         try:
-            gpu = await available_gpu()
-            if gpu is None:
-                await encode(writer, {'type': 'error', 'message': '工作站暂无空闲 GPU，请稍后重试或切换到本机'})
+            try:
+                gpu = await available_gpu()
+            except (OSError, TimeoutError) as exc:
+                print(f'Vision GPU query: {type(exc).__name__}: {exc}', file=sys.stderr, flush=True)
+                await encode(writer, {'type': 'error', 'message': '工作站无法查询 GPU 状态，请检查 NVIDIA 驱动或稍后重试'})
                 return
-            protocol = writer.get_extra_info('ssl_object').selected_alpn_protocol()
-            id_model, action_rules = selection(protocol)
+            if gpu is None:
+                await encode(writer, {'type': 'error', 'message': '工作站暂无符合负载与显存要求的 GPU，请稍后重试或切换到本机'})
+                return
+            index, uuid = gpu
+            id_model, action_rules = selected
             proc = await asyncio.create_subprocess_exec(
                 sys.executable, '-u', '-m', 'backend.vision_worker',
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                env={**os.environ, 'CUDA_VISIBLE_DEVICES': str(gpu), 'WALKPAD_VISION_REQUIRE_GPU': '1',
+                env={**os.environ, 'CUDA_VISIBLE_DEVICES': uuid, 'WALKPAD_VISION_REQUIRE_GPU': '1',
                      'WALKPAD_VISION_ID_MODEL': id_model, 'WALKPAD_VISION_ACTION_RULES': action_rules},
             )
             ready = await message(proc.stdout, 55.)
             if ready.get('type') == 'ready':
-                ready['device'] = f'工作站 GPU {gpu}'
+                ready['device'] = f'工作站 GPU {index}'
                 ready['server_version'] = VERSION
             await encode(writer, ready)
             if ready.get('type') != 'ready':

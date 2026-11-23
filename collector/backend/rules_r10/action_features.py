@@ -1,6 +1,10 @@
+import hashlib
+from pathlib import Path
+
 import numpy as np
 
 from .activity_rules import smooth_valid, derivative, runs
+from .video_to_intervals import display_image, sha256_file
 
 
 def interpolate_short(t, values, valid, maximum):
@@ -173,6 +177,99 @@ def background_mask(shape, points, confidence, shrink):
         cv2.rectangle(mask, (max(0, lo[0]), max(0, lo[1])),
                       (min(width - 1, hi[0]), min(height - 1, hi[1])), 0, -1)
     return mask
+
+
+def mask_person_regions(shape, boxes, shrink):
+    import cv2
+    height, width = shape
+    mask = np.full(shape, 255, np.uint8)
+    for x0, y0, x1, y1 in boxes * shrink:
+        pad = max(12., .1 * max(x1 - x0, y1 - y0))
+        lo = np.maximum(0, np.floor([x0 - pad, y0 - pad])).astype(int)
+        hi = np.minimum([width - 1, height - 1], np.ceil([x1 + pad, y1 + pad])).astype(int)
+        cv2.rectangle(mask, tuple(lo), tuple(hi), 0, -1)
+    return mask
+
+
+def extract_camera(video, data, features, config, destination, *, frame_image=display_image, person_regions=None):
+    import av
+    import cv2
+    t = features['time_s']
+    k = np.asarray(data['keypoints'], float) if person_regions is None else None
+    stride = max(1, round(1 / (config['camera_hz'] * np.median(np.diff(t)))))
+    samples, matrices, valid, inliers, residual, indices = [], [], [], [], [], []
+    previous_gray = previous_mask = None
+    previous_index = None
+    first = None
+    source_count = 0
+    cv2.setRNGSeed(0)
+    with av.open(str(video)) as reader:
+        for index, frame in enumerate(reader.decode(video=0)):
+            source_count += 1
+            absolute = frame.pts * frame.time_base
+            first = absolute if first is None else first
+            if index >= len(t) or abs(float(absolute - first) - t[index]) > 1 / 90000:
+                raise ValueError('Source PTS differs from the pose cache during camera extraction.')
+            if index % stride != 0:
+                continue
+            image = frame_image(frame)
+            shrink = min(1., config['camera_width'] / image.shape[1])
+            image = cv2.resize(image, None, fx=shrink, fy=shrink, interpolation=cv2.INTER_AREA)
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            mask = (background_mask(gray.shape, k[index], .25, shrink) if person_regions is None
+                    else mask_person_regions(gray.shape, person_regions(index), shrink))
+            matrix = np.array([[1., 0., 0.], [0., 1., 0.]])
+            good, fraction, error = False, 0., float('nan')
+            if previous_gray is not None:
+                corners = cv2.goodFeaturesToTrack(previous_gray, maxCorners=350, qualityLevel=.01,
+                                                 minDistance=8, mask=previous_mask, blockSize=7)
+                if corners is not None and len(corners) >= 16:
+                    following, status, _ = cv2.calcOpticalFlowPyrLK(previous_gray, gray, corners, None,
+                                                                  winSize=(21, 21), maxLevel=3)
+                    if following is None or status is None:
+                        following = corners.copy()
+                        status = np.zeros((len(corners), 1), np.uint8)
+                    back, backward_status, _ = cv2.calcOpticalFlowPyrLK(gray, previous_gray, following, None,
+                                                                       winSize=(21, 21), maxLevel=3)
+                    if back is None or backward_status is None:
+                        back = corners.copy()
+                        backward_status = np.zeros_like(status)
+                    p, q = corners[:, 0], following[:, 0]
+                    ok = (status[:, 0] > 0) & (backward_status[:, 0] > 0)
+                    ok &= np.linalg.norm(back[:, 0] - p, axis=1) < 1.5
+                    inside = (q[:, 0] >= 0) & (q[:, 0] < gray.shape[1]) & (q[:, 1] >= 0) & (q[:, 1] < gray.shape[0])
+                    ok &= inside
+                    qint = np.clip(np.round(q).astype(int), [0, 0], [gray.shape[1] - 1, gray.shape[0] - 1])
+                    ok &= mask[qint[:, 1], qint[:, 0]] > 0
+                    if ok.sum() >= 16:
+                        fit, flags = cv2.estimateAffinePartial2D(p[ok], q[ok], method=cv2.RANSAC,
+                                                                ransacReprojThreshold=2., maxIters=1500,
+                                                                confidence=.99, refineIters=10)
+                        if fit is not None and flags is not None:
+                            selected = flags[:, 0] > 0
+                            fraction = float(selected.mean())
+                            scale = float(np.linalg.norm(fit[:, 0]))
+                            prediction = p[ok] @ fit[:, :2].T + fit[:, 2]
+                            if selected.any():
+                                error = float(np.median(np.linalg.norm(prediction[selected] - q[ok][selected], axis=1)))
+                            good = fraction >= config['camera_min_inliers'] and .8 <= scale <= 1.25 and selected.sum() >= 12
+                            if good:
+                                matrix = fit.copy()
+                                matrix[:, 2] /= shrink
+            samples.append(t[index])
+            matrices.append(matrix)
+            valid.append(good)
+            inliers.append(fraction)
+            residual.append(error)
+            indices.append(index)
+            previous_gray, previous_mask, previous_index = gray, mask, index
+    if source_count != len(t):
+        raise ValueError('Camera extraction source count differs from the pose cache.')
+    np.savez_compressed(destination, time_s=samples, matrices=matrices, valid=valid,
+                        inlier_fraction=inliers, residual_px=residual, source_indices=indices,
+                        source_sha256=sha256_file(video))
+    return dict(time_s=np.array(samples), matrices=np.array(matrices), valid=np.array(valid),
+                inlier_fraction=np.array(inliers), residual_px=np.array(residual), source_indices=np.array(indices))
 
 
 def camera_features(features, camera, config, width, height):

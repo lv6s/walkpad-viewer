@@ -694,11 +694,11 @@ class SlimCv2:
         return None
 
 
-def test_session_recovery_resets_r4_window_and_keeps_count():
-    from backend.vision_rules_r4 import R4Actions
+def test_session_recovery_resets_window_and_keeps_count():
+    from backend.vision_rules_r10 import R10Actions
 
     bank = SessionIdentity()
-    actions = R4Actions(SlimCv2, bank.ttl)
+    actions = R10Actions(SlimCv2, bank.ttl)
     pose = np.asarray(standing())
     now = 0.
     for _ in range(6):

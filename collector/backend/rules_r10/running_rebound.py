@@ -21,7 +21,7 @@ def sequence_candidates(t, stride, rebound, *, prominence=.104):
     return steps, bounce
 
 
-def detect(t, pose, valid, eligible, scale):
+def detect(t, pose, valid, eligible, scale, *, step_batches=None):
     t = np.asarray(t, float)
     labels = np.full(len(t), False)
     slow = np.full(len(t), False)
@@ -59,6 +59,8 @@ def detect(t, pose, valid, eligible, scale):
         spread = smooth(ax,.037)-smooth(ax,.25)
         rebound = (smooth(y,.037)-smooth(y,.25))/unit
         steps,bounces = sequence_candidates(grid,spread,rebound)
+        if step_batches is not None:
+            step_batches.append((grid, steps))
         chains, chain = [], []
         for i,direction in steps:
             other = bounces[abs(grid[bounces]-grid[i])<=.143]
