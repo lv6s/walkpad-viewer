@@ -1,11 +1,12 @@
 # Walkpad 工具集
 
-Walkpad 鞋垫与 IMU 的两套本地工具，数据全部留在本机，不上传。
+Walkpad 鞋垫与 IMU 的三个本地工具，数据全部留在本机，不上传。
 
 | 目录 | 应用 | 用途 | 入口 |
 | --- | --- | --- | --- |
 | [`viewer/`](viewer/README.md) | 数据查看器 | 打开已录制的 zip / parquet / 维特 TXT，看压力与 IMU 波形、活动分段、走跑步态报告 | 双击 `viewer/index.html`，不需要安装 |
-| [`collector/`](collector/README.md) | 数据采集工作台 | 电脑直连蓝牙采集鞋垫、独立 IMU、维特设备，含零偏补偿、速度估计、导出 | `python collector/launch_workbench.py` |
+| [`collector/`](collector/README.md) | 数据采集工作台 | 电脑直连蓝牙采集鞋垫、独立 IMU、维特设备，含零偏补偿、实时姿态角、导出 | `python collector/launch_workbench.py` |
+| [`imu-cop/`](imu-cop/README.md) | 压力中心估计 | 用双脚六轴 IMU 以 50 Hz 估计每只脚的压力中心 | 见目录内 README |
 
 ## 数据查看器 `viewer/`
 
@@ -37,7 +38,18 @@ python collector/launch_workbench.py --stop   # 关掉后台
 
 [`imu-cop/`](imu-cop/README.md) 用双脚六轴 IMU 以 50 Hz 估计每只脚的压力中心。单文件 `imu-cop.onnx` 包含双脚坐标和右脚承重门控，也可从 `imu-cop` 预发布下载。
 
-## 约定
+## 注意事项
 
 - 采集数据、导出的 parquet、`collector/runtime/` 与 `collector/records/` 不入库；解包的 APK（`apk_labpad/`）只在本地做协议参考，也不入库。
-- 两个应用的构建产物（`viewer/dist`、`collector/frontend/dist`）与模型权重（查看器的 JSON、采集器的 ONNX）都入库，克隆下来即可离线用。
+- 两个应用的构建产物（`viewer/dist`、`collector/frontend/dist`）与模型权重（查看器的 JSON、采集器的 ONNX）都入库，克隆下来即可离线用。**改了源码要在同一提交里重新构建**，否则克隆下来跑的还是旧代码：
+
+  ```bash
+  cd viewer && npm run build
+  cd collector/frontend && npm run build
+  ```
+
+- `viewer/dist/pose-runtime.js` 只在更换 MediaPipe wasm 或 `vendor/pose_landmarker_lite.task` 时内容变化，其余情况重建后字节相同。
+- 单个文件超过 10 MB（权重、onnx、视频样本）走 Release 附件或 Git LFS，并附 `MANIFEST.json` 记录文件名与 sha256。
+- 改动经分支 + PR 合入 `main`，不直接推；可部署的版本打 tag（`viewer-vX.Y.Z`、`collector-vX.Y.Z`）。
+- `collector/backend/rules_*/` 是采集器直接 import 的包，文件内用包内相对导入（如 `from .action_features import x`），目录名不随版本变。
+- 根目录的 `README.md`、`.gitignore`、`.gitattributes` 与三个目录并列，改动直接在本仓提交。
