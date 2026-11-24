@@ -1,6 +1,0 @@
-# Local previews and generated labels are not part of the package.
-/out/
-/outputs/
-*.mp4
-/tests/_scratch/
-/models/yolo26s-pose.pt
