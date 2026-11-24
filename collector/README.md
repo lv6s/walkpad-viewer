@@ -62,6 +62,11 @@ python launch_workbench.py --legacy # 旧版维特多设备页面
 
 同事可以在团队协作仓开分支修改 `backend/vision_*` 或 `backend/rules_r4/`。选择工作站时执行的是**工作站部署的代码**：分支部署到工作站独立测试服务后再验证，通过后用对应 Git 版本更新共用服务。只修改自己的采集电脑不会改变共享算法；连接成功后界面会显示工作站服务版本。
 
+## 离线录像标注
+
+- [v4.9.8-r13 gait-switch-fix](offline/v4.9.8-r13-gait-switch-fix/README.md)：独立的离线多人视频标注包，包含源码、参数、规则与测试；不会替换工作台或共享工作站的实时规则。
+- 24 MB 权重从 [官方 Release 附件](offline/v4.9.8-r13-gait-switch-fix/models/README.md) 下载，或从原交付包提取；用 [MANIFEST.json](offline/v4.9.8-r13-gait-switch-fix/MANIFEST.json) 校验 SHA-256。从版本目录运行命令时，请把 `--output` 指向仓库外的目录。
+
 ## 目录
 
 ```
